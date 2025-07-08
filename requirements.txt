@@ -1,0 +1,4 @@
+torch==2.7.1 --index-url https://download.pytorch.org/whl/cu118
+h5py==3.14.0
+pyyaml==6.0.2
+matplotlib==3.10.3
