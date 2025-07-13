@@ -1,13 +1,12 @@
 import copy
 import time
 import yaml
-import collections
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 
 from neurosim.habitat_wrapper import HabitatWrapper
-from neurosim.utils import init_h5, append_data_to_h5, AsyncVisualizer
+from neurosim.utils import init_h5, append_data_to_h5
 
 from rotorpy.vehicles.multirotor import Multirotor
 from rotorpy.vehicles.crazyflie_params import quad_params
@@ -21,6 +20,13 @@ from rotorpy.sensors.imu import Imu
 # Trajectories
 from rotorpy.trajectories.speed_traj import ConstantSpeed
 from rotorpy.trajectories.polynomial_traj import Polynomial
+
+
+# Visualization
+try:
+    import rerun as rr
+except ImportError:
+    rr = None
 
 
 class Simulator:
@@ -83,9 +89,6 @@ class Simulator:
         else:
             raise ValueError("Invalid trajectory type. Use 'constant_speed' or 'polynomial'.")
 
-        # Load Asynchronous Visualizer
-        self._viz = AsyncVisualizer()
-
         # Get bounds of the scene from the Habitat Sim
         self.scene_aabb = self._hwrapper._scene_aabb  # _magnum.Range3d
         self.scene_limits = np.vstack((self.scene_aabb.min, self.scene_aabb.max)).T[[0, 2, 1]]
@@ -146,29 +149,25 @@ class Simulator:
             h5f = init_h5(save_h5, self.height, self.width)
         if save_png or display:
             self.event_img = np.zeros((self.height, self.width, 3), dtype=np.uint8)  # Init event im
-            if self.has_imu_sensor:
-                self.imu_buffer_accel = collections.deque(
-                    maxlen=int(self.imu_sampling_rate * 5)
-                )  # 5 seconds buffer
         if save_png:
             save_png = Path(save_png)
             for subdir in ["events", "color", "depth"]:
                 (save_png / subdir).mkdir(parents=True, exist_ok=True)
         if display:
-            self._viz.start()
+            rr.init("neurosim_viz", spawn=True)
+            rr.set_time("stable_time", duration=self.time)
         #! End of essential initialization and checks ############################
 
         latencies = []
         while self.time < self.t_final:
-            for i in range(int(self.world_rate / self.control_rate)):
+            for _ in range(int(self.world_rate / self.control_rate)):
                 start_time = time.perf_counter()
 
                 self.simulate_step(control)
                 events = self._hwrapper.render_events(self.time * 1e6, to_numpy=True)  # in us
                 if self.has_imu_sensor and self.simsteps % self.imu_sensor_steps == 0:
-                    imu_data = self.imu.measurement(
-                        self.state, self._quadsim.statedot(self.state, control, 0), with_noise=False
-                    )
+                    statedot = self._quadsim.statedot(self.state, control, 0)
+                    imu_data = self.imu.measurement(self.state, statedot, with_noise=False)
                 if self.has_color_sensor and self.simsteps % self.color_sensor_steps == 0:
                     color_img = self._hwrapper.render_color_sensor().cpu().numpy()
                 if self.has_depth_sensor and self.simsteps % self.depth_sensor_steps == 0:
@@ -195,8 +194,6 @@ class Simulator:
 
         if save_h5:
             h5f.close()
-        if display:
-            self._viz.stop()
 
     def save_h5_sim_data(self, h5f, events, color_img, depth_img, imu_data):
         """
@@ -234,8 +231,6 @@ class Simulator:
         """
         if events is not None and len(events) > 0:
             self.event_img[events[1], events[0], events[3] * 2] = 255
-        if self.has_imu_sensor and self.simsteps % self.imu_sensor_steps == 0:
-            self.imu_buffer_accel.append(imu_data["accel"])
 
         if save_png:
             if self.simsteps % self.color_sensor_steps == 0:
@@ -246,51 +241,26 @@ class Simulator:
                 plt.imsave(save_png / "depth" / f"{self.simsteps}.png", depth_img, cmap="jet")
 
         if display:
+            rr.set_time("stable_time", duration=self.time)
             if self.simsteps % self.color_sensor_steps == 0:
-                self._viz.update_plot(
-                    "navigation",
-                    {
-                        "x": self.state["x"][0],
-                        "y": self.state["x"][1],
-                        "limits": self.scene_limits,
-                    },
-                    "navigation",
+                rr.log("events", rr.Image(self.event_img))
+                rr.log(
+                    "navigation/pose",
+                    rr.Transform3D(
+                        translation=self.state["x"],
+                        rotation=rr.Quaternion(xyzw=self.state["q"]),
+                        axis_length=5.0,
+                        relation=rr.TransformRelation.ParentFromChild,
+                    ),
                 )
-                self._viz.update_plot(
-                    "events",
-                    {
-                        "image": self.event_img.copy(),
-                        "title": f"Events at {self.time:.2f} s",
-                    },
-                    "image",
-                )
+                rr.log("navigation/trajectory", rr.Points3D(positions=self.state["x"][None, :]))
                 if color_img is not None:
-                    self._viz.update_plot(
-                        "color",
-                        {
-                            "image": color_img,
-                            "title": f"Color Sensor: {self._hwrapper.settings['color_sensor_rate']} Hz",
-                        },
-                        "image",
-                    )
-                if len(self.imu_buffer_accel) > 0:
-                    self._viz.update_plot(
-                        "imu",
-                        {
-                            "acceleration": np.vstack(self.imu_buffer_accel)[:, :2],
-                            "maxlen": self.imu_buffer_accel.maxlen,
-                        },  # (maxlen, 3)
-                        "imu",
-                    )
+                    rr.log("color", rr.Image(color_img))
+                if self.has_imu_sensor:
+                    rr.log("imu/acc", rr.Scalars(imu_data["accel"]))
+                    rr.log("imu/gyro", rr.Scalars(imu_data["gyro"]))
             if depth_img is not None and self.simsteps % self.depth_sensor_steps == 0:
-                self._viz.update_plot(
-                    "depth",
-                    {
-                        "image": depth_img,
-                        "title": f"Depth Sensor: {self._hwrapper.settings['depth_sensor_rate']} Hz",
-                    },
-                    "depth",
-                )
+                rr.log("depth", rr.DepthImage(depth_img))
 
         if self.simsteps % self.color_sensor_steps == 0:
             self.event_img.fill(0)  # Reset event image after displaying or saving.
