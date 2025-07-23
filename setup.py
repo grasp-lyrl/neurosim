@@ -65,13 +65,25 @@ class CustomInstallCommand(install):
                     "git",
                     "clone",
                     "--branch",
-                    "v0.3,3",
+                    "v0.3,3",  # Not a typo
                     "https://github.com/facebookresearch/habitat-sim.git",
                     habitat_dir,
                 ],
                 check=True,
             )
             print("   ✓ Repository cloned successfully")
+
+            ################ change numpy version in habitat-sim requirements.txt ################
+            requirements_file = os.path.join(habitat_dir, "requirements.txt")
+            with open(requirements_file, "r") as f:
+                requirements = [
+                    line if not line.startswith("numpy==") else "numpy>=1.26.4\n"
+                    for line in f.readlines()
+                ]
+            with open(requirements_file, "w") as f:
+                f.writelines(requirements)
+            print("   ✓ Updated numpy version in Habitat-Sim requirements.txt")
+            ######################################################################################
         else:
             print("   ✓ Habitat-Sim repository already exists")
 
