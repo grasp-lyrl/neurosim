@@ -88,10 +88,9 @@ class SimulatorNode(ZMQNODE):
         self._event_buffer = [
             np.empty((self.MAX_EVENT_BUFFER_SIZE,), dtype=np.uint16),
             np.empty((self.MAX_EVENT_BUFFER_SIZE,), dtype=np.uint16),
-            np.empty((self.MAX_EVENT_BUFFER_SIZE,), dtype=np.uint8),
             np.empty((self.MAX_EVENT_BUFFER_SIZE,), dtype=np.uint64),
+            np.empty((self.MAX_EVENT_BUFFER_SIZE,), dtype=np.uint8),
         ]
-        self._imu_data = None
         self._color_img = None
         self._depth_img = None
 
@@ -233,13 +232,16 @@ class SimulatorNode(ZMQNODE):
         if self._event_size == 0:
             return
 
-        sent_success = True
         _size = self._event_size
-        for _buf, _key in zip(self._event_buffer, ["x", "y", "p", "t"]):
-            sent_success &= self.send_array(self.socket_pub, _buf[:_size], topic=f"events/{_key}")
+        events_dict = {
+            "x": self._event_buffer[0][:_size],
+            "y": self._event_buffer[1][:_size],
+            "t": self._event_buffer[2][:_size],
+            "p": self._event_buffer[3][:_size],
+        }
 
-        if sent_success:
-            self._pub_sub_stats["sent_event_packets"] += 4
+        if self.send_dict_of_arrays(self.socket_pub, events_dict, topic="events"):
+            self._pub_sub_stats["sent_event_packets"] += 1
             self._event_size = 0
 
     async def print_stats(self):

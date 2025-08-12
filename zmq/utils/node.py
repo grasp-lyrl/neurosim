@@ -278,6 +278,112 @@ class ZMQNODE(ABC):
             print(f"Error recv_dict: {e}")
             return None, None
 
+    def send_dict_of_arrays(
+        self,
+        socket: zmq.Socket,
+        data: dict[str, np.ndarray],
+        topic: str,
+        copy: bool = True,
+        flags: int = zmq.NOBLOCK,
+    ) -> bool:
+        """
+        Send a dictionary of numpy arrays over ZMQ with a topic.
+
+        Args:
+            socket: ZMQ socket to send the data
+            data: Dictionary of numpy arrays to send
+            topic: Topic to publish the data under
+            copy: Whether to copy the data when sending
+            flags: ZMQ flags for sending
+
+        Returns:
+            bool: True if sent successfully, False if would block
+        """
+        try:
+            metadata = {}
+            array_parts = []
+
+            for key, array in data.items():
+                if not isinstance(array, np.ndarray):
+                    raise ValueError(f"Value for key '{key}' is not a numpy array")
+
+                metadata[key] = {
+                    "dtype": array.dtype.str,
+                    "shape": array.shape,
+                    "ndim": array.ndim,
+                    "nbytes": array.nbytes,
+                }
+                array_parts.append(array)
+
+            message_parts = [topic.encode("utf-8"), json.dumps(metadata).encode("utf-8")]
+            message_parts.extend(array_parts)
+
+            socket.send_multipart(
+                message_parts,
+                flags=flags,
+                copy=copy,
+            )
+            return True
+
+        except zmq.Again:
+            return False
+        except Exception as e:
+            print(f"Error in send_dict_of_arrays: {e}")
+            return False
+
+    async def recv_dict_of_arrays(
+        self,
+        socket: zmq.Socket,
+        copy: bool = False,
+    ) -> tuple[str, dict[str, np.ndarray]]:
+        """
+        Receive a dictionary of numpy arrays over ZMQ with a topic.
+
+        Args:
+            socket: ZMQ socket to receive the data
+            copy: Whether to copy the data when receiving
+
+        Returns:
+            tuple: (topic, dict_of_arrays) if received successfully, (None, None) if would block
+        """
+        try:
+            messages = await socket.recv_multipart(copy=copy)
+
+            if len(messages) < 2:
+                print(f"Warning: Expected at least 2 parts, got {len(messages)}")
+                return None, None
+
+            topic_msg = messages[0]
+            metadata_msg = messages[1]
+            array_messages = messages[2:]
+
+            if not copy:
+                topic_msg = topic_msg.buffer.tobytes()
+                metadata_msg = metadata_msg.buffer.tobytes()
+
+            topic = topic_msg.decode("utf-8")
+            metadata = json.loads(metadata_msg.decode("utf-8"))
+
+            result_dict = {}
+            for array_idx, (key, array_meta) in enumerate(metadata.items()):
+                array_msg = array_messages[array_idx]
+                if not copy:
+                    array_msg = array_msg.buffer
+
+                dtype = np.dtype(array_meta["dtype"])
+                shape = tuple(array_meta["shape"])
+
+                array = np.frombuffer(array_msg, dtype=dtype).reshape(shape)
+                result_dict[key] = array
+
+            return topic, result_dict
+
+        except zmq.Again:
+            return None, None
+        except Exception as e:
+            print(f"Error in recv_dict_of_arrays: {e}")
+            return None, None
+
     async def run(self):
         """Run the ZMQ node."""
         self._running = True

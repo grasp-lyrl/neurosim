@@ -2,6 +2,7 @@ import zmq
 import asyncio
 import rerun as rr
 import numpy as np
+from collections import defaultdict
 
 from utils import ZMQNODE
 
@@ -24,11 +25,39 @@ class RRViz(ZMQNODE):
         """
         Initialize the ZMQ sockets for the visualizer.
         """
-        self.socket_state = self.create_socket(
+        self.socket_sub_state = self.create_socket(
             zmq.SUB,
             f"ipc://{self.ipc_sub_path}",
             setsockopt={
                 zmq.SUBSCRIBE: b"state",
+            },
+        )
+        self.socket_sub_events = self.create_socket(
+            zmq.SUB,
+            f"ipc://{self.ipc_sub_path}",
+            setsockopt={
+                zmq.SUBSCRIBE: b"events",
+            },
+        )
+        self.socket_sub_color = self.create_socket(
+            zmq.SUB,
+            f"ipc://{self.ipc_sub_path}",
+            setsockopt={
+                zmq.SUBSCRIBE: b"color",
+            },
+        )
+        self.socket_sub_depth = self.create_socket(
+            zmq.SUB,
+            f"ipc://{self.ipc_sub_path}",
+            setsockopt={
+                zmq.SUBSCRIBE: b"depth",
+            },
+        )
+        self.socket_sub_imu = self.create_socket(
+            zmq.SUB,
+            f"ipc://{self.ipc_sub_path}",
+            setsockopt={
+                zmq.SUBSCRIBE: b"imu",
             },
         )
 
@@ -38,10 +67,12 @@ class RRViz(ZMQNODE):
         """
         # Subscribers
         self.create_async_executor(self.receive_state)
+        self.create_async_executor(self.receive_events)
+        self.create_async_executor(self.receive_color)
+        self.create_async_executor(self.receive_depth)
+        self.create_async_executor(self.receive_imu)
 
-        self._pub_sub_stats = {
-            "received_states": 0,
-        }
+        self._pub_sub_stats = defaultdict(int)
 
     def _init_rr(self):
         """
@@ -54,9 +85,7 @@ class RRViz(ZMQNODE):
         """
         Callback for the state subscriber.
         """
-        _, msg = await self.recv_dict(self.socket_state, copy=True)
-
-        print(f"Received state: {msg}")
+        _, msg = await self.recv_dict(self.socket_sub_state, copy=True)
 
         state = {
             "x": np.array(msg["x"]),
@@ -79,6 +108,51 @@ class RRViz(ZMQNODE):
             ),
         )
         rr.log("navigation/trajectory", rr.Points3D(positions=state["x"][None, :]))
+
+    async def receive_events(self):
+        """
+        Callback for the events subscriber.
+        """
+        _, events = await self.recv_dict_of_arrays(self.socket_sub_events, copy=True)
+
+        if events is not None:
+            self._pub_sub_stats["received_event_packets"] += 1
+            if not hasattr(self, "event_img"):
+                self.event_img = np.zeros(
+                    (480, 640, 3), dtype=np.uint8
+                )  #! replace with actual dimensions
+            self.event_img[events["y"], events["x"], events["p"] * 2] = 255
+            rr.log("events", rr.Image(self.event_img))
+            self.event_img.fill(0)
+
+    async def receive_color(self):
+        """
+        Callback for receiving color data.
+        """
+        _, color_img = await self.recv_array(self.socket_sub_color)
+        if color_img is not None:
+            self._pub_sub_stats["received_color_images"] += 1
+            rr.log("color", rr.Image(color_img))
+
+    async def receive_depth(self):
+        """
+        Callback for receiving depth data.
+        """
+        _, depth_img = await self.recv_array(self.socket_sub_depth)
+        if depth_img is not None:
+            self._pub_sub_stats["received_depth_images"] += 1
+            rr.log("depth", rr.DepthImage(depth_img))
+
+    async def receive_imu(self):
+        """
+        Receive IMU data and log it using Rerun.
+        """
+        _, imu_data = await self.recv_dict(self.socket_sub_imu, copy=True)
+        if imu_data is not None:
+            self._pub_sub_stats["received_imu_data"] += 1
+            rr.set_time("stable_time", duration=imu_data["timestamp"])
+            rr.log("imu/accel", rr.Scalars(imu_data["accel"]))
+            rr.log("imu/gyro", rr.Scalars(imu_data["gyro"]))
 
 
 async def main():

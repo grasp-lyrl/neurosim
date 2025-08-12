@@ -4,6 +4,7 @@ import yaml
 import asyncio
 import numpy as np
 from pathlib import Path
+from collections import defaultdict
 
 from utils import ZMQNODE
 
@@ -104,11 +105,7 @@ class ControllerNode(ZMQNODE):
         self.create_async_executor(self.receive_state)
         self.create_async_executor(self.receive_events)
 
-        self._pub_sub_stats = {
-            "sent_controls": 0,
-            "received_states": 0,
-            "received_event_packets": 0,
-        }
+        self._pub_sub_stats = defaultdict(int)
 
     async def publish_control(
         self,
@@ -150,14 +147,19 @@ class ControllerNode(ZMQNODE):
             Tuple of (array, message_counter, zmq_message) or None
             Note: Keep zmq_message alive as long as you need the array!
         """
-        topic, array = await self.recv_array(self.socket_sub_events)
+        topic, arrays_dict = await self.recv_dict_of_arrays(self.socket_sub_events)
 
-        if topic is not None and array is not None:
+        if arrays_dict is not None:
+            x = arrays_dict["x"]
+            y = arrays_dict["y"]
+            p = arrays_dict["p"]
+            t = arrays_dict["t"]
+
             self._pub_sub_stats["received_event_packets"] += 1
 
             # process here or later
 
-            return topic, array
+            return topic, arrays_dict
 
     async def print_stats(self):
         """
