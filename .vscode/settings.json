@@ -1,5 +1,9 @@
 {
     "python.analysis.extraPaths": [
         "./deps/rotorpy"
-    ]
+    ],
+    "C_Cpp.default.compilerPath": "/usr/bin/g++-11",
+    "files.associations": {
+        "valarray": "cpp"
+    }
 }

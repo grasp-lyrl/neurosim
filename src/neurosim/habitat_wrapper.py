@@ -9,7 +9,16 @@ from typing import Any, Dict, Tuple
 import habitat_sim as hsim
 from habitat_sim.bindings import built_with_bullet
 
-from neurosim.utils import color2intensity, EventSimulatorTorch
+from neurosim.utils import color2intensity
+
+try:
+    from neurosim.utils import EventSimulatorCUDA as EventSimulator
+except ImportError:
+    from neurosim.utils import EventSimulatorTorch as EventSimulator
+
+    print(
+        "Warning: CUDA event simulator not available, using Torch version. Might be slower. Install CUDA version for better performance."
+    )
 
 
 BLACK = mn.Color4.from_linear_rgb_int(0)
@@ -104,7 +113,9 @@ class HabitatWrapper:
         return agent_state
 
     @staticmethod
-    def make_cfg(settings: Dict[str, Any]) -> Tuple[hsim.Configuration, EventSimulatorTorch]:
+    def make_cfg(
+        settings: Dict[str, Any],
+    ) -> Tuple[hsim.Configuration, EventSimulator]:
         r"""Isolates the boilerplate code to create a habitat_sim.Configuration from a settings dictionary.
         :param settings: A dict with pre-defined keys, each a basic simulator initialization parameter.
         Allows configuration of dataset and scene, visual sensor parameters, and basic agent parameters.
@@ -175,7 +186,7 @@ class HabitatWrapper:
 
         _event_simulator = None
         if settings["event_camera"]:
-            _event_simulator = EventSimulatorTorch(settings["width"], settings["height"], 0)
+            _event_simulator = EventSimulator(settings["width"], settings["height"], 0)
 
         # create agent specifications
         agent_cfg = hsim.agent.AgentConfiguration()

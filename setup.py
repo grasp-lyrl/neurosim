@@ -29,6 +29,7 @@ class CustomInstallCommand(install):
         self.install_habitat_sim()
         self.install_rotorpy()
         self.install_pip_requirements()
+        self.install_cu_evsim()
 
         print("✓ Neurosim installation completed!")
 
@@ -48,6 +49,22 @@ class CustomInstallCommand(install):
                 raise
         else:
             print("   ⚠️  No requirements.txt found in current directory, skipping...\n")
+
+    def install_cu_evsim(self):
+        """Install cu_evsim."""
+        print("🚀 Installing cu_evsim, for CUDA event simulator support...")
+        cu_evsim_dir = os.path.join(os.getcwd(), "src", "neurosim", "utils", "cu_evsim")
+        if os.path.exists(cu_evsim_dir):
+            try:
+                print("   - Installing cu_evsim...")
+                subprocess.run([sys.executable, "-m", "pip", "install", cu_evsim_dir, "-v"], check=True)
+                print("   ✓ cu_evsim installation completed successfully!\n")
+            except subprocess.CalledProcessError as e:
+                print(f"   ❌ Error installing cu_evsim: {e}")
+                raise
+        else:
+            print("   ⚠️  cu_evsim directory not found at src/neurosim/utils/cu_evsim")
+            print("   Please ensure the cu_evsim directory exists\n")
 
     def install_habitat_sim(self):
         """Install Habitat-Sim with required configuration."""
