@@ -13,15 +13,16 @@ sudo apt-get install -y --no-install-recommends \
 
 ### Install Neurosim
 ```
-conda create -n neurosim python=3.10 cmake=3.14.0 -y
+conda create -n neurosim python=3.10 cmake=3.14.0 pip==25.1.1 -y
 conda activate neurosim
 pip install -e . -v
 ```
 
-Tested on `Ubuntu 22.04: gcc 11.4.0, cmake 3.14.0, nvcc 12.6 | 12.4 | 12.2`
+Tested on `Ubuntu 22.04: gcc 11.4.0, cmake 3.14.0, nvcc 12.9 | 12.6 | 12.4 | 12.2`
 
 ### Compilation issues
 - If compilation of habitat-sim crashes due to high memory consumption or cpu load, manually set `self.parallel=4` inside `setup.py`.
+- `pip==25.3` breaks the installation due to changes in the build isolation process. Use `pip==25.1.1` for now.
 
 
 ## Usage Example
