@@ -30,27 +30,40 @@ class ZMQROS2Bridge : public rclcpp::Node {
     ~ZMQROS2Bridge();
 
   private:
-    void zmq_thread_func();
-    bool decode_numpy_array(const std::vector<zmq::message_t> &messages,
-                            std::string &topic, NumpyArrayMetadata &metadata,
-                            const uint8_t *&array_data);
+    void declare_parameters();
+    zmq::socket_t create_zmq_subscriber(const std::string &address,
+                                        const std::string &topic);
+    void imu_sub_pub();
+    void color_sub_pub();
     bool decode_imu_json(const std::vector<zmq::message_t> &messages,
-                         std::string &topic, nlohmann::json &imu_json);
+                         nlohmann::json &imu_json);
+    bool decode_numpy_array(const std::vector<zmq::message_t> &messages,
+                            NumpyArrayMetadata &metadata,
+                            const uint8_t *&array_data);
+    void publish_imu(const nlohmann::json &imu_json);
     void publish_image(const NumpyArrayMetadata &metadata,
                        const uint8_t *array_data);
-    void publish_imu(const nlohmann::json &imu_json);
 
     // ROS2 publishers
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr color_pub_;
 
-    // ZMQ thread
-    std::thread zmq_thread_;
+    // ZMQ context (shared across all threads)
+    zmq::context_t zmq_context_;
+
+    // ZMQ threads
+    std::vector<std::thread> zmq_threads_;
     std::atomic<bool> running_;
 
     // Parameters
-    std::string zmq_address_;
-    std::string zmq_topic_;
+    bool imu_enable_;
+    std::string imu_zmq_address_;
+    std::string imu_zmq_topic_;
+    std::string imu_ros2_topic_;
+    bool color_enable_;
+    std::string color_zmq_address_;
+    std::string color_zmq_topic_;
+    std::string color_ros2_topic_;
 };
 
 } // namespace zmq_ros2_bridge

@@ -2,47 +2,110 @@
 
 namespace zmq_ros2_bridge {
 
-ZMQROS2Bridge::ZMQROS2Bridge() : Node("zmq_ros2_bridge"), running_(true) {
-    // Declare and get parameters
-    this->declare_parameter("zmq_address", "tcp://localhost:5555");
-    this->declare_parameter("zmq_topic", "color");
+void ZMQROS2Bridge::declare_parameters() {
+    // Enable/disable flags
+    this->declare_parameter("enable_imu", false);
+    this->declare_parameter("enable_color", false);
 
-    zmq_address_ = this->get_parameter("zmq_address").as_string();
-    zmq_topic_ = this->get_parameter("zmq_topic").as_string();
+    // Parameters for IMU
+    this->declare_parameter("imu_zmq_address", "ipc:///tmp/0");
+    this->declare_parameter("imu_zmq_topic", "imu");
+    this->declare_parameter("imu_ros2_topic", "imu");
 
-    RCLCPP_INFO(this->get_logger(), "ZMQ Address: %s", zmq_address_.c_str());
-    RCLCPP_INFO(this->get_logger(), "ZMQ Topic: %s", zmq_topic_.c_str());
+    // Parameters for Color
+    this->declare_parameter("color_zmq_address", "ipc:///tmp/0");
+    this->declare_parameter("color_zmq_topic", "color");
+    this->declare_parameter("color_ros2_topic", "image");
+}
 
-    // Create ROS2 publishers
-    image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("image", 10);
-    imu_pub_ = this->create_publisher<sensor_msgs::msg::Imu>("imu", 10);
+ZMQROS2Bridge::ZMQROS2Bridge()
+    : Node("zmq_ros2_bridge"), zmq_context_(1), running_(true) {
+    declare_parameters();
 
-    // Start ZMQ subscriber thread
-    zmq_thread_ = std::thread(&ZMQROS2Bridge::zmq_thread_func, this);
+    imu_enable_ = this->get_parameter("enable_imu").as_bool();
+    color_enable_ = this->get_parameter("enable_color").as_bool();
+
+    // Configure IMU subscriber and publisher
+    if (imu_enable_) {
+        imu_zmq_address_ = this->get_parameter("imu_zmq_address").as_string();
+        imu_zmq_topic_ = this->get_parameter("imu_zmq_topic").as_string();
+        imu_ros2_topic_ = this->get_parameter("imu_ros2_topic").as_string();
+
+        imu_pub_ =
+            this->create_publisher<sensor_msgs::msg::Imu>(imu_ros2_topic_, 10);
+        zmq_threads_.emplace_back(&ZMQROS2Bridge::imu_sub_pub, this);
+        RCLCPP_INFO(this->get_logger(), "IMU: ZMQ[%s:%s] -> ROS2[%s]",
+                    imu_zmq_address_.c_str(), imu_zmq_topic_.c_str(),
+                    imu_ros2_topic_.c_str());
+    }
+
+    // Configure Color subscriber and publisher
+    if (color_enable_) {
+        color_zmq_address_ =
+            this->get_parameter("color_zmq_address").as_string();
+        color_zmq_topic_ = this->get_parameter("color_zmq_topic").as_string();
+        color_ros2_topic_ = this->get_parameter("color_ros2_topic").as_string();
+
+        color_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+            color_ros2_topic_, 10);
+        zmq_threads_.emplace_back(&ZMQROS2Bridge::color_sub_pub, this);
+        RCLCPP_INFO(this->get_logger(), "Color: ZMQ[%s:%s] -> ROS2[%s]",
+                    color_zmq_address_.c_str(), color_zmq_topic_.c_str(),
+                    color_ros2_topic_.c_str());
+    }
 
     RCLCPP_INFO(this->get_logger(), "ZMQ to ROS2 bridge started");
 }
 
 ZMQROS2Bridge::~ZMQROS2Bridge() {
     running_ = false;
-    if (zmq_thread_.joinable()) {
-        zmq_thread_.join();
+    for (auto &thread : zmq_threads_) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+}
+
+zmq::socket_t ZMQROS2Bridge::create_zmq_subscriber(const std::string &address,
+                                                   const std::string &topic) {
+    zmq::socket_t subscriber(zmq_context_, zmq::socket_type::sub);
+    subscriber.connect(address);
+    subscriber.set(zmq::sockopt::subscribe, topic);
+    return subscriber;
+}
+
+bool ZMQROS2Bridge::decode_imu_json(const std::vector<zmq::message_t> &messages,
+                                    nlohmann::json &imu_json) {
+    if (messages.size() < 2) {
+        RCLCPP_ERROR(this->get_logger(),
+                     "Expected at least 2 parts for IMU, got %zu",
+                     messages.size());
+        return false;
+    }
+
+    // Extract JSON data from second part
+    std::string json_str(static_cast<const char *>(messages[1].data()),
+                         messages[1].size());
+
+    try {
+        imu_json = nlohmann::json::parse(json_str);
+        return true;
+    } catch (const nlohmann::json::exception &e) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to parse IMU JSON: %s",
+                     e.what());
+        return false;
     }
 }
 
 bool ZMQROS2Bridge::decode_numpy_array(
-    const std::vector<zmq::message_t> &messages, std::string &topic,
-    NumpyArrayMetadata &metadata, const uint8_t *&array_data) {
+    const std::vector<zmq::message_t> &messages, NumpyArrayMetadata &metadata,
+    const uint8_t *&array_data) {
 
     if (messages.size() != 5) {
         RCLCPP_ERROR(this->get_logger(), "Expected 5 parts, got %zu",
                      messages.size());
         return false;
     }
-
-    // Extract topic
-    topic = std::string(static_cast<const char *>(messages[0].data()),
-                        messages[0].size());
 
     // Extract header (4 uint32_t values in network byte order)
     if (messages[1].size() != 16) {
@@ -74,35 +137,9 @@ bool ZMQROS2Bridge::decode_numpy_array(
     return true;
 }
 
-bool ZMQROS2Bridge::decode_imu_json(const std::vector<zmq::message_t> &messages,
-                                    std::string &topic,
-                                    nlohmann::json &imu_json) {
-    if (messages.size() < 2) {
-        RCLCPP_ERROR(this->get_logger(),
-                     "Expected at least 2 parts for IMU, got %zu",
-                     messages.size());
-        return false;
-    }
-
-    // Extract topic
-    topic = std::string(static_cast<const char *>(messages[0].data()),
-                        messages[0].size());
-
-    // Extract JSON data from second part
-    std::string json_str(static_cast<const char *>(messages[1].data()),
-                         messages[1].size());
-
-    try {
-        imu_json = nlohmann::json::parse(json_str);
-        return true;
-    } catch (const nlohmann::json::exception &e) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to parse IMU JSON: %s",
-                     e.what());
-        return false;
-    }
-}
-
 void ZMQROS2Bridge::publish_imu(const nlohmann::json &imu_json) {
+    if (!imu_pub_)
+        return;
 
     auto msg = sensor_msgs::msg::Imu();
 
@@ -116,7 +153,7 @@ void ZMQROS2Bridge::publish_imu(const nlohmann::json &imu_json) {
             msg.header.stamp = this->now();
         }
 
-        msg.header.frame_id = zmq_topic_;
+        msg.header.frame_id = imu_zmq_topic_;
 
         // Extract angular velocity
         if (imu_json.contains("gyro")) {
@@ -146,36 +183,54 @@ void ZMQROS2Bridge::publish_imu(const nlohmann::json &imu_json) {
 
 void ZMQROS2Bridge::publish_image(const NumpyArrayMetadata &metadata,
                                   const uint8_t *array_data) {
+    if (!color_pub_)
+        return;
+
     auto msg = sensor_msgs::msg::Image();
 
     // Set timestamp
     msg.header.stamp = this->now();
-    msg.header.frame_id = zmq_topic_;
+    msg.header.frame_id = color_zmq_topic_;
 
     // Set image dimensions (assuming HxWxC format from numpy)
     if (metadata.shape.size() == 3) {
         msg.height = metadata.shape[0];
         msg.width = metadata.shape[1];
         uint32_t channels = metadata.shape[2];
+        uint32_t dtype_size = 0;
 
         // Set encoding based on dtype and channels
         if (metadata.dtype == "uint8" || metadata.dtype == "|u1") {
-            if (channels == 3) {
+            dtype_size = 1;
+            switch (channels) {
+            case 3:
                 msg.encoding = "rgb8";
-            } else if (channels == 1) {
+                break;
+            case 1:
                 msg.encoding = "mono8";
-            } else if (channels == 4) {
+                break;
+            case 4:
                 msg.encoding = "rgba8";
+                break;
+            default:
+                RCLCPP_ERROR(this->get_logger(),
+                             "Unsupported number of channels: %u", channels);
+                return;
             }
+        } else {
+            RCLCPP_ERROR(this->get_logger(), "Unsupported dtype: %s",
+                         metadata.dtype.c_str());
+            return;
         }
 
         msg.is_bigendian = false;
-        msg.step = msg.width * channels;
+        msg.step = msg.width * channels * dtype_size;
+        auto nbytes = msg.height * msg.step;
 
         // Copy image data
-        msg.data.assign(array_data, array_data + metadata.nbytes);
+        msg.data.assign(array_data, array_data + nbytes);
 
-        image_pub_->publish(msg);
+        color_pub_->publish(msg);
 
         RCLCPP_DEBUG(this->get_logger(), "Published image %ux%u, %u channels",
                      msg.height, msg.width, channels);
@@ -185,21 +240,20 @@ void ZMQROS2Bridge::publish_image(const NumpyArrayMetadata &metadata,
     }
 }
 
-void ZMQROS2Bridge::zmq_thread_func() {
+void ZMQROS2Bridge::imu_sub_pub() {
+    if (!imu_enable_)
+        return;
+
     try {
-        // Create ZMQ context and subscriber socket
-        zmq::context_t context(1);
-        zmq::socket_t subscriber(context, zmq::socket_type::sub);
+        auto subscriber =
+            create_zmq_subscriber(imu_zmq_address_, imu_zmq_topic_);
 
-        subscriber.connect(zmq_address_);
-        subscriber.set(zmq::sockopt::subscribe, zmq_topic_);
-
-        RCLCPP_INFO(this->get_logger(), "Connected to ZMQ publisher");
+        RCLCPP_INFO(this->get_logger(), "IMU ZMQ thread connected");
 
         while (running_ && rclcpp::ok()) {
             std::vector<zmq::message_t> messages;
 
-            subscriber.set(zmq::sockopt::rcvtimeo, 1000); // 1 second timeout
+            subscriber.set(zmq::sockopt::rcvtimeo, 1000);
             auto result =
                 zmq::recv_multipart(subscriber, std::back_inserter(messages));
 
@@ -207,33 +261,48 @@ void ZMQROS2Bridge::zmq_thread_func() {
                 continue;
             }
 
-            std::string topic;
+            nlohmann::json imu_json;
 
-            // Check if this is a numpy array (5 parts) or JSON (2+ parts)
-            if (messages.size() == 5) {
-                // Decode as numpy array (color image)
-                NumpyArrayMetadata metadata;
-                const uint8_t *array_data;
-
-                if (decode_numpy_array(messages, topic, metadata, array_data)) {
-                    if (topic == "color") {
-                        publish_image(metadata, array_data);
-                    }
-                }
-            } else {
-                // Decode as JSON (IMU)
-                nlohmann::json imu_json;
-
-                if (decode_imu_json(messages, topic, imu_json)) {
-                    if (topic == "imu") {
-                        publish_imu(imu_json);
-                    }
-                }
-            }
+            if (decode_imu_json(messages, imu_json))
+                publish_imu(imu_json);
         }
 
     } catch (const std::exception &e) {
-        RCLCPP_ERROR(this->get_logger(), "ZMQ thread error: %s", e.what());
+        RCLCPP_ERROR(this->get_logger(), "IMU ZMQ thread error: %s", e.what());
+    }
+}
+
+void ZMQROS2Bridge::color_sub_pub() {
+    if (!color_enable_)
+        return;
+
+    try {
+        auto subscriber =
+            create_zmq_subscriber(color_zmq_address_, color_zmq_topic_);
+
+        RCLCPP_INFO(this->get_logger(), "Color ZMQ thread connected");
+
+        while (running_ && rclcpp::ok()) {
+            std::vector<zmq::message_t> messages;
+
+            subscriber.set(zmq::sockopt::rcvtimeo, 1000);
+            auto result =
+                zmq::recv_multipart(subscriber, std::back_inserter(messages));
+
+            if (!result || messages.empty()) {
+                continue;
+            }
+
+            NumpyArrayMetadata metadata;
+            const uint8_t *array_data;
+
+            if (decode_numpy_array(messages, metadata, array_data))
+                publish_image(metadata, array_data);
+        }
+
+    } catch (const std::exception &e) {
+        RCLCPP_ERROR(this->get_logger(), "Color ZMQ thread error: %s",
+                     e.what());
     }
 }
 
