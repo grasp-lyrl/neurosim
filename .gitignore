@@ -19,3 +19,5 @@ install/
 log/
 models/
 habitat-sim/
+
+.clang-format
