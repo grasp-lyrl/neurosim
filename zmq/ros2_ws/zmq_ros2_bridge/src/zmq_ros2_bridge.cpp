@@ -97,9 +97,8 @@ bool ZMQROS2Bridge::decode_imu_json(const std::vector<zmq::message_t> &messages,
     }
 }
 
-bool ZMQROS2Bridge::decode_numpy_array(
-    const std::vector<zmq::message_t> &messages, NumpyArrayMetadata &metadata,
-    const uint8_t *&array_data) {
+bool ZMQROS2Bridge::decode_numpy_array(const std::vector<zmq::message_t> &messages,
+                                       NumpyArray &numpy_array) {
 
     if (messages.size() != 5) {
         RCLCPP_ERROR(this->get_logger(), "Expected 5 parts, got %zu",
@@ -114,25 +113,25 @@ bool ZMQROS2Bridge::decode_numpy_array(
     }
 
     const uint32_t *header = static_cast<const uint32_t *>(messages[1].data());
-    metadata.ndim = ntohl(header[0]);
-    metadata.dtype_len = ntohl(header[1]);
-    metadata.shape_len = ntohl(header[2]);
-    metadata.nbytes = ntohl(header[3]);
+    numpy_array.ndim = ntohl(header[0]);
+    numpy_array.dtype_len = ntohl(header[1]);
+    numpy_array.shape_len = ntohl(header[2]);
+    numpy_array.nbytes = ntohl(header[3]);
 
-    // Extract dtype
-    metadata.dtype = std::string(static_cast<const char *>(messages[2].data()),
-                                 messages[2].size());
+    // Extract dtype - assign directly without intermediate construction
+    numpy_array.dtype.assign(static_cast<const char *>(messages[2].data()),
+                             messages[2].size());
 
-    // Extract shape
+    // Extract shape - reserve capacity to avoid reallocation
+    numpy_array.shape.resize(numpy_array.ndim);
     const uint32_t *shape_data =
         static_cast<const uint32_t *>(messages[3].data());
-    metadata.shape.clear();
-    for (uint32_t i = 0; i < metadata.ndim; ++i) {
-        metadata.shape.push_back(ntohl(shape_data[i]));
+    for (uint32_t i = 0; i < numpy_array.ndim; ++i) {
+        numpy_array.shape[i] = ntohl(shape_data[i]);
     }
 
     // Get pointer to array data
-    array_data = static_cast<const uint8_t *>(messages[4].data());
+    numpy_array.data = static_cast<const uint8_t *>(messages[4].data());
 
     return true;
 }
@@ -181,8 +180,7 @@ void ZMQROS2Bridge::publish_imu(const nlohmann::json &imu_json) {
     }
 }
 
-void ZMQROS2Bridge::publish_image(const NumpyArrayMetadata &metadata,
-                                  const uint8_t *array_data) {
+void ZMQROS2Bridge::publish_image(const NumpyArray &numpy_array) {
     if (!color_pub_)
         return;
 
@@ -193,14 +191,14 @@ void ZMQROS2Bridge::publish_image(const NumpyArrayMetadata &metadata,
     msg.header.frame_id = color_zmq_topic_;
 
     // Set image dimensions (assuming HxWxC format from numpy)
-    if (metadata.shape.size() == 3) {
-        msg.height = metadata.shape[0];
-        msg.width = metadata.shape[1];
-        uint32_t channels = metadata.shape[2];
+    if (numpy_array.shape.size() == 3) {
+        msg.height = numpy_array.shape[0];
+        msg.width = numpy_array.shape[1];
+        uint32_t channels = numpy_array.shape[2];
         uint32_t dtype_size = 0;
 
         // Set encoding based on dtype and channels
-        if (metadata.dtype == "uint8" || metadata.dtype == "|u1") {
+        if (numpy_array.dtype == "uint8" || numpy_array.dtype == "|u1") {
             dtype_size = 1;
             switch (channels) {
             case 3:
@@ -219,7 +217,7 @@ void ZMQROS2Bridge::publish_image(const NumpyArrayMetadata &metadata,
             }
         } else {
             RCLCPP_ERROR(this->get_logger(), "Unsupported dtype: %s",
-                         metadata.dtype.c_str());
+                         numpy_array.dtype.c_str());
             return;
         }
 
@@ -228,7 +226,7 @@ void ZMQROS2Bridge::publish_image(const NumpyArrayMetadata &metadata,
         auto nbytes = msg.height * msg.step;
 
         // Copy image data
-        msg.data.assign(array_data, array_data + nbytes);
+        msg.data.assign(numpy_array.data, numpy_array.data + nbytes);
 
         color_pub_->publish(msg);
 
@@ -236,7 +234,7 @@ void ZMQROS2Bridge::publish_image(const NumpyArrayMetadata &metadata,
                      msg.height, msg.width, channels);
     } else {
         RCLCPP_WARN(this->get_logger(), "Unexpected shape dimensions: %zu",
-                    metadata.shape.size());
+                    numpy_array.shape.size());
     }
 }
 
@@ -293,11 +291,10 @@ void ZMQROS2Bridge::color_sub_pub() {
                 continue;
             }
 
-            NumpyArrayMetadata metadata;
-            const uint8_t *array_data;
+            NumpyArray numpy_array;
 
-            if (decode_numpy_array(messages, metadata, array_data))
-                publish_image(metadata, array_data);
+            if (decode_numpy_array(messages, numpy_array))
+                publish_image(numpy_array);
         }
 
     } catch (const std::exception &e) {

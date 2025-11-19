@@ -15,13 +15,14 @@
 
 namespace zmq_ros2_bridge {
 
-struct NumpyArrayMetadata {
+struct NumpyArray {
     uint32_t ndim;
     uint32_t dtype_len;
     uint32_t shape_len;
     uint32_t nbytes;
     std::string dtype;
     std::vector<uint32_t> shape;
+    const uint8_t *data; // Pointer to the raw data buffer, not owned
 };
 
 class ZMQROS2Bridge : public rclcpp::Node {
@@ -38,11 +39,9 @@ class ZMQROS2Bridge : public rclcpp::Node {
     bool decode_imu_json(const std::vector<zmq::message_t> &messages,
                          nlohmann::json &imu_json);
     bool decode_numpy_array(const std::vector<zmq::message_t> &messages,
-                            NumpyArrayMetadata &metadata,
-                            const uint8_t *&array_data);
+                            NumpyArray &numpy_array);
     void publish_imu(const nlohmann::json &imu_json);
-    void publish_image(const NumpyArrayMetadata &metadata,
-                       const uint8_t *array_data);
+    void publish_image(const NumpyArray &numpy_array);
 
     // ROS2 publishers
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
