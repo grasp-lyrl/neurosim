@@ -106,6 +106,39 @@ class ZMQNODE(ABC):
         # Sending Numpy Arrays support
         self.header_struct = struct.Struct(kwargs.get("header_format", "!IIII"))
 
+        # Pre-compiled struct formats for common array dimensions.
+        # Only support up to 6D arrays for efficiency.
+        self._ndim_struct = struct.Struct("!B")  # 8-bit unsigned int (0-255)
+        self._shape_structs = {
+            1: struct.Struct("!I"),
+            2: struct.Struct("!II"),
+            3: struct.Struct("!III"),
+            4: struct.Struct("!IIII"),
+            5: struct.Struct("!IIIII"),
+            6: struct.Struct("!IIIIII"),
+        }
+
+        # Cache for dtype strings to avoid repeated encoding
+        self._dtype_cache = {}
+        for dtype in [
+            np.float64,
+            np.float32,
+            np.float16,
+            np.int64,
+            np.int32,
+            np.int16,
+            np.int8,
+            np.uint64,
+            np.uint32,
+            np.uint16,
+            np.uint8,
+            np.bool_,
+            np.complex128,
+            np.complex64,
+        ]:
+            dt = np.dtype(dtype)
+            self._dtype_cache[dt.str] = dt.str.encode("ascii")
+
     def create_socket(self, socket_type: int, addr: str, setsockopt: dict = {}) -> zmq.Socket:
         """
         Create a ZMQ socket and connect/bind it to the specified address.
@@ -161,6 +194,8 @@ class ZMQNODE(ABC):
         """
         Send a Numpy array over ZMQ with a header.
 
+        [topic, ndim, dtype, shape, data]
+
         Args:
             socket: ZMQ socket to send the array
             array: Numpy array to send
@@ -170,16 +205,15 @@ class ZMQNODE(ABC):
             bool: True if sent successfully, False if would block
         """
         try:
-            dtype_code = array.dtype.str.encode("ascii")
-            shape_data = struct.pack("!" + "I" * len(array.shape), *array.shape)
-
-            header = self.header_struct.pack(
-                array.ndim, len(dtype_code), len(shape_data), array.nbytes
-            )
+            ndim_data = self._ndim_struct.pack(array.ndim)
+            # Use cached dtype
+            dtype_code = self._dtype_cache[array.dtype.str]
+            # Use precompiled struct for shape
+            shape_data = self._shape_structs[array.ndim].pack(*array.shape)
 
             # Send multipart message: topic, header, dtype, shape, data
             socket.send_multipart(
-                [topic.encode("utf-8"), header, dtype_code, shape_data, array],
+                [topic.encode("utf-8"), ndim_data, dtype_code, shape_data, array],
                 flags=flags,
                 copy=copy,  # sometimes setting copy=True, might be necessary. Check your use-case
             )
@@ -194,6 +228,18 @@ class ZMQNODE(ABC):
         socket: zmq.Socket,
         copy: bool = False,
     ) -> tuple[str, np.ndarray]:
+        """
+        Receive a Numpy array over ZMQ with a header.
+
+        [topic, ndim, dtype, shape, data]
+
+        Args:
+            socket: ZMQ socket to receive the array
+            copy: Whether to copy the data when receiving
+
+        Returns:
+            tuple: (topic, array) if received successfully, (None, None) if would block
+        """
         try:
             messages = await socket.recv_multipart(copy=copy)
 
@@ -201,19 +247,20 @@ class ZMQNODE(ABC):
                 print(f"Warning: Expected 5 parts, got {len(messages)}")
                 return None, None
 
-            topic_msg, header_msg, dtype_msg, shape_msg, array_msg = messages
+            topic_msg, ndim_msg, dtype_msg, shape_msg, array_msg = messages
             if not copy:
                 topic_msg = topic_msg.buffer.tobytes()
                 dtype_msg = dtype_msg.buffer.tobytes()
-                header_msg = header_msg.buffer
+                ndim_msg = ndim_msg.buffer.tobytes()
                 shape_msg = shape_msg.buffer
                 array_msg = array_msg.buffer
 
             topic = topic_msg.decode("utf-8")
             dtype = np.dtype(dtype_msg.decode("ascii"))
+            ndim = self._ndim_struct.unpack(ndim_msg)[0]
 
-            ndim, dtype_len, shape_len, nbytes = self.header_struct.unpack(header_msg)
-            shape = struct.unpack("!" + "I" * ndim, shape_msg)
+            # Use precompiled struct for shape
+            shape = self._shape_structs[ndim].unpack(shape_msg)
 
             array = np.frombuffer(array_msg, dtype=dtype).reshape(shape)
 
@@ -289,6 +336,8 @@ class ZMQNODE(ABC):
         """
         Send a dictionary of numpy arrays over ZMQ with a topic.
 
+        Message format: [topic, key1, ndim1, dtype1, shape1, array1, key2, ndim2, dtype2, shape2, array2, ...]
+
         Args:
             socket: ZMQ socket to send the data
             data: Dictionary of numpy arrays to send
@@ -300,29 +349,31 @@ class ZMQNODE(ABC):
             bool: True if sent successfully, False if would block
         """
         try:
-            metadata = {}
-            array_parts = []
+            # Pre-allocate: 1 topic + 5 parts per array
+            message_parts = [None] * (1 + len(data) * 5)
+            message_parts[0] = topic.encode("utf-8")
 
+            idx = 1
             for key, array in data.items():
                 if not isinstance(array, np.ndarray):
                     raise ValueError(f"Value for key '{key}' is not a numpy array")
 
-                metadata[key] = {
-                    "dtype": array.dtype.str,
-                    "shape": array.shape,
-                    "ndim": array.ndim,
-                    "nbytes": array.nbytes,
-                }
-                array_parts.append(array)
+                key_bytes = key.encode("ascii")
 
-            message_parts = [topic.encode("utf-8"), json.dumps(metadata).encode("utf-8")]
-            message_parts.extend(array_parts)
+                # Use cached dtype
+                dtype_code = self._dtype_cache[array.dtype.str]
+                # Use precompiled struct for shape
+                shape_data = self._shape_structs[array.ndim].pack(*array.shape)
+                ndim_data = self._ndim_struct.pack(array.ndim)
 
-            socket.send_multipart(
-                message_parts,
-                flags=flags,
-                copy=copy,
-            )
+                message_parts[idx] = key_bytes
+                message_parts[idx + 1] = ndim_data
+                message_parts[idx + 2] = dtype_code
+                message_parts[idx + 3] = shape_data
+                message_parts[idx + 4] = array
+                idx += 5
+
+            socket.send_multipart(message_parts, flags=flags, copy=copy)
             return True
 
         except zmq.Again:
@@ -339,6 +390,8 @@ class ZMQNODE(ABC):
         """
         Receive a dictionary of numpy arrays over ZMQ with a topic.
 
+        Message format: [topic, key1, ndim1, dtype1, shape1, array1, key2, ndim2, dtype2, shape2, array2, ...]
+
         Args:
             socket: ZMQ socket to receive the data
             copy: Whether to copy the data when receiving
@@ -353,28 +406,34 @@ class ZMQNODE(ABC):
                 print(f"Warning: Expected at least 2 parts, got {len(messages)}")
                 return None, None
 
-            topic_msg = messages[0]
-            metadata_msg = messages[1]
-            array_messages = messages[2:]
-
             if not copy:
-                topic_msg = topic_msg.buffer.tobytes()
-                metadata_msg = metadata_msg.buffer.tobytes()
+                topic = messages[0].buffer.tobytes().decode("utf-8")
+                result_dict = {}
 
-            topic = topic_msg.decode("utf-8")
-            metadata = json.loads(metadata_msg.decode("utf-8"))
+                for msg_idx in range(1, len(messages), 5):
+                    key = messages[msg_idx].buffer.tobytes().decode("ascii")
+                    ndim = self._ndim_struct.unpack(messages[msg_idx + 1].buffer)[0]
+                    dtype = np.dtype(messages[msg_idx + 2].buffer.tobytes().decode("ascii"))
 
-            result_dict = {}
-            for array_idx, (key, array_meta) in enumerate(metadata.items()):
-                array_msg = array_messages[array_idx]
-                if not copy:
-                    array_msg = array_msg.buffer
+                    # Use precompiled struct for shape
+                    shape = self._shape_structs[ndim].unpack(messages[msg_idx + 3].buffer)
 
-                dtype = np.dtype(array_meta["dtype"])
-                shape = tuple(array_meta["shape"])
+                    array = np.frombuffer(messages[msg_idx + 4].buffer, dtype=dtype).reshape(shape)
+                    result_dict[key] = array
+            else:
+                topic = messages[0].decode("utf-8")
+                result_dict = {}
 
-                array = np.frombuffer(array_msg, dtype=dtype).reshape(shape)
-                result_dict[key] = array
+                for msg_idx in range(1, len(messages), 5):
+                    key = messages[msg_idx].decode("ascii")
+                    ndim = self._ndim_struct.unpack(messages[msg_idx + 1])[0]
+                    dtype = np.dtype(messages[msg_idx + 2].decode("ascii"))
+
+                    # Use precompiled struct for shape
+                    shape = self._shape_structs[ndim].unpack(messages[msg_idx + 3])
+
+                    array = np.frombuffer(messages[msg_idx + 4], dtype=dtype).reshape(shape)
+                    result_dict[key] = array
 
             return topic, result_dict
 
