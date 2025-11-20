@@ -8,6 +8,7 @@ void ZMQROS2Bridge::declare_parameters() {
     this->declare_parameter("enable_color", false);
     this->declare_parameter("enable_depth", false);
     this->declare_parameter("enable_event", false);
+    this->declare_parameter("enable_state", false);
 
     // Parameters for IMU
     this->declare_parameter("imu_zmq_address", "ipc:///tmp/0");
@@ -28,6 +29,11 @@ void ZMQROS2Bridge::declare_parameters() {
     this->declare_parameter("event_zmq_address", "ipc:///tmp/0");
     this->declare_parameter("event_zmq_topic", "events");
     this->declare_parameter("event_ros2_topic", "events");
+
+    // Parameters for State
+    this->declare_parameter("state_zmq_address", "ipc:///tmp/0");
+    this->declare_parameter("state_zmq_topic", "state");
+    this->declare_parameter("state_ros2_topic", "state");
 }
 
 ZMQROS2Bridge::ZMQROS2Bridge()
@@ -38,6 +44,7 @@ ZMQROS2Bridge::ZMQROS2Bridge()
     color_enable_ = this->get_parameter("enable_color").as_bool();
     depth_enable_ = this->get_parameter("enable_depth").as_bool();
     event_enable_ = this->get_parameter("enable_event").as_bool();
+    state_enable_ = this->get_parameter("enable_state").as_bool();
 
     // Configure IMU subscriber and publisher
     if (imu_enable_) {
@@ -98,6 +105,21 @@ ZMQROS2Bridge::ZMQROS2Bridge()
                     event_ros2_topic_.c_str());
     }
 
+    // Configure State subscriber and publisher
+    if (state_enable_) {
+        state_zmq_address_ =
+            this->get_parameter("state_zmq_address").as_string();
+        state_zmq_topic_ = this->get_parameter("state_zmq_topic").as_string();
+        state_ros2_topic_ = this->get_parameter("state_ros2_topic").as_string();
+
+        state_pub_ = this->create_publisher<zmq_ros2_bridge::msg::State>(
+            state_ros2_topic_, 10);
+        zmq_threads_.emplace_back(&ZMQROS2Bridge::state_sub_pub, this);
+        RCLCPP_INFO(this->get_logger(), "State: ZMQ[%s:%s] -> ROS2[%s]",
+                    state_zmq_address_.c_str(), state_zmq_topic_.c_str(),
+                    state_ros2_topic_.c_str());
+    }
+
     RCLCPP_INFO(this->get_logger(), "ZMQ to ROS2 bridge started");
 }
 
@@ -118,11 +140,11 @@ zmq::socket_t ZMQROS2Bridge::create_zmq_subscriber(const std::string &address,
     return subscriber;
 }
 
-bool ZMQROS2Bridge::decode_imu_json(const std::vector<zmq::message_t> &messages,
-                                    nlohmann::json &imu_json) {
+bool ZMQROS2Bridge::decode_json(const std::vector<zmq::message_t> &messages,
+                                nlohmann::json &json_data) {
     if (messages.size() < 2) {
         RCLCPP_ERROR(this->get_logger(),
-                     "Expected at least 2 parts for IMU, got %zu",
+                     "Expected at least 2 parts for JSON message, got %zu",
                      messages.size());
         return false;
     }
@@ -132,11 +154,10 @@ bool ZMQROS2Bridge::decode_imu_json(const std::vector<zmq::message_t> &messages,
                          messages[1].size());
 
     try {
-        imu_json = nlohmann::json::parse(json_str);
+        json_data = nlohmann::json::parse(json_str);
         return true;
     } catch (const nlohmann::json::exception &e) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to parse IMU JSON: %s",
-                     e.what());
+        RCLCPP_ERROR(this->get_logger(), "Failed to parse JSON: %s", e.what());
         return false;
     }
 }
@@ -264,6 +285,71 @@ void ZMQROS2Bridge::publish_imu(const nlohmann::json &imu_json) {
 
     } catch (const nlohmann::json::exception &e) {
         RCLCPP_ERROR(this->get_logger(), "Failed to extract IMU data: %s",
+                     e.what());
+    }
+}
+
+void ZMQROS2Bridge::publish_state(const nlohmann::json &state_json) {
+    auto msg = zmq_ros2_bridge::msg::State();
+
+    try {
+        // Set timestamp from the message if available
+        if (state_json.contains("timestamp")) {
+            double timestamp = state_json["timestamp"].get<double>();
+            msg.header.stamp =
+                rclcpp::Time(static_cast<int64_t>(timestamp * 1e9));
+            msg.timestamp = timestamp;
+        } else {
+            msg.header.stamp = this->now();
+            msg.timestamp = 0.0;
+        }
+
+        msg.header.frame_id = state_zmq_topic_;
+
+        // Extract position (x)
+        if (state_json.contains("x")) {
+            auto &x = state_json["x"];
+            msg.x.x = x[0].get<double>();
+            msg.x.y = x[1].get<double>();
+            msg.x.z = x[2].get<double>();
+        }
+
+        // Extract orientation quaternion (q)
+        if (state_json.contains("q")) {
+            auto &q = state_json["q"];
+            msg.q.x = q[0].get<double>();
+            msg.q.y = q[1].get<double>();
+            msg.q.z = q[2].get<double>();
+            msg.q.w = q[3].get<double>();
+        }
+
+        // Extract linear velocity (v)
+        if (state_json.contains("v")) {
+            auto &v = state_json["v"];
+            msg.v.x = v[0].get<double>();
+            msg.v.y = v[1].get<double>();
+            msg.v.z = v[2].get<double>();
+        }
+
+        // Extract angular velocity (w)
+        if (state_json.contains("w")) {
+            auto &w = state_json["w"];
+            msg.w.x = w[0].get<double>();
+            msg.w.y = w[1].get<double>();
+            msg.w.z = w[2].get<double>();
+        }
+
+        // Extract simulation step count
+        if (state_json.contains("simsteps")) {
+            msg.simsteps = state_json["simsteps"].get<uint64_t>();
+        }
+
+        state_pub_->publish(msg);
+
+        RCLCPP_DEBUG(this->get_logger(), "Published State message");
+
+    } catch (const nlohmann::json::exception &e) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to extract State data: %s",
                      e.what());
     }
 }
@@ -419,7 +505,7 @@ void ZMQROS2Bridge::imu_sub_pub() {
 
             nlohmann::json imu_json;
 
-            if (decode_imu_json(messages, imu_json)) {
+            if (decode_json(messages, imu_json)) {
                 publish_imu(imu_json);
             }
         }
@@ -527,6 +613,40 @@ void ZMQROS2Bridge::event_sub_pub() {
 
     } catch (const std::exception &e) {
         RCLCPP_ERROR(this->get_logger(), "Event ZMQ thread error: %s",
+                     e.what());
+    }
+}
+
+void ZMQROS2Bridge::state_sub_pub() {
+    if (!state_enable_)
+        return;
+
+    try {
+        auto subscriber =
+            create_zmq_subscriber(state_zmq_address_, state_zmq_topic_);
+
+        RCLCPP_INFO(this->get_logger(), "State ZMQ thread connected");
+
+        while (running_ && rclcpp::ok()) {
+            std::vector<zmq::message_t> messages;
+
+            subscriber.set(zmq::sockopt::rcvtimeo, 1000);
+            auto result =
+                zmq::recv_multipart(subscriber, std::back_inserter(messages));
+
+            if (!result || messages.empty()) {
+                continue;
+            }
+
+            nlohmann::json state_json;
+
+            if (decode_json(messages, state_json)) {
+                publish_state(state_json);
+            }
+        }
+
+    } catch (const std::exception &e) {
+        RCLCPP_ERROR(this->get_logger(), "State ZMQ thread error: %s",
                      e.what());
     }
 }

@@ -25,6 +25,7 @@ find_package(nlohmann_json REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Event.msg"
   "msg/Imu.msg"
+  "msg/State.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

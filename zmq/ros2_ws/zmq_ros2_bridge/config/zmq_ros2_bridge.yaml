@@ -5,6 +5,7 @@ zmq_ros2_bridge:
     enable_color: true
     enable_depth: true
     enable_event: true
+    enable_state: true
     
     # IMU parameters
     imu_zmq_address: "ipc:///tmp/0"
@@ -25,3 +26,8 @@ zmq_ros2_bridge:
     event_zmq_address: "ipc:///tmp/0"
     event_zmq_topic: "events"
     event_ros2_topic: "events"
+    
+    # State parameters
+    state_zmq_address: "ipc:///tmp/0"
+    state_zmq_topic: "state"
+    state_ros2_topic: "state"

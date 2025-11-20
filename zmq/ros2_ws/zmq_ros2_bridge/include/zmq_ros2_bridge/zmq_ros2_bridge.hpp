@@ -3,6 +3,7 @@
 
 #include "zmq_ros2_bridge/msg/event.hpp"
 #include "zmq_ros2_bridge/msg/imu.hpp"
+#include "zmq_ros2_bridge/msg/state.hpp"
 #include <arpa/inet.h>
 #include <atomic>
 #include <map>
@@ -52,10 +53,11 @@ class ZMQROS2Bridge : public rclcpp::Node {
     void color_sub_pub();
     void depth_sub_pub();
     void event_sub_pub();
+    void state_sub_pub();
 
     // Different decode functions from ZMQ messages to C++ structures
-    bool decode_imu_json(const std::vector<zmq::message_t> &messages,
-                         nlohmann::json &imu_json);
+    bool decode_json(const std::vector<zmq::message_t> &messages,
+                     nlohmann::json &json_data);
     bool decode_numpy_array(const std::vector<zmq::message_t> &messages,
                             NumpyArray &numpy_array);
     bool
@@ -64,9 +66,11 @@ class ZMQROS2Bridge : public rclcpp::Node {
 
     // Functions to form and publish ROS2 messages
     void publish_imu(const nlohmann::json &imu_json);
-    void publish_image(const NumpyArray &numpy_array,
-                       const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr &publisher,
-                       const std::string &frame_id);
+    void publish_state(const nlohmann::json &state_json);
+    void publish_image(
+        const NumpyArray &numpy_array,
+        const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr &publisher,
+        const std::string &frame_id);
     void publish_events(const DictofNumpyArray &event_data);
 
     // Image encoding lookup map
@@ -114,6 +118,7 @@ class ZMQROS2Bridge : public rclcpp::Node {
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr color_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
     rclcpp::Publisher<zmq_ros2_bridge::msg::Event>::SharedPtr event_pub_;
+    rclcpp::Publisher<zmq_ros2_bridge::msg::State>::SharedPtr state_pub_;
 
     // ZMQ context (shared across all threads)
     zmq::context_t zmq_context_;
@@ -139,6 +144,10 @@ class ZMQROS2Bridge : public rclcpp::Node {
     std::string event_zmq_address_;
     std::string event_zmq_topic_;
     std::string event_ros2_topic_;
+    bool state_enable_;
+    std::string state_zmq_address_;
+    std::string state_zmq_topic_;
+    std::string state_ros2_topic_;
 };
 
 } // namespace zmq_ros2_bridge
