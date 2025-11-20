@@ -1,15 +1,16 @@
 # ZMQ to ROS2 Bridge
 
-A lightweight bridge for converting ZMQ messages (numpy arrays and JSON) to ROS2 messages (Image and IMU).
+A lightweight bridge for converting ZMQ messages (numpy arrays, JSON, and event data) to ROS2 messages.
 
 ## Features
 
-- **Multiple ZMQ Subscribers**: Run multiple ZMQ subscribers on separate threads, each connecting to different ZMQ publishers
-- **Thread-Safe Publishing**: Dynamic creation of ROS2 publishers with thread-safe access
-- **Flexible Topic Configuration**: Configure multiple ZMQ topics per subscriber with custom ROS2 topic prefixes
-- **Multi-Format Support**: 
-  - Numpy arrays → `sensor_msgs/Image` messages
-  - JSON data → `sensor_msgs/Imu` messages
+- **Multi-threaded Architecture**: Separate threads for each sensor type (IMU, Color, Depth, Event, State)
+- **Flexible Data Types**: 
+  - Numpy arrays → `sensor_msgs/Image` messages (Color, Depth)
+  - JSON data → Custom IMU and State messages
+  - Dictionary of numpy arrays → Custom Event messages
+- **Individual Topic Control**: Enable/disable each sensor independently
+- **Per-Sensor Configuration**: Each sensor can connect to different ZMQ addresses and topics
 - **Configurable via YAML**: Easy configuration through YAML parameter files
 
 ## Dependencies
@@ -37,16 +38,12 @@ source install/setup.bash
 ### Using launch file with config file (recommended)
 
 ```bash
-# With default single subscriber config
+# With default config
 ros2 launch zmq_ros2_bridge zmq_ros2_bridge.launch.py
 
-# With multi-subscriber config
+# With custom config file
 ros2 launch zmq_ros2_bridge zmq_ros2_bridge.launch.py \
   config_file:=/path/to/your/config.yaml
-
-# With the example multi-subscriber config
-ros2 launch zmq_ros2_bridge zmq_ros2_bridge.launch.py \
-  config_file:=$(ros2 pkg prefix zmq_ros2_bridge)/share/zmq_ros2_bridge/config/multi_subscriber_example.yaml
 ```
 
 ### Running directly with parameters
@@ -64,142 +61,184 @@ ros2 run zmq_ros2_bridge zmq_ros2_bridge_node \
 Create a YAML file with the following structure:
 
 ```yaml
-/**:
+zmq_ros2_bridge:
   ros__parameters:
-    # Number of ZMQ subscribers to create
-    num_subscribers: 2
+    # Enable/disable flags for each sensor
+    enable_imu: true
+    enable_color: true
+    enable_depth: true
+    enable_event: true
+    enable_state: true
     
-    # Configuration for subscriber 0
-    subscriber_0:
-      zmq_address: "tcp://localhost:5555"
-      zmq_topics: ["color", "depth", "imu"]
-      ros2_topic_prefix: "drone1"
+    # IMU parameters (JSON data)
+    imu_zmq_address: "ipc:///tmp/0"
+    imu_zmq_topic: "imu"
+    imu_ros2_topic: "imu"
     
-    # Configuration for subscriber 1
-    subscriber_1:
-      zmq_address: "tcp://localhost:5556"
-      zmq_topics: ["color", "depth", "imu"]
-      ros2_topic_prefix: "drone2"
+    # Color image parameters (numpy array)
+    color_zmq_address: "ipc:///tmp/0"
+    color_zmq_topic: "color"
+    color_ros2_topic: "color"
+    
+    # Depth image parameters (numpy array)
+    depth_zmq_address: "ipc:///tmp/0"
+    depth_zmq_topic: "depth"
+    depth_ros2_topic: "depth"
+    
+    # Event parameters (dict of numpy arrays)
+    event_zmq_address: "ipc:///tmp/0"
+    event_zmq_topic: "events"
+    event_ros2_topic: "events"
+    
+    # State parameters (JSON data)
+    state_zmq_address: "ipc:///tmp/0"
+    state_zmq_topic: "state"
+    state_ros2_topic: "state"
 ```
 
-### Example Configurations
+### Example Configuration
 
-Two example configuration files are provided:
-
-1. **`config/single_subscriber.yaml`** - Single subscriber (backward compatible)
-2. **`config/multi_subscriber_example.yaml`** - Two subscribers example
+See `config/zmq_ros2_bridge.yaml` for a complete example configuration.
 
 ## Topics
 
 ### Published Topics
 
-Topics are dynamically created based on configuration. Format: `<ros2_topic_prefix>/<zmq_topic>`
+Topics are configured individually for each sensor type:
 
-**Example with config above:**
-- `/drone1/color` (`sensor_msgs/Image`)
-- `/drone1/depth` (`sensor_msgs/Image`)
-- `/drone1/imu` (`sensor_msgs/Imu`)
-- `/drone2/color` (`sensor_msgs/Image`)
-- `/drone2/depth` (`sensor_msgs/Image`)
-- `/drone2/imu` (`sensor_msgs/Imu`)
+- `/imu` (`zmq_ros2_bridge/msg/Imu`) - IMU data with gyro and acceleration
+- `/color` (`sensor_msgs/msg/Image`) - Color camera images
+- `/depth` (`sensor_msgs/msg/Image`) - Depth camera images  
+- `/events` (`zmq_ros2_bridge/msg/Event`) - Event camera data
+- `/state` (`zmq_ros2_bridge/msg/State`) - Robot/drone state (position, orientation, velocities)
+
+**Note:** Topic names are configurable via `*_ros2_topic` parameters in the config file.
 
 ## Parameters
 
-### Per-Node Parameters
+### Enable/Disable Flags
 
-- `num_subscribers` (int, default: 1) - Number of ZMQ subscribers to create
+- `enable_imu` (bool, default: false) - Enable IMU data stream
+- `enable_color` (bool, default: false) - Enable color image stream
+- `enable_depth` (bool, default: false) - Enable depth image stream
+- `enable_event` (bool, default: false) - Enable event camera stream
+- `enable_state` (bool, default: false) - Enable state data stream
 
-### Per-Subscriber Parameters
+### Per-Sensor Parameters
 
-For each subscriber `i` (where i = 0, 1, 2, ...):
+For each sensor type, you can configure:
+- `<sensor>_zmq_address` (string) - ZMQ address to connect to (e.g., "ipc:///tmp/0" or "tcp://localhost:5555")
+- `<sensor>_zmq_topic` (string) - ZMQ topic to subscribe to
+- `<sensor>_ros2_topic` (string) - ROS2 topic name to publish to
 
-- `subscriber_<i>.zmq_address` (string) - ZMQ publisher address to connect to
-- `subscriber_<i>.zmq_topics` (string array) - List of ZMQ topics to subscribe to
-- `subscriber_<i>.ros2_topic_prefix` (string) - Prefix for ROS2 topic names
+Where `<sensor>` is one of: `imu`, `color`, `depth`, `event`, `state`
 
 ## Message Formats
 
-### Image Messages (Numpy Arrays)
+### 1. Image Messages (Numpy Arrays) - Color & Depth
 
-The bridge expects ZMQ messages in the following 5-part multipart format:
-1. Topic (string) - e.g., "color", "depth"
-2. Header (4 uint32_t in network byte order: ndim, dtype_len, shape_len, nbytes)
-3. Dtype (string) - e.g., "uint8", "|u1"
-4. Shape (array of uint32_t in network byte order) - e.g., [480, 640, 3]
-5. Array data (raw bytes)
+ZMQ multipart message format (5 parts):
+1. **Topic** (string) - e.g., "color", "depth"
+2. **ndim** (uint8) - Number of dimensions
+3. **dtype** (string) - Data type (e.g., "uint8", "|u1", "float32", "<f4")
+4. **shape** (uint32[] in network byte order) - Array dimensions [H, W] or [H, W, C]
+5. **data** (raw bytes) - Image pixel data
 
-**Supported image formats:**
-- RGB8 (HxWx3, uint8)
-- RGBA8 (HxWx4, uint8)
-- MONO8 (HxWx1, uint8)
+**Supported image encodings:**
+- **uint8**: mono8 (1ch), rgb8 (3ch), rgba8 (4ch)
+- **uint16**: mono16 (1ch), rgb16 (3ch)
+- **float32**: 32FC1 (1ch), 32FC3 (3ch), 32FC4 (4ch)
+- **float64**: 64FC1 (1ch), 64FC3 (3ch), 64FC4 (4ch)
 
-### IMU Messages (JSON)
+### 2. IMU Messages (JSON)
 
-The bridge expects ZMQ messages in the following 2-part multipart format:
-1. Topic (string) - e.g., "imu"
-2. JSON data (string) with the following structure:
+ZMQ multipart message format (2 parts):
+1. **Topic** (string) - e.g., "imu"
+2. **JSON data** (string):
 
 ```json
 {
   "timestamp": 1234567890.123,
-  "orientation": {
-    "x": 0.0,
-    "y": 0.0,
-    "z": 0.0,
-    "w": 1.0
-  },
-  "angular_velocity": {
-    "x": 0.0,
-    "y": 0.0,
-    "z": 0.0
-  },
-  "linear_acceleration": {
-    "x": 0.0,
-    "y": 9.81,
-    "z": 0.0
-  }
+  "gyro": [0.0, 0.0, 0.0],      // Angular velocity [rad/s]
+  "accel": [0.0, 0.0, 9.81]     // Linear acceleration [m/s²]
 }
+```
+
+**ROS2 Message:** `zmq_ros2_bridge/msg/Imu`
+```
+std_msgs/Header header
+geometry_msgs/Vector3 gyro   # Angular velocity in rad/s
+geometry_msgs/Vector3 accel  # Linear acceleration in m/s²
+```
+
+### 3. State Messages (JSON)
+
+ZMQ multipart message format (2 parts):
+1. **Topic** (string) - e.g., "state"
+2. **JSON data** (string):
+
+```json
+{
+  "timestamp": 1234567890.123,
+  "x": [1.0, 2.0, 3.0],           // Position [m]
+  "q": [0.0, 0.0, 0.0, 1.0],      // Orientation quaternion [x,y,z,w]
+  "v": [0.5, 0.0, 0.0],           // Linear velocity [m/s]
+  "w": [0.0, 0.0, 0.1],           // Angular velocity [rad/s]
+  "simsteps": 12345               // Simulation step count
+}
+```
+
+**ROS2 Message:** `zmq_ros2_bridge/msg/State`
+```
+std_msgs/Header header
+geometry_msgs/Vector3 x      # Position [m]
+geometry_msgs/Quaternion q   # Orientation quaternion
+geometry_msgs/Vector3 v      # Linear velocity [m/s]
+geometry_msgs/Vector3 w      # Angular velocity [rad/s]
+float64 timestamp            # Simulation timestamp [s]
+uint64 simsteps              # Simulation step count
+```
+
+### 4. Event Messages (Dict of Numpy Arrays)
+
+ZMQ multipart message format (variable parts):
+1. **Topic** (string) - e.g., "events"
+2. **key1** (string) - "x"
+3. **ndim1** (uint8) - 1
+4. **dtype1** (string) - "uint16" or "<u2"
+5. **shape1** (uint32[] in network byte order) - [N]
+6. **data1** (raw bytes) - x coordinates
+7. **key2** (string) - "y"
+8. ... (repeat for y, t, p)
+
+**Required keys:**
+- **x** (uint16[]) - Pixel x coordinates
+- **y** (uint16[]) - Pixel y coordinates
+- **t** (uint64[]) - Timestamps in microseconds
+- **p** (uint8[]) - Polarity (0 or 1)
+
+**ROS2 Message:** `zmq_ros2_bridge/msg/Event`
+```
+std_msgs/Header header
+uint16[] x  # X coordinates
+uint16[] y  # Y coordinates
+uint64[] t  # Timestamps
+uint8[] p   # Polarities
 ```
 
 ## Architecture
 
-The bridge creates one thread per ZMQ subscriber. Each thread:
+The bridge creates **one thread per sensor type** that is enabled. Each thread:
 1. Connects to its configured ZMQ address
-2. Subscribes to multiple ZMQ topics
-3. Receives and decodes messages (numpy arrays or JSON)
-4. Publishes to dynamically-created ROS2 topics
+2. Subscribes to its specific ZMQ topic
+3. Continuously receives and decodes messages
+4. Publishes to its ROS2 topic
 
-**Thread Safety:** Publishers are created on-demand with mutex protection to ensure thread-safe operation.
-
-## Use Cases
-
-### Single Camera System
-```yaml
-num_subscribers: 1
-subscriber_0:
-  zmq_address: "tcp://localhost:5555"
-  zmq_topics: ["color", "depth"]
-  ros2_topic_prefix: "camera"
-```
-**Output topics:** `/camera/color`, `/camera/depth`
-
-### Multi-Robot System
-```yaml
-num_subscribers: 3
-subscriber_0:
-  zmq_address: "tcp://robot1:5555"
-  zmq_topics: ["color", "imu"]
-  ros2_topic_prefix: "robot1"
-subscriber_1:
-  zmq_address: "tcp://robot2:5555"
-  zmq_topics: ["color", "imu"]
-  ros2_topic_prefix: "robot2"
-subscriber_2:
-  zmq_address: "tcp://robot3:5555"
-  zmq_topics: ["color", "imu"]
-  ros2_topic_prefix: "robot3"
-```
-**Output topics:** `/robot1/color`, `/robot1/imu`, `/robot2/color`, `/robot2/imu`, `/robot3/color`, `/robot3/imu`
+**Thread Management:**
+- Threads are spawned during node construction for enabled sensors
+- All threads share a single ZMQ context
+- Graceful shutdown joins all threads on node destruction
+- Each thread has a 1-second receive timeout for responsive shutdown
 
 ## Viewing the Data
 
@@ -211,11 +250,32 @@ ros2 topic list
 rviz2
 
 # Or use rqt_image_view for specific topic
-ros2 run rqt_image_view rqt_image_view /drone1/color
+ros2 run rqt_image_view rqt_image_view /color
 
 # Echo IMU data
-ros2 topic echo /drone1/imu
+ros2 topic echo /imu
+
+# Echo State data
+ros2 topic echo /state
 
 # Monitor topic frequency
-ros2 topic hz /drone1/color
+ros2 topic hz /color
+ros2 topic hz /events
+
+# Get topic info
+ros2 topic info /imu
+ros2 topic info /state
 ```
+
+## Custom Message Definitions
+
+The bridge provides three custom message types:
+
+### `zmq_ros2_bridge/msg/Imu`
+Simplified IMU message with only gyroscope and accelerometer data.
+
+### `zmq_ros2_bridge/msg/Event`  
+Event camera message containing arrays of x, y coordinates, timestamps, and polarities.
+
+### `zmq_ros2_bridge/msg/State`
+Complete robot/drone state including position, orientation, linear velocity, angular velocity, timestamp, and simulation step count.
