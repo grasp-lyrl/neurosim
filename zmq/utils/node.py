@@ -402,8 +402,8 @@ class ZMQNODE(ABC):
         try:
             messages = await socket.recv_multipart(copy=copy)
 
-            if len(messages) < 2:
-                print(f"Warning: Expected at least 2 parts, got {len(messages)}")
+            if len(messages) < 6:
+                print(f"Warning: Expected at least 6 parts, got {len(messages)}")
                 return None, None
 
             if not copy:

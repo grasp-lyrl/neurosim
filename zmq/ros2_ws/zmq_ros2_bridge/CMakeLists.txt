@@ -9,9 +9,17 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(cppzmq REQUIRED)
 find_package(nlohmann_json REQUIRED)
+
+# Generate messages
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/Event.msg"
+  DEPENDENCIES std_msgs
+)
 
 # Include directories
 include_directories(
@@ -27,11 +35,17 @@ add_executable(zmq_ros2_bridge_node
 ament_target_dependencies(zmq_ros2_bridge_node
   rclcpp
   sensor_msgs
+  std_msgs
 )
 
 target_link_libraries(zmq_ros2_bridge_node
   cppzmq
   nlohmann_json::nlohmann_json
+)
+
+# Link generated messages to the executable
+rosidl_target_interfaces(zmq_ros2_bridge_node
+  ${PROJECT_NAME} "rosidl_typesupport_cpp"
 )
 
 # Install targets
@@ -54,5 +68,8 @@ if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+# Export dependencies for downstream packages
+ament_export_dependencies(rosidl_default_runtime)
 
 ament_package()
