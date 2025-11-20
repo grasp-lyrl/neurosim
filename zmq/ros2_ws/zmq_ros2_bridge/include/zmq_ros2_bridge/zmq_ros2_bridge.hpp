@@ -50,6 +50,7 @@ class ZMQROS2Bridge : public rclcpp::Node {
     // Functions running on separate threads to sub ZMQ and pub ROS2
     void imu_sub_pub();
     void color_sub_pub();
+    void depth_sub_pub();
     void event_sub_pub();
 
     // Different decode functions from ZMQ messages to C++ structures
@@ -63,7 +64,9 @@ class ZMQROS2Bridge : public rclcpp::Node {
 
     // Functions to form and publish ROS2 messages
     void publish_imu(const nlohmann::json &imu_json);
-    void publish_image(const NumpyArray &numpy_array);
+    void publish_image(const NumpyArray &numpy_array,
+                       const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr &publisher,
+                       const std::string &frame_id);
     void publish_events(const DictofNumpyArray &event_data);
 
     // Image encoding lookup map
@@ -109,6 +112,7 @@ class ZMQROS2Bridge : public rclcpp::Node {
     // ROS2 publishers
     rclcpp::Publisher<zmq_ros2_bridge::msg::Imu>::SharedPtr imu_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr color_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
     rclcpp::Publisher<zmq_ros2_bridge::msg::Event>::SharedPtr event_pub_;
 
     // ZMQ context (shared across all threads)
@@ -127,6 +131,10 @@ class ZMQROS2Bridge : public rclcpp::Node {
     std::string color_zmq_address_;
     std::string color_zmq_topic_;
     std::string color_ros2_topic_;
+    bool depth_enable_;
+    std::string depth_zmq_address_;
+    std::string depth_zmq_topic_;
+    std::string depth_ros2_topic_;
     bool event_enable_;
     std::string event_zmq_address_;
     std::string event_zmq_topic_;

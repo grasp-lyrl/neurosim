@@ -6,6 +6,7 @@ void ZMQROS2Bridge::declare_parameters() {
     // Enable/disable flags
     this->declare_parameter("enable_imu", false);
     this->declare_parameter("enable_color", false);
+    this->declare_parameter("enable_depth", false);
     this->declare_parameter("enable_event", false);
 
     // Parameters for IMU
@@ -17,6 +18,11 @@ void ZMQROS2Bridge::declare_parameters() {
     this->declare_parameter("color_zmq_address", "ipc:///tmp/0");
     this->declare_parameter("color_zmq_topic", "color");
     this->declare_parameter("color_ros2_topic", "color");
+
+    // Parameters for Depth
+    this->declare_parameter("depth_zmq_address", "ipc:///tmp/0");
+    this->declare_parameter("depth_zmq_topic", "depth");
+    this->declare_parameter("depth_ros2_topic", "depth");
 
     // Parameters for Event
     this->declare_parameter("event_zmq_address", "ipc:///tmp/0");
@@ -30,6 +36,7 @@ ZMQROS2Bridge::ZMQROS2Bridge()
 
     imu_enable_ = this->get_parameter("enable_imu").as_bool();
     color_enable_ = this->get_parameter("enable_color").as_bool();
+    depth_enable_ = this->get_parameter("enable_depth").as_bool();
     event_enable_ = this->get_parameter("enable_event").as_bool();
 
     // Configure IMU subscriber and publisher
@@ -59,6 +66,21 @@ ZMQROS2Bridge::ZMQROS2Bridge()
         RCLCPP_INFO(this->get_logger(), "Color: ZMQ[%s:%s] -> ROS2[%s]",
                     color_zmq_address_.c_str(), color_zmq_topic_.c_str(),
                     color_ros2_topic_.c_str());
+    }
+
+    // Configure Depth subscriber and publisher
+    if (depth_enable_) {
+        depth_zmq_address_ =
+            this->get_parameter("depth_zmq_address").as_string();
+        depth_zmq_topic_ = this->get_parameter("depth_zmq_topic").as_string();
+        depth_ros2_topic_ = this->get_parameter("depth_ros2_topic").as_string();
+
+        depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+            depth_ros2_topic_, 10);
+        zmq_threads_.emplace_back(&ZMQROS2Bridge::depth_sub_pub, this);
+        RCLCPP_INFO(this->get_logger(), "Depth: ZMQ[%s:%s] -> ROS2[%s]",
+                    depth_zmq_address_.c_str(), depth_zmq_topic_.c_str(),
+                    depth_ros2_topic_.c_str());
     }
 
     // Configure Event subscriber and publisher
@@ -206,9 +228,6 @@ bool ZMQROS2Bridge::decode_dict_of_numpy_arrays(
 }
 
 void ZMQROS2Bridge::publish_imu(const nlohmann::json &imu_json) {
-    if (!imu_pub_)
-        return;
-
     auto msg = zmq_ros2_bridge::msg::Imu();
 
     try {
@@ -249,26 +268,28 @@ void ZMQROS2Bridge::publish_imu(const nlohmann::json &imu_json) {
     }
 }
 
-void ZMQROS2Bridge::publish_image(const NumpyArray &numpy_array) {
-    if (!color_pub_)
-        return;
-
+void ZMQROS2Bridge::publish_image(
+    const NumpyArray &numpy_array,
+    const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr &publisher,
+    const std::string &frame_id) {
     auto msg = sensor_msgs::msg::Image();
 
     // Set timestamp
     msg.header.stamp = this->now();
-    msg.header.frame_id = color_zmq_topic_;
+    msg.header.frame_id = frame_id;
 
-    // Set image dimensions (assuming HxWxC format from numpy)
-    if (numpy_array.shape.size() != 3) {
-        RCLCPP_WARN(this->get_logger(), "Unexpected shape dimensions: %zu",
+    // Set image dimensions (HxW or HxWxC format from numpy)
+    if (numpy_array.shape.size() < 2 || numpy_array.shape.size() > 3) {
+        RCLCPP_WARN(this->get_logger(),
+                    "Unexpected shape dimensions: %zu (expected 2 or 3)",
                     numpy_array.shape.size());
         return;
     }
 
     msg.height = numpy_array.shape[0];
     msg.width = numpy_array.shape[1];
-    uint32_t channels = numpy_array.shape[2];
+    uint32_t channels =
+        (numpy_array.shape.size() == 3) ? numpy_array.shape[2] : 1;
 
     // Look up encoding and dtype_size from the map
     auto key = std::make_pair(numpy_array.dtype, channels);
@@ -292,7 +313,7 @@ void ZMQROS2Bridge::publish_image(const NumpyArray &numpy_array) {
     // Copy image data as raw bytes
     msg.data.assign(numpy_array.data, numpy_array.data + nbytes);
 
-    color_pub_->publish(msg);
+    publisher->publish(msg);
 
     RCLCPP_DEBUG(this->get_logger(),
                  "Published image %ux%u, %u channels, encoding=%s", msg.height,
@@ -300,9 +321,6 @@ void ZMQROS2Bridge::publish_image(const NumpyArray &numpy_array) {
 }
 
 void ZMQROS2Bridge::publish_events(const DictofNumpyArray &event_data) {
-    if (!event_pub_)
-        return;
-
     const std::vector<std::string> required_keys = {"x", "y", "t", "p"};
 
     // Check if all required keys exist
@@ -435,12 +453,46 @@ void ZMQROS2Bridge::color_sub_pub() {
             NumpyArray numpy_array;
 
             if (decode_numpy_array(messages, numpy_array)) {
-                publish_image(numpy_array);
+                publish_image(numpy_array, color_pub_, color_zmq_topic_);
             }
         }
 
     } catch (const std::exception &e) {
         RCLCPP_ERROR(this->get_logger(), "Color ZMQ thread error: %s",
+                     e.what());
+    }
+}
+
+void ZMQROS2Bridge::depth_sub_pub() {
+    if (!depth_enable_)
+        return;
+
+    try {
+        auto subscriber =
+            create_zmq_subscriber(depth_zmq_address_, depth_zmq_topic_);
+
+        RCLCPP_INFO(this->get_logger(), "Depth ZMQ thread connected");
+
+        while (running_ && rclcpp::ok()) {
+            std::vector<zmq::message_t> messages;
+
+            subscriber.set(zmq::sockopt::rcvtimeo, 1000);
+            auto result =
+                zmq::recv_multipart(subscriber, std::back_inserter(messages));
+
+            if (!result || messages.empty()) {
+                continue;
+            }
+
+            NumpyArray numpy_array;
+
+            if (decode_numpy_array(messages, numpy_array)) {
+                publish_image(numpy_array, depth_pub_, depth_zmq_topic_);
+            }
+        }
+
+    } catch (const std::exception &e) {
+        RCLCPP_ERROR(this->get_logger(), "Depth ZMQ thread error: %s",
                      e.what());
     }
 }

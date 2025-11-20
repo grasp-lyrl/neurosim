@@ -18,6 +18,11 @@ def generate_launch_description():
                 description="Enable Color image subscriber",
             ),
             DeclareLaunchArgument(
+                "enable_depth",
+                default_value="true",
+                description="Enable Depth image subscriber",
+            ),
+            DeclareLaunchArgument(
                 "enable_event",
                 default_value="true",
                 description="Enable Event data subscriber",
@@ -53,6 +58,21 @@ def generate_launch_description():
                 description="ROS2 topic to publish Color image data",
             ),
             DeclareLaunchArgument(
+                "depth_zmq_address",
+                default_value="ipc:///tmp/0",
+                description="ZMQ address for Depth image data",
+            ),
+            DeclareLaunchArgument(
+                "depth_zmq_topic",
+                default_value="depth",
+                description="ZMQ topic for Depth image data",
+            ),
+            DeclareLaunchArgument(
+                "depth_ros2_topic",
+                default_value="depth",
+                description="ROS2 topic to publish Depth image data",
+            ),
+            DeclareLaunchArgument(
                 "event_zmq_address",
                 default_value="ipc:///tmp/0",
                 description="ZMQ address for Event data",
@@ -71,6 +91,7 @@ def generate_launch_description():
                     {
                         "enable_imu": LaunchConfiguration("enable_imu"),
                         "enable_color": LaunchConfiguration("enable_color"),
+                        "enable_depth": LaunchConfiguration("enable_depth"),
                         "enable_event": LaunchConfiguration("enable_event"),
                         "imu_zmq_address": LaunchConfiguration("imu_zmq_address"),
                         "imu_zmq_topic": LaunchConfiguration("imu_zmq_topic"),
@@ -78,6 +99,9 @@ def generate_launch_description():
                         "color_zmq_address": LaunchConfiguration("color_zmq_address"),
                         "color_zmq_topic": LaunchConfiguration("color_zmq_topic"),
                         "color_ros2_topic": LaunchConfiguration("color_ros2_topic"),
+                        "depth_zmq_address": LaunchConfiguration("depth_zmq_address"),
+                        "depth_zmq_topic": LaunchConfiguration("depth_zmq_topic"),
+                        "depth_ros2_topic": LaunchConfiguration("depth_ros2_topic"),
                         "event_zmq_address": LaunchConfiguration("event_zmq_address"),
                         "event_zmq_topic": LaunchConfiguration("event_zmq_topic"),
                     }
