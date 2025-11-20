@@ -16,7 +16,7 @@ void ZMQROS2Bridge::declare_parameters() {
     // Parameters for Color
     this->declare_parameter("color_zmq_address", "ipc:///tmp/0");
     this->declare_parameter("color_zmq_topic", "color");
-    this->declare_parameter("color_ros2_topic", "image");
+    this->declare_parameter("color_ros2_topic", "color");
 
     // Parameters for Event
     this->declare_parameter("event_zmq_address", "ipc:///tmp/0");
@@ -38,8 +38,8 @@ ZMQROS2Bridge::ZMQROS2Bridge()
         imu_zmq_topic_ = this->get_parameter("imu_zmq_topic").as_string();
         imu_ros2_topic_ = this->get_parameter("imu_ros2_topic").as_string();
 
-        imu_pub_ =
-            this->create_publisher<sensor_msgs::msg::Imu>(imu_ros2_topic_, 10);
+        imu_pub_ = this->create_publisher<zmq_ros2_bridge::msg::Imu>(
+            imu_ros2_topic_, 10);
         zmq_threads_.emplace_back(&ZMQROS2Bridge::imu_sub_pub, this);
         RCLCPP_INFO(this->get_logger(), "IMU: ZMQ[%s:%s] -> ROS2[%s]",
                     imu_zmq_address_.c_str(), imu_zmq_topic_.c_str(),
@@ -209,7 +209,7 @@ void ZMQROS2Bridge::publish_imu(const nlohmann::json &imu_json) {
     if (!imu_pub_)
         return;
 
-    auto msg = sensor_msgs::msg::Imu();
+    auto msg = zmq_ros2_bridge::msg::Imu();
 
     try {
         // Set timestamp from the message if available
@@ -223,20 +223,20 @@ void ZMQROS2Bridge::publish_imu(const nlohmann::json &imu_json) {
 
         msg.header.frame_id = imu_zmq_topic_;
 
-        // Extract angular velocity
+        // Extract angular velocity (gyro)
         if (imu_json.contains("gyro")) {
-            auto &ang_vel = imu_json["gyro"];
-            msg.angular_velocity.x = ang_vel[0].get<double>();
-            msg.angular_velocity.y = ang_vel[1].get<double>();
-            msg.angular_velocity.z = ang_vel[2].get<double>();
+            auto &gyro = imu_json["gyro"];
+            msg.gyro.x = gyro[0].get<double>();
+            msg.gyro.y = gyro[1].get<double>();
+            msg.gyro.z = gyro[2].get<double>();
         }
 
-        // Extract linear acceleration
+        // Extract linear acceleration (accel)
         if (imu_json.contains("accel")) {
-            auto &lin_acc = imu_json["accel"];
-            msg.linear_acceleration.x = lin_acc[0].get<double>();
-            msg.linear_acceleration.y = lin_acc[1].get<double>();
-            msg.linear_acceleration.z = lin_acc[2].get<double>();
+            auto &accel = imu_json["accel"];
+            msg.accel.x = accel[0].get<double>();
+            msg.accel.y = accel[1].get<double>();
+            msg.accel.z = accel[2].get<double>();
         }
 
         imu_pub_->publish(msg);

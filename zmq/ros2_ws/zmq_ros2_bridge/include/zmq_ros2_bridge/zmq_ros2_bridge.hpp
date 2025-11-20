@@ -2,13 +2,13 @@
 #define ZMQ_ROS2_BRIDGE_HPP
 
 #include "zmq_ros2_bridge/msg/event.hpp"
+#include "zmq_ros2_bridge/msg/imu.hpp"
 #include <arpa/inet.h>
 #include <atomic>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
-#include <sensor_msgs/msg/imu.hpp>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -75,7 +75,7 @@ class ZMQROS2Bridge : public rclcpp::Node {
         {{"|u1", 3}, {"rgb8", 1}},
         {{"uint8", 4}, {"rgba8", 1}},
         {{"|u1", 4}, {"rgba8", 1}},
-        
+
         // uint16 encodings
         {{"uint16", 1}, {"mono16", 2}},
         {{"<u2", 1}, {"mono16", 2}},
@@ -83,7 +83,7 @@ class ZMQROS2Bridge : public rclcpp::Node {
         {{"uint16", 3}, {"rgb16", 2}},
         {{"<u2", 3}, {"rgb16", 2}},
         {{">u2", 3}, {"rgb16", 2}},
-        
+
         // float32 encodings
         {{"float32", 1}, {"32FC1", 4}},
         {{"<f4", 1}, {"32FC1", 4}},
@@ -94,7 +94,7 @@ class ZMQROS2Bridge : public rclcpp::Node {
         {{"float32", 4}, {"32FC4", 4}},
         {{"<f4", 4}, {"32FC4", 4}},
         {{">f4", 4}, {"32FC4", 4}},
-        
+
         // float64 encodings
         {{"float64", 1}, {"64FC1", 8}},
         {{"<f8", 1}, {"64FC1", 8}},
@@ -104,11 +104,10 @@ class ZMQROS2Bridge : public rclcpp::Node {
         {{">f8", 3}, {"64FC3", 8}},
         {{"float64", 4}, {"64FC4", 8}},
         {{"<f8", 4}, {"64FC4", 8}},
-        {{">f8", 4}, {"64FC4", 8}}
-    };
+        {{">f8", 4}, {"64FC4", 8}}};
 
     // ROS2 publishers
-    rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
+    rclcpp::Publisher<zmq_ros2_bridge::msg::Imu>::SharedPtr imu_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr color_pub_;
     rclcpp::Publisher<zmq_ros2_bridge::msg::Event>::SharedPtr event_pub_;
 
