@@ -1,111 +1,35 @@
+import os
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
+from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
+    # Get the path to the config file
+    config_file = LaunchConfiguration('config_file')
+    
+    # Default config file path
+    default_config = os.path.join(
+        get_package_share_directory('zmq_ros2_bridge'),
+        'config',
+        'zmq_ros2_bridge.yaml'
+    )
+    
     return LaunchDescription(
         [
             DeclareLaunchArgument(
-                "enable_imu",
-                default_value="true",
-                description="Enable IMU subscriber",
-            ),
-            DeclareLaunchArgument(
-                "enable_color",
-                default_value="true",
-                description="Enable Color image subscriber",
-            ),
-            DeclareLaunchArgument(
-                "enable_depth",
-                default_value="true",
-                description="Enable Depth image subscriber",
-            ),
-            DeclareLaunchArgument(
-                "enable_event",
-                default_value="true",
-                description="Enable Event data subscriber",
-            ),
-            DeclareLaunchArgument(
-                "imu_zmq_address",
-                default_value="ipc:///tmp/0",
-                description="ZMQ address for IMU data",
-            ),
-            DeclareLaunchArgument(
-                "imu_zmq_topic",
-                default_value="imu",
-                description="ZMQ topic for IMU data",
-            ),
-            DeclareLaunchArgument(
-                "imu_ros2_topic",
-                default_value="imu",
-                description="ROS2 topic to publish IMU data",
-            ),
-            DeclareLaunchArgument(
-                "color_zmq_address",
-                default_value="ipc:///tmp/0",
-                description="ZMQ address for Color image data",
-            ),
-            DeclareLaunchArgument(
-                "color_zmq_topic",
-                default_value="color",
-                description="ZMQ topic for Color image data",
-            ),
-            DeclareLaunchArgument(
-                "color_ros2_topic",
-                default_value="color",
-                description="ROS2 topic to publish Color image data",
-            ),
-            DeclareLaunchArgument(
-                "depth_zmq_address",
-                default_value="ipc:///tmp/0",
-                description="ZMQ address for Depth image data",
-            ),
-            DeclareLaunchArgument(
-                "depth_zmq_topic",
-                default_value="depth",
-                description="ZMQ topic for Depth image data",
-            ),
-            DeclareLaunchArgument(
-                "depth_ros2_topic",
-                default_value="depth",
-                description="ROS2 topic to publish Depth image data",
-            ),
-            DeclareLaunchArgument(
-                "event_zmq_address",
-                default_value="ipc:///tmp/0",
-                description="ZMQ address for Event data",
-            ),
-            DeclareLaunchArgument(
-                "event_zmq_topic",
-                default_value="events",
-                description="ZMQ topic for Event data",
+                'config_file',
+                default_value=default_config,
+                description='Path to the configuration YAML file'
             ),
             Node(
                 package="zmq_ros2_bridge",
                 executable="zmq_ros2_bridge_node",
                 name="zmq_ros2_bridge",
                 output="screen",
-                parameters=[
-                    {
-                        "enable_imu": LaunchConfiguration("enable_imu"),
-                        "enable_color": LaunchConfiguration("enable_color"),
-                        "enable_depth": LaunchConfiguration("enable_depth"),
-                        "enable_event": LaunchConfiguration("enable_event"),
-                        "imu_zmq_address": LaunchConfiguration("imu_zmq_address"),
-                        "imu_zmq_topic": LaunchConfiguration("imu_zmq_topic"),
-                        "imu_ros2_topic": LaunchConfiguration("imu_ros2_topic"),
-                        "color_zmq_address": LaunchConfiguration("color_zmq_address"),
-                        "color_zmq_topic": LaunchConfiguration("color_zmq_topic"),
-                        "color_ros2_topic": LaunchConfiguration("color_ros2_topic"),
-                        "depth_zmq_address": LaunchConfiguration("depth_zmq_address"),
-                        "depth_zmq_topic": LaunchConfiguration("depth_zmq_topic"),
-                        "depth_ros2_topic": LaunchConfiguration("depth_ros2_topic"),
-                        "event_zmq_address": LaunchConfiguration("event_zmq_address"),
-                        "event_zmq_topic": LaunchConfiguration("event_zmq_topic"),
-                    }
-                ],
+                parameters=[config_file],
             ),
         ]
     )
