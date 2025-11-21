@@ -301,6 +301,8 @@ async def main():
         settings=args.settings,
         world_rate=args.world_rate,
         publish_rate=args.publish_rate,
+        ipc_pub_path=args.ipc_pub_path,
+        ipc_sub_path=args.ipc_sub_path,
     )
 
     try:

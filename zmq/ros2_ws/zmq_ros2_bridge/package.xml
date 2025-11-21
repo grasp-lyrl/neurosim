@@ -3,7 +3,7 @@
 <package format="3">
   <name>zmq_ros2_bridge</name>
   <version>0.1.0</version>
-  <description>ZMQ to ROS2 bridge for quadrotor simulation</description>
+  <description>Bidirectional ZMQ and ROS2 bridge for quadrotor simulation</description>
   <maintainer email="richeek@seas.upenn.edu">Richeek Das</maintainer>
   <license>Apache-2.0</license>
 

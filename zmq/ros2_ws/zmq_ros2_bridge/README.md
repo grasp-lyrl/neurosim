@@ -1,6 +1,14 @@
-# ZMQ to ROS2 Bridge
+# ZMQ ↔ ROS2 Bridge
 
-A lightweight bridge for converting ZMQ messages (numpy arrays, JSON, and event data) to ROS2 messages.
+A bidirectional bridge for converting between ZMQ messages and ROS2 messages.
+
+## Bridges
+
+### 1. ZMQ to ROS2 Bridge (`zmq_ros2_bridge_node`)
+Converts ZMQ messages (numpy arrays, JSON, and event data) to ROS2 messages.
+
+### 2. ROS2 to ZMQ Bridge (`ros2_zmq_bridge_node`)
+Converts ROS2 control messages to ZMQ messages.
 
 ## Features
 
@@ -269,7 +277,7 @@ ros2 topic info /state
 
 ## Custom Message Definitions
 
-The bridge provides three custom message types:
+The bridge provides four custom message types:
 
 ### `zmq_ros2_bridge/msg/Imu`
 Simplified IMU message with only gyroscope and accelerometer data.
@@ -279,3 +287,65 @@ Event camera message containing arrays of x, y coordinates, timestamps, and pola
 
 ### `zmq_ros2_bridge/msg/State`
 Complete robot/drone state including position, orientation, linear velocity, angular velocity, timestamp, and simulation step count.
+
+### `zmq_ros2_bridge/msg/Control`
+Control message containing motor commands (4-element float32 array for cmd_motor_speeds).
+
+---
+
+## ROS2 to ZMQ Bridge Usage
+
+The ROS2 to ZMQ bridge (`ros2_zmq_bridge_node`) subscribes to ROS2 control messages and publishes them to ZMQ.
+
+### Launch the bridge
+
+```bash
+# With default config
+ros2 launch zmq_ros2_bridge ros2_zmq_bridge.launch.py
+
+# With custom config file
+ros2 launch zmq_ros2_bridge ros2_zmq_bridge.launch.py \
+  config_file:=/path/to/your/config.yaml
+```
+
+### Configuration (ros2_zmq_bridge.yaml)
+
+```yaml
+/**:
+  ros2__parameters:
+    # Enable/disable control bridge
+    enable_control: true
+    
+    # Control parameters
+    control_zmq_address: "ipc:///tmp/1"
+    control_zmq_topic: "control"
+    control_ros2_topic: "control"
+```
+
+### Publishing Control Commands
+
+```bash
+# Publish a control command
+ros2 topic pub /control zmq_ros2_bridge/msg/Control \
+  "{header: {frame_id: 'base_link'}, cmd_motor_speeds: [100.0, 100.0, 100.0, 100.0]}"
+```
+
+### Message Format
+
+The bridge converts ROS2 Control messages to ZMQ JSON format:
+
+**ROS2 Message:**
+```
+header:
+  stamp: ...
+  frame_id: base_link
+cmd_motor_speeds: [100.0, 100.0, 100.0, 100.0]
+```
+
+**ZMQ JSON:**
+```json
+{
+  "timestamp": 1234567890.123,
+  "cmd_motor_speeds": [100.0, 100.0, 100.0, 100.0]
+}
+```

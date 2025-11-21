@@ -188,14 +188,14 @@ async def main():
         "--ipc-pub-path",
         "-ipp",
         type=str,
-        default="ipc:///tmp/1",
+        default="/tmp/1",
         help="IPC path for the publisher socket.",
     )
     parser.add_argument(
         "--ipc-sub-path",
         "-isp",
         type=str,
-        default="ipc:///tmp/0",
+        default="/tmp/0",
         help="IPC path for the subscriber socket.",
     )
     parser.add_argument(
@@ -206,7 +206,12 @@ async def main():
     )
     args = parser.parse_args()
 
-    controller_node = ControllerNode(settings=args.settings, control_rate=args.control_rate)
+    controller_node = ControllerNode(
+        settings=args.settings,
+        control_rate=args.control_rate,
+        ipc_pub_path=args.ipc_pub_path,
+        ipc_sub_path=args.ipc_sub_path,
+    )
 
     try:
         await controller_node.run()

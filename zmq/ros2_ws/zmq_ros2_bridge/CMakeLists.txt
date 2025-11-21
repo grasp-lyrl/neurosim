@@ -26,6 +26,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Event.msg"
   "msg/Imu.msg"
   "msg/State.msg"
+  "msg/Control.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 
@@ -34,7 +35,7 @@ include_directories(
   include
 )
 
-# Add executable
+# Add zmq_ros2_bridge executable
 add_executable(zmq_ros2_bridge_node
   src/zmq_ros2_bridge.cpp
 )
@@ -60,9 +61,30 @@ target_link_libraries(zmq_ros2_bridge_node
   "${cpp_typesupport_target}"
 )
 
+# Add ros2_zmq_bridge executable
+add_executable(ros2_zmq_bridge_node
+  src/ros2_zmq_bridge.cpp
+)
+
+# Link dependencies
+ament_target_dependencies(ros2_zmq_bridge_node
+  rclcpp
+  std_msgs
+)
+
+target_link_libraries(ros2_zmq_bridge_node
+  cppzmq
+  nlohmann_json::nlohmann_json
+)
+
+target_link_libraries(ros2_zmq_bridge_node
+  "${cpp_typesupport_target}"
+)
+
 # Install targets
 install(TARGETS
   zmq_ros2_bridge_node
+  ros2_zmq_bridge_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
