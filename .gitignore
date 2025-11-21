@@ -21,3 +21,5 @@ models/
 habitat-sim/
 
 .clang-format
+.vscode/
+.DS_Store
