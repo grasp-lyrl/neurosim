@@ -1,5 +1,5 @@
 #!/bin/bash
 docker build \
   -t neurosim:latest \
-  -f Dockerfile \
+  -f docker/Dockerfile \
   .

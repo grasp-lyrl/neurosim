@@ -2,6 +2,33 @@
 
 A bidirectional bridge for converting between ZMQ messages and ROS2 messages.
 
+## Table of Contents
+
+- [ZMQ ↔ ROS2 Bridge](#zmq--ros2-bridge)
+  - [Table of Contents](#table-of-contents)
+  - [Bridges](#bridges)
+    - [1. ZMQ to ROS2 Bridge (`zmq_ros2_bridge_node`)](#1-zmq-to-ros2-bridge-zmq_ros2_bridge_node)
+    - [2. ROS2 to ZMQ Bridge (`ros2_zmq_bridge_node`)](#2-ros2-to-zmq-bridge-ros2_zmq_bridge_node)
+  - [Features](#features)
+  - [Dependencies](#dependencies)
+  - [Building](#building)
+  - [ZMQ to ROS2 Bridge Usage](#zmq-to-ros2-bridge-usage)
+    - [Configuration](#configuration)
+    - [Topics](#topics)
+    - [Parameters](#parameters)
+    - [Message Formats](#message-formats)
+    - [Viewing the Data](#viewing-the-data)
+  - [ROS2 to ZMQ Bridge Usage](#ros2-to-zmq-bridge-usage)
+    - [Launch the bridge](#launch-the-bridge)
+    - [Configuration (ros2\_zmq\_bridge.yaml)](#configuration-ros2_zmq_bridgeyaml)
+    - [Message Format](#message-format)
+  - [Custom Message Definitions](#custom-message-definitions)
+    - [`zmq_ros2_bridge/msg/Imu`](#zmq_ros2_bridgemsgimu)
+    - [`zmq_ros2_bridge/msg/Event`](#zmq_ros2_bridgemsgevent)
+    - [`zmq_ros2_bridge/msg/State`](#zmq_ros2_bridgemsgstate)
+    - [`zmq_ros2_bridge/msg/Control`](#zmq_ros2_bridgemsgcontrol)
+  - [Compilation Issues](#compilation-issues)
+
 ## Bridges
 
 ### 1. ZMQ to ROS2 Bridge (`zmq_ros2_bridge_node`)
@@ -23,7 +50,7 @@ Converts ROS2 control messages to ZMQ messages.
 
 ## Dependencies
 
-- ROS2 (Humble or later)
+- ROS2 (Humble)
 - ZeroMQ (`libzmq3-dev`)
 - cppzmq headers
 - nlohmann_json
@@ -31,7 +58,7 @@ Converts ROS2 control messages to ZMQ messages.
 ## Building
 
 ```bash
-# Navigate to your ROS2 workspace
+# Navigate to the ROS2 workspace where the package is located
 cd ~/ros2_ws
 
 # Build the package
@@ -41,9 +68,7 @@ colcon build --packages-select zmq_ros2_bridge
 source install/setup.bash
 ```
 
-## Usage
-
-### Using launch file with config file (recommended)
+## ZMQ to ROS2 Bridge Usage
 
 ```bash
 # With default config
@@ -54,19 +79,10 @@ ros2 launch zmq_ros2_bridge zmq_ros2_bridge.launch.py \
   config_file:=/path/to/your/config.yaml
 ```
 
-### Running directly with parameters
 
-```bash
-ros2 run zmq_ros2_bridge zmq_ros2_bridge_node \
-  --ros-args \
-  --params-file /path/to/config.yaml
-```
+### Configuration
 
-## Configuration
-
-### Configuration File Format
-
-Create a YAML file with the following structure:
+Create a YAML file with the following structure: (See `config/zmq_ros2_bridge.yaml` for an example)
 
 ```yaml
 zmq_ros2_bridge:
@@ -104,13 +120,7 @@ zmq_ros2_bridge:
     state_ros2_topic: "state"
 ```
 
-### Example Configuration
-
-See `config/zmq_ros2_bridge.yaml` for a complete example configuration.
-
-## Topics
-
-### Published Topics
+### Topics
 
 Topics are configured individually for each sensor type:
 
@@ -122,7 +132,7 @@ Topics are configured individually for each sensor type:
 
 **Note:** Topic names are configurable via `*_ros2_topic` parameters in the config file.
 
-## Parameters
+### Parameters
 
 ### Enable/Disable Flags
 
@@ -141,7 +151,7 @@ For each sensor type, you can configure:
 
 Where `<sensor>` is one of: `imu`, `color`, `depth`, `event`, `state`
 
-## Message Formats
+### Message Formats
 
 ### 1. Image Messages (Numpy Arrays) - Color & Depth
 
@@ -234,21 +244,7 @@ uint64[] t  # Timestamps
 uint8[] p   # Polarities
 ```
 
-## Architecture
-
-The bridge creates **one thread per sensor type** that is enabled. Each thread:
-1. Connects to its configured ZMQ address
-2. Subscribes to its specific ZMQ topic
-3. Continuously receives and decodes messages
-4. Publishes to its ROS2 topic
-
-**Thread Management:**
-- Threads are spawned during node construction for enabled sensors
-- All threads share a single ZMQ context
-- Graceful shutdown joins all threads on node destruction
-- Each thread has a 1-second receive timeout for responsive shutdown
-
-## Viewing the Data
+### Viewing the Data
 
 ```bash
 # List all topics
@@ -275,7 +271,7 @@ ros2 topic info /imu
 ros2 topic info /state
 ```
 
-## Custom Message Definitions
+### Custom Message Definitions
 
 The bridge provides four custom message types:
 
@@ -322,17 +318,9 @@ ros2 launch zmq_ros2_bridge ros2_zmq_bridge.launch.py \
     control_ros2_topic: "control"
 ```
 
-### Publishing Control Commands
-
-```bash
-# Publish a control command
-ros2 topic pub /control zmq_ros2_bridge/msg/Control \
-  "{header: {frame_id: 'base_link'}, cmd_motor_speeds: [100.0, 100.0, 100.0, 100.0]}"
-```
-
 ### Message Format
 
-The bridge converts ROS2 Control messages to ZMQ JSON format:
+The bridge converts ROS2 Control messages to JSON format:
 
 **ROS2 Message:**
 ```
@@ -342,10 +330,20 @@ header:
 cmd_motor_speeds: [100.0, 100.0, 100.0, 100.0]
 ```
 
-**ZMQ JSON:**
+**ZMQ Message:**
 ```json
 {
   "timestamp": 1234567890.123,
   "cmd_motor_speeds": [100.0, 100.0, 100.0, 100.0]
 }
 ```
+
+## Compilation Issues
+
+If you encounter compilation issues, you may need to install specific versions of the following Python packages:
+
+```bash
+pip install empy==3.3.4 lark==1.3.1 catkin_pkg==1.1.0
+```
+
+These dependencies are required for ROS2 message generation and parsing.

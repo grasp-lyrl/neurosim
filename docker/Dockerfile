@@ -19,7 +19,7 @@ RUN apt update \
     && locale-gen en_US en_US.UTF-8 \
     && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 \
     && export LANG=en_US.UTF-8 \
-    && python3 -m pip install pip==25.1.1 
+    && python3 -m pip install pip==25.1.1
 
 RUN echo '"\e[A": history-search-backward' > /root/.inputrc \
     && echo '"\e[B": history-search-forward' >> /root/.inputrc \
@@ -47,6 +47,38 @@ RUN apt update \
     && rosdep init \
     && rosdep update
 
+# Install depencencies for building ZMQ ROS2 Bridge
+# 1. libzmq
+RUN wget https://github.com/zeromq/libzmq/releases/download/v4.3.5/zeromq-4.3.5.tar.gz \
+    && tar -xvf zeromq-4.3.5.tar.gz \
+    && cd zeromq-4.3.5 \
+    && mkdir build \
+    && cd build \
+    && cmake .. \
+    && make -j$(nproc --all / 2) install \
+    && cd ../.. \
+    && rm -rf zeromq-4.3.5 zeromq-4.3.5.tar.gz \
+# 2. cppzmq
+    && wget -O cppzmq-4.11.0.tar.gz https://github.com/zeromq/cppzmq/archive/refs/tags/v4.11.0.tar.gz \
+    && tar -xvf cppzmq-4.11.0.tar.gz \
+    && cd cppzmq-4.11.0 \
+    && mkdir build \
+    && cd build \
+    && cmake -DCPPZMQ_BUILD_TESTS=OFF .. \
+    && make -j$(nproc --all / 2) install \
+    && cd ../.. \
+    && rm -rf cppzmq-4.11.0 v4.11.0.tar.gz \
+# 3. nlohmann_json
+    && wget https://github.com/nlohmann/json/archive/refs/tags/v3.12.0.tar.gz \
+    && tar -xvf v3.12.0.tar.gz \
+    && cd json-3.12.0 \
+    && mkdir build \
+    && cd build \
+    && cmake .. \
+    && make -j$(nproc --all / 2) install \
+    && cd ../.. \
+    && rm -rf json-3.12.0 v3.12.0.tar.gz
+
 # Install Conda
 RUN curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh" \
     && bash Miniforge3-$(uname)-$(uname -m).sh -b -p /opt/conda \
@@ -55,4 +87,4 @@ RUN curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/downloa
     && echo 'export PATH=/opt/conda/bin:$PATH' >> ~/.bashrc \
     && /opt/conda/bin/conda init bash
 
-COPY docker_reqs/10_nvidia.json /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+COPY docker/10_nvidia.json /usr/share/glvnd/egl_vendor.d/10_nvidia.json
