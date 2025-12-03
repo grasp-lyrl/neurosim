@@ -192,6 +192,8 @@ class Simulator:
         print("FPS: ", (self.simsteps - 10) / sum(latencies[10:]))
         print("Total time: ", sum(latencies))
 
+        self._hwrapper.profiler.print_summary()
+
         if save_h5:
             h5f.close()
 

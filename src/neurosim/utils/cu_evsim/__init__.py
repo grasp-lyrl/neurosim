@@ -1,1 +1,0 @@
-from neurosim.utils.cu_evsim.src.lib.evsim_api import EventSimulatorCUDA

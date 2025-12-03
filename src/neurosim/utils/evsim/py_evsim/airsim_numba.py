@@ -1,7 +1,7 @@
-from numba.np.ufunc import parallel
 import numpy as np
 from types import SimpleNamespace
-from numba import njit, prange, set_num_threads
+from numba import njit, prange
+import torch
 
 EVENT_TYPE = np.dtype(
     [("timestamp", "f8"), ("x", "u2"), ("y", "u2"), ("polarity", "b")], align=True
@@ -51,7 +51,7 @@ def esim(
 
         lb = crossings[x] - it
         ub = crossings[x] - itdt
-        
+
         pos_check = lb > 0 and (pol == 1) and ub < 0
         neg_check = lb < 0 and (pol == -1) and ub > 0
 
@@ -87,11 +87,11 @@ class EventSimulator:
         self.W = W
         self.config = config
         self.last_image = None
+        self.npix = H * W  # Must be set before init() is called
+
         if first_image is not None:
             assert first_time is not None
             self.init(first_image, first_time)
-
-        self.npix = H * W
 
     def init(self, first_image, first_time):
         print("Initialized event camera simulator with sensor size:", first_image.shape)
@@ -102,27 +102,31 @@ class EventSimulator:
         # It makes multi-core processing more straightforward
         first_image = first_image.reshape(-1)
 
+        if isinstance(first_image, torch.Tensor):
+            first_image = first_image.cpu().numpy()
+
         # Allocations
         self.last_image = first_image.copy()
         self.current_image = first_image.copy()
 
         self.last_time = first_time
 
-        self.output_events = np.zeros(
-            (self.config.max_events_per_frame), dtype=EVENT_TYPE
-        )
+        self.output_events = np.zeros((self.config.max_events_per_frame), dtype=EVENT_TYPE)
         self.event_count = 0
         self.spikes = np.zeros((self.npix))
 
     def image_callback(self, new_image, new_time):
         """
-            new_image: The new image to process (H, W)
-            new_time: The time of the new image in microseconds
+        new_image: The new image to process (H, W)
+        new_time: The time of the new image in microseconds
         """
-        
+
         if self.last_image is None:
             self.init(new_image, new_time)
-            return None, None
+            return None
+
+        if isinstance(new_image, torch.Tensor):
+            new_image = new_image.cpu().numpy()
 
         assert new_time > 0
         assert new_image.shape == self.resolution
@@ -133,9 +137,7 @@ class EventSimulator:
         delta_time = new_time - self.last_time
 
         config = self.config
-        self.output_events = np.zeros(
-            (self.config.max_events_per_frame), dtype=EVENT_TYPE
-        )
+        self.output_events = np.zeros((self.config.max_events_per_frame), dtype=EVENT_TYPE)
         self.spikes = np.zeros((self.npix))
 
         self.crossings = self.last_image.copy()
@@ -159,4 +161,4 @@ class EventSimulator:
         result = self.output_events[: self.event_count]
         result.sort(order=["timestamp"], axis=0)
 
-        return self.spikes, result
+        return result["x"], result["y"], result["timestamp"], result["polarity"]
