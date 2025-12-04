@@ -128,7 +128,7 @@ for i in range(1, len(backends)):
         va="bottom",
         fontsize=12,
         fontweight="bold",
-        color="#444444",
+        color="black",
     )
     ax1.text(
         i + width / 2,
@@ -138,7 +138,7 @@ for i in range(1, len(backends)):
         va="bottom",
         fontsize=12,
         fontweight="bold",
-        color="#444444",
+        color="black",
     )
 
 # Add "1×" baseline annotation for Neurosim
@@ -268,6 +268,11 @@ for i, (v, h) in enumerate(zip(vga_esim_pct, hd_esim_pct)):
 # =============================================================================
 # save
 # =============================================================================
+
+# Add subplot labels (A), (B), (C)
+ax1.text(-0.1, 1.05, '(A)', transform=ax1.transAxes, fontsize=16, fontweight='bold', va='bottom', ha='right')
+ax2.text(-0.1, 1.05, '(B)', transform=ax2.transAxes, fontsize=16, fontweight='bold', va='bottom', ha='right')
+ax3.text(-0.1, 1.05, '(C)', transform=ax3.transAxes, fontsize=16, fontweight='bold', va='bottom', ha='right')
 
 plt.tight_layout()
 
