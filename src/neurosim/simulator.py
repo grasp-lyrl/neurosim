@@ -36,13 +36,14 @@ class Simulator:
         world_rate: int = 1000,
         control_rate: int = 100,
         sim_time: int = 20,
+        enable_profiling: bool = False,
     ):
         """
         settings: Path to the settings file for the habitat scene and simulator.
         if None, loads default settings.
         """
         # Visual Simulator instance
-        self._hwrapper = HabitatWrapper(settings)
+        self._hwrapper = HabitatWrapper(settings, enable_profiling=enable_profiling)
 
         # Dynamics Simulator instance
         self._quadsim = Multirotor(quad_params, aero=False, integration_method="euler")
@@ -60,9 +61,13 @@ class Simulator:
         # Load IMU sensor
         self.has_imu_sensor = self._hwrapper.settings["imu_sensor"]
         if self.has_imu_sensor:
-            self.imu_sampling_rate = self._hwrapper.settings.get("imu_sampling_rate", 100)
+            self.imu_sampling_rate = self._hwrapper.settings.get(
+                "imu_sampling_rate", 100
+            )
             self.imu_sensor_steps = world_rate / self.imu_sampling_rate  # sim steps
-            self.imu = Imu(p_BS=np.zeros(3), R_BS=np.eye(3), sampling_rate=self.imu_sampling_rate)
+            self.imu = Imu(
+                p_BS=np.zeros(3), R_BS=np.eye(3), sampling_rate=self.imu_sampling_rate
+            )
 
         # Load trajectory settings
         if settings is not None:
@@ -87,12 +92,18 @@ class Simulator:
                 v_avg=trajectory["v_avg"],
             )
         else:
-            raise ValueError("Invalid trajectory type. Use 'constant_speed' or 'polynomial'.")
+            raise ValueError(
+                "Invalid trajectory type. Use 'constant_speed' or 'polynomial'."
+            )
 
         # Get bounds of the scene from the Habitat Sim
         self.scene_aabb = self._hwrapper._scene_aabb  # _magnum.Range3d
-        self.scene_limits = np.vstack((self.scene_aabb.min, self.scene_aabb.max)).T[[0, 2, 1]]
-        self.scene_limits[1] = -self.scene_limits[1, ::-1]  # Invert y-axis for the simulator
+        self.scene_limits = np.vstack((self.scene_aabb.min, self.scene_aabb.max)).T[
+            [0, 2, 1]
+        ]
+        self.scene_limits[1] = -self.scene_limits[
+            1, ::-1
+        ]  # Invert y-axis for the simulator
 
         self.time = 0  # time in seconds
         self.simsteps = 0  # number of simulation steps
@@ -120,7 +131,9 @@ class Simulator:
         self.simsteps += 1
         self.state = self._quadsim.step(self.state, control, self.t_step)
 
-        position = np.array([self.state["x"][0], self.state["x"][2], -self.state["x"][1]])
+        position = np.array(
+            [self.state["x"][0], self.state["x"][2], -self.state["x"][1]]
+        )
         rotation = np.quaternion(
             self.state["q"][3],
             self.state["q"][0],
@@ -129,7 +142,9 @@ class Simulator:
         )
         self._hwrapper.update_agent_pose(0, position, rotation)
 
-    def simulate_traj(self, save_h5: str = None, save_png: str = None, display: bool = False):
+    def simulate_traj(
+        self, save_h5: str = None, save_png: str = None, display: bool = False
+    ):
         """
         Simulate the trajectory.
 
@@ -148,7 +163,9 @@ class Simulator:
             Path(save_h5).parent.mkdir(parents=True, exist_ok=True)
             h5f = init_h5(save_h5, self.height, self.width)
         if save_png or display:
-            self.event_img = np.zeros((self.height, self.width, 3), dtype=np.uint8)  # Init event im
+            self.event_img = np.zeros(
+                (self.height, self.width, 3), dtype=np.uint8
+            )  # Init event im
         if save_png:
             save_png = Path(save_png)
             for subdir in ["events", "color", "depth"]:
@@ -164,13 +181,23 @@ class Simulator:
                 start_time = time.perf_counter()
 
                 self.simulate_step(control)
-                events = self._hwrapper.render_events(self.time * 1e6, to_numpy=True)  # in us
+                events = self._hwrapper.render_events(
+                    self.time * 1e6, to_numpy=True
+                )  # in us
                 if self.has_imu_sensor and self.simsteps % self.imu_sensor_steps == 0:
                     statedot = self._quadsim.statedot(self.state, control, 0)
-                    imu_data = self.imu.measurement(self.state, statedot, with_noise=False)
-                if self.has_color_sensor and self.simsteps % self.color_sensor_steps == 0:
+                    imu_data = self.imu.measurement(
+                        self.state, statedot, with_noise=False
+                    )
+                if (
+                    self.has_color_sensor
+                    and self.simsteps % self.color_sensor_steps == 0
+                ):
                     color_img = self._hwrapper.render_color_sensor().cpu().numpy()
-                if self.has_depth_sensor and self.simsteps % self.depth_sensor_steps == 0:
+                if (
+                    self.has_depth_sensor
+                    and self.simsteps % self.depth_sensor_steps == 0
+                ):
                     depth_img = self._hwrapper.render_depth_sensor().cpu().numpy()
 
                 latencies.append(time.perf_counter() - start_time)
@@ -182,7 +209,9 @@ class Simulator:
                         events, color_img, depth_img, imu_data, save_png, display
                     )
 
-            flat = self._trajectory.update(self.time)  # returns the traj point at the current time
+            flat = self._trajectory.update(
+                self.time
+            )  # returns the traj point at the current time
             control = self._controller.update(self.time, self.state, flat)
 
         print("Average latency: ", np.mean(latencies))
@@ -192,7 +221,10 @@ class Simulator:
         print("FPS: ", (self.simsteps - 10) / sum(latencies[10:]))
         print("Total time: ", sum(latencies))
 
-        self._hwrapper.profiler.print_summary()
+        print(
+            f"Event Simulator Backend [{self._hwrapper.settings['event_camera_backend']}] Benchmark: ",
+            self._hwrapper._benchmark.to_dict(),
+        )
 
         if save_h5:
             h5f.close()
@@ -219,7 +251,9 @@ class Simulator:
             data["depth"] = depth_img
         append_data_to_h5(h5f, **data)
 
-    def save_or_display_sim_data(self, events, color_img, depth_img, imu_data, save_png, display):
+    def save_or_display_sim_data(
+        self, events, color_img, depth_img, imu_data, save_png, display
+    ):
         """
         Save or display simulation data.
 
@@ -240,7 +274,9 @@ class Simulator:
                 if color_img is not None:
                     plt.imsave(save_png / "color" / f"{self.simsteps}.png", color_img)
             if depth_img is not None and self.simsteps % self.depth_sensor_steps == 0:
-                plt.imsave(save_png / "depth" / f"{self.simsteps}.png", depth_img, cmap="jet")
+                plt.imsave(
+                    save_png / "depth" / f"{self.simsteps}.png", depth_img, cmap="jet"
+                )
 
         if display:
             rr.set_time("stable_time", duration=self.time)
@@ -255,7 +291,10 @@ class Simulator:
                         relation=rr.TransformRelation.ParentFromChild,
                     ),
                 )
-                rr.log("navigation/trajectory", rr.Points3D(positions=self.state["x"][None, :]))
+                rr.log(
+                    "navigation/trajectory",
+                    rr.Points3D(positions=self.state["x"][None, :]),
+                )
                 if color_img is not None:
                     rr.log("color", rr.Image(color_img))
                 if self.has_imu_sensor:

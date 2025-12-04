@@ -14,7 +14,9 @@ def color2intensity(color_im: torch.Tensor) -> torch.Tensor:
         torch.Tensor: Intensity image of shape (H, W).
     """
     intensity_im = (
-        0.2989 * color_im[:, :, 0] + 0.5870 * color_im[:, :, 1] + 0.1140 * color_im[:, :, 2]
+        0.2989 * color_im[:, :, 0]
+        + 0.5870 * color_im[:, :, 1]
+        + 0.1140 * color_im[:, :, 2]
     )
     return intensity_im
 
@@ -25,19 +27,44 @@ def init_h5(save_h5, height, width):
     """
     h5f = h5py.File(save_h5, "w")
     h5f.create_dataset(
-        "events/x", (0,), maxshape=(None,), dtype=np.uint16, chunks=(40000,), compression="lzf"
+        "events/x",
+        (0,),
+        maxshape=(None,),
+        dtype=np.uint16,
+        chunks=(40000,),
+        compression="lzf",
     )  # 0-640
     h5f.create_dataset(
-        "events/y", (0,), maxshape=(None,), dtype=np.uint16, chunks=(40000,), compression="lzf"
+        "events/y",
+        (0,),
+        maxshape=(None,),
+        dtype=np.uint16,
+        chunks=(40000,),
+        compression="lzf",
     )  # 0-480
     h5f.create_dataset(
-        "events/p", (0,), maxshape=(None,), dtype=np.uint8, chunks=(40000,), compression="lzf"
+        "events/p",
+        (0,),
+        maxshape=(None,),
+        dtype=np.uint8,
+        chunks=(40000,),
+        compression="lzf",
     )  # 0-1
     h5f.create_dataset(
-        "events/t", (0,), maxshape=(None,), dtype=np.uint64, chunks=(40000,), compression="lzf"
+        "events/t",
+        (0,),
+        maxshape=(None,),
+        dtype=np.uint64,
+        chunks=(40000,),
+        compression="lzf",
     )  # us
     h5f.create_dataset(
-        "events/ms_idx", (0,), maxshape=(None,), dtype=np.uint64, chunks=(1000,), compression="lzf"
+        "events/ms_idx",
+        (0,),
+        maxshape=(None,),
+        dtype=np.uint64,
+        chunks=(1000,),
+        compression="lzf",
     )  # milliseconds to index of events
     h5f.create_dataset(
         "color/data",
@@ -64,16 +91,36 @@ def init_h5(save_h5, height, width):
         compression="lzf",
     )  # depth image
     h5f.create_dataset(
-        "depth/t", (0,), maxshape=(None,), dtype=np.uint64, chunks=(1000,), compression="lzf"
+        "depth/t",
+        (0,),
+        maxshape=(None,),
+        dtype=np.uint64,
+        chunks=(1000,),
+        compression="lzf",
     )  # timestamps of depth images in microseconds
     h5f.create_dataset(
-        "state/x", (0, 3), maxshape=(None, 3), dtype=np.float32, chunks=(1000, 3), compression="lzf"
+        "state/x",
+        (0, 3),
+        maxshape=(None, 3),
+        dtype=np.float32,
+        chunks=(1000, 3),
+        compression="lzf",
     )  # position (x, y, z) #! We store the rotorpy states
     h5f.create_dataset(
-        "state/q", (0, 4), maxshape=(None, 4), dtype=np.float32, chunks=(1000, 4), compression="lzf"
+        "state/q",
+        (0, 4),
+        maxshape=(None, 4),
+        dtype=np.float32,
+        chunks=(1000, 4),
+        compression="lzf",
     )  # quaternion (w, x, y, z)
     h5f.create_dataset(
-        "state/t", (0,), maxshape=(None,), dtype=np.uint64, chunks=(1000,), compression="lzf"
+        "state/t",
+        (0,),
+        maxshape=(None,),
+        dtype=np.uint64,
+        chunks=(1000,),
+        compression="lzf",
     )  # timestamps of state in microseconds
     h5f.create_dataset(
         "imu/accel",
@@ -92,13 +139,20 @@ def init_h5(save_h5, height, width):
         compression="lzf",
     )  # Gyroscope data (x, y, z)
     h5f.create_dataset(
-        "imu/t", (0,), maxshape=(None,), dtype=np.uint64, chunks=(1000,), compression="lzf"
+        "imu/t",
+        (0,),
+        maxshape=(None,),
+        dtype=np.uint64,
+        chunks=(1000,),
+        compression="lzf",
     )  # Timestamps of IMU data in microseconds
 
     return h5f
 
 
-def append_data_to_h5(h5f, events=None, color=None, depth=None, state=None, imu=None, time=None):
+def append_data_to_h5(
+    h5f, events=None, color=None, depth=None, state=None, imu=None, time=None
+):
     """
     Append events, color, and/or depth data to HDF5 file.
 

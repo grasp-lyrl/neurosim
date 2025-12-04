@@ -28,6 +28,12 @@ equirect_rgba_sensor: false
 equirect_depth_sensor: false
 equirect_semantic_sensor: false
 
+# Backend to use: "cuda", "vid2e", "torch", "airsim", or "auto"
+event_camera_backend: "cuda"
+# Contrast thresholds
+event_contrast_threshold_pos: 0.35
+event_contrast_threshold_neg: 0.35
+
 # Camera Rates
 imu_sampling_rate: 50 # Hz
 color_sensor_rate: 10

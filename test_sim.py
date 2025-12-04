@@ -12,13 +12,14 @@ parser.add_argument("--sim_time", type=int, default=20)
 parser.add_argument("--save_png", type=str, default=None, help="Save the simulation data in PNG format")
 parser.add_argument("--save_h5", type=str, default=None, help="Save the simulation data in HDF5 format")
 parser.add_argument("--display", action="store_true", help="Display the simulation data")
+parser.add_argument("--profile", action="store_true", help="Enable profiling for event simulator backend")
 
 args = parser.parse_args()
 
 
 def main():
     settings = Path(args.settings) if args.settings else None
-    sim = Simulator(settings, args.world_rate, args.control_rate, args.sim_time)
+    sim = Simulator(settings, args.world_rate, args.control_rate, args.sim_time, args.profile)
     sim.simulate_traj(args.save_h5, args.save_png, args.display)
 
 
