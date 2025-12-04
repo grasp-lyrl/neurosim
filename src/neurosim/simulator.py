@@ -1,6 +1,7 @@
 import copy
 import time
 import yaml
+import pprint
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -213,18 +214,24 @@ class Simulator:
                 self.time
             )  # returns the traj point at the current time
             control = self._controller.update(self.time, self.state, flat)
+        # End of simulation loop
+        print("Simulation completed. \n")
 
-        print("Average latency: ", np.mean(latencies))
-        print("Max latency: ", np.max(latencies))
-        print("Median latency: ", np.median(latencies))
-        print("Frames: ", self.simsteps)
-        print("FPS: ", (self.simsteps - 10) / sum(latencies[10:]))
-        print("Total time: ", sum(latencies))
+        stats = {
+            "Average latency": np.mean(latencies),
+            "Max latency": np.max(latencies),
+            "Median latency": np.median(latencies),
+            "Frames": self.simsteps,
+            "FPS": (self.simsteps - 10) / sum(latencies[10:]),
+            "Total time": sum(latencies),
+        }
+        print("Simulation Latency Stats: ")
+        pprint.pprint(stats)
 
         print(
-            f"Event Simulator Backend [{self._hwrapper.settings['event_camera_backend']}] Benchmark: ",
-            self._hwrapper._benchmark.to_dict(),
+            f"Event Simulator Backend [{self._hwrapper.settings['event_camera_backend']}] Benchmark: "
         )
+        pprint.pprint(self._hwrapper._benchmark.to_dict())
 
         if save_h5:
             h5f.close()

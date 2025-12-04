@@ -23,3 +23,12 @@ habitat-sim/
 .clang-format
 .vscode/
 .DS_Store
+
+# artifacts
+*.h5
+*.png
+*.npy
+*.npz
+*.prof
+*.pdf
+*.txt
