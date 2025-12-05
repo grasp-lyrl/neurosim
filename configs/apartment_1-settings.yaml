@@ -39,6 +39,10 @@ imu_sampling_rate: 50 # Hz
 color_sensor_rate: 10
 depth_sensor_rate: 10
 
+# Navmesh
+navmesh: true
+navmesh_meters_per_pixel: 0.1
+
 seed: 1
 physics_config_file: "data/default.physics_config.json"
 enable_physics: true # Replace with false if `built_with_bullet` is False

@@ -1,3 +1,4 @@
+import cv2
 import copy
 import time
 import yaml
@@ -7,7 +8,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from neurosim.habitat_wrapper import HabitatWrapper
-from neurosim.utils import init_h5, append_data_to_h5
+from neurosim.utils import init_h5, append_data_to_h5, get_pose_on_navmesh
 
 from rotorpy.vehicles.multirotor import Multirotor
 from rotorpy.vehicles.crazyflie_params import quad_params
@@ -96,15 +97,6 @@ class Simulator:
             raise ValueError(
                 "Invalid trajectory type. Use 'constant_speed' or 'polynomial'."
             )
-
-        # Get bounds of the scene from the Habitat Sim
-        self.scene_aabb = self._hwrapper._scene_aabb  # _magnum.Range3d
-        self.scene_limits = np.vstack((self.scene_aabb.min, self.scene_aabb.max)).T[
-            [0, 2, 1]
-        ]
-        self.scene_limits[1] = -self.scene_limits[
-            1, ::-1
-        ]  # Invert y-axis for the simulator
 
         self.time = 0  # time in seconds
         self.simsteps = 0  # number of simulation steps
@@ -231,7 +223,10 @@ class Simulator:
         print(
             f"Event Simulator Backend [{self._hwrapper.settings['event_camera_backend']}] Benchmark: "
         )
-        pprint.pprint(self._hwrapper._benchmark.to_dict())
+        if self._hwrapper._enable_profiling:
+            pprint.pprint(self._hwrapper._benchmark.to_dict())
+        else:
+            print("Profiling not enabled.")
 
         if save_h5:
             h5f.close()
@@ -289,6 +284,25 @@ class Simulator:
             rr.set_time("stable_time", duration=self.time)
             if self.simsteps % self.color_sensor_steps == 0:
                 rr.log("events", rr.Image(self.event_img))
+
+                if self._hwrapper._navmesh is not None:
+                    # Create navmesh with current pose plotted on it
+                    navmesh_with_pose = self._hwrapper._navmesh.copy()
+                    px, py = get_pose_on_navmesh(
+                        self._hwrapper._scene_bounds,
+                        self.state["x"],
+                        self._hwrapper.settings.get("navmesh_meters_per_pixel", 0.1),
+                    )
+                    # Draw a circle marker on the navmesh
+                    cv2.circle(
+                        navmesh_with_pose,
+                        (px, py),
+                        radius=2,
+                        color=(255, 0, 0),
+                        thickness=-1,
+                    )
+                    rr.log("navmesh_with_pose", rr.Image(navmesh_with_pose))
+
                 rr.log(
                     "navigation/pose",
                     rr.Transform3D(

@@ -18,6 +18,8 @@ import habitat_sim as hsim
 from neurosim.settings import default_sim_settings
 from neurosim.utils import (
     color2intensity,
+    RECOLOR_MAP,
+    outline_border,
     RenderEventsBenchmark,
     create_event_simulator,
     get_best_available_backend,
@@ -64,7 +66,14 @@ class HabitatWrapper:
 
         # Initialize simulator
         self._sim = hsim.Simulator(self._cfg)
-        self._scene_aabb = self._sim.scene_aabb
+        self._scene_bounds = self._sim.pathfinder.get_bounds()
+
+        # Simulation navmesh
+        self._navmesh = None
+        if self.settings.get("navmesh", False):
+            self._navmesh = self.render_navmesh(
+                self.settings.get("navmesh_meters_per_pixel", 0.1)
+            )
 
         # Set seed
         random.seed(self.settings["seed"])
@@ -328,6 +337,18 @@ class HabitatWrapper:
         sensor = self._sim._sensors["depth_sensor"]
         sensor.draw_observation()
         return sensor.get_observation()
+
+    def render_navmesh(
+        self, meters_per_pixel: float = 0.1, height: Optional[float] = None
+    ) -> np.ndarray:
+        """Render the navmesh."""
+        if height is None:
+            height = self._scene_bounds[0][1] + 0.5
+        sim_topdown_map = self._sim.pathfinder.get_topdown_view(
+            meters_per_pixel, height
+        ).astype(np.uint8)
+        outline_border(sim_topdown_map)
+        return RECOLOR_MAP[sim_topdown_map]
 
     def close(self) -> None:
         """Close the simulator."""

@@ -3,6 +3,34 @@ import torch
 import numpy as np
 
 
+MAP_BORDER_INDICATOR = 2
+RECOLOR_MAP = np.array(
+    [[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8
+)  # free, occupied, unknown
+
+
+def outline_border(top_down_map):
+    left_right_block_nav = (top_down_map[:, :-1] == 1) & (
+        top_down_map[:, :-1] != top_down_map[:, 1:]
+    )
+    left_right_nav_block = (top_down_map[:, 1:] == 1) & (
+        top_down_map[:, :-1] != top_down_map[:, 1:]
+    )
+
+    up_down_block_nav = (top_down_map[:-1] == 1) & (
+        top_down_map[:-1] != top_down_map[1:]
+    )
+    up_down_nav_block = (top_down_map[1:] == 1) & (
+        top_down_map[:-1] != top_down_map[1:]
+    )
+
+    top_down_map[:, :-1][left_right_block_nav] = MAP_BORDER_INDICATOR
+    top_down_map[:, 1:][left_right_nav_block] = MAP_BORDER_INDICATOR
+
+    top_down_map[:-1][up_down_block_nav] = MAP_BORDER_INDICATOR
+    top_down_map[1:][up_down_nav_block] = MAP_BORDER_INDICATOR
+
+
 @torch.compile(mode="reduce-overhead")
 def color2intensity(color_im: torch.Tensor) -> torch.Tensor:
     """Convert a color image to an intensity image.
@@ -19,6 +47,24 @@ def color2intensity(color_im: torch.Tensor) -> torch.Tensor:
         + 0.1140 * color_im[:, :, 2]
     )
     return intensity_im
+
+
+def get_pose_on_navmesh(scene_bounds, position_3d, meters_per_pixel=0.1) -> np.ndarray:
+    """
+    Project the current 3D pose onto the 2D navmesh coordinates.
+
+    Args:
+        scene_bounds (tuple): ((min_x, min_y, min_z), (max_x, max_y, max_z)) bounds of the scene.
+        position_3d (np.ndarray): Current 3D position [x, y, z].
+        meters_per_pixel (float): Scale factor to convert meters to pixels on the navmesh.
+
+    Returns:
+        np.ndarray: 2D coordinates [px, py] on the navmesh corresponding to the current 3D position.
+    """
+    # Convert 3D x,z to topdown x,y (y-axis is vertical in Habitat)
+    px = (position_3d[0] - scene_bounds[0][0]) / meters_per_pixel
+    py = (-position_3d[1] - scene_bounds[0][2]) / meters_per_pixel
+    return np.array([px, py], dtype=np.int32)
 
 
 def init_h5(save_h5, height, width):
