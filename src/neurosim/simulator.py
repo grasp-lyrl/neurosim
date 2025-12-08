@@ -7,8 +7,8 @@ import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-from neurosim.habitat_wrapper import HabitatWrapper
-from neurosim.utils import init_h5, append_data_to_h5, get_pose_on_navmesh
+from neurosim.core import HabitatWrapper
+from neurosim.core import init_h5, append_data_to_h5, get_pose_on_navmesh
 
 from rotorpy.vehicles.multirotor import Multirotor
 from rotorpy.vehicles.crazyflie_params import quad_params
@@ -38,14 +38,13 @@ class Simulator:
         world_rate: int = 1000,
         control_rate: int = 100,
         sim_time: int = 20,
-        enable_profiling: bool = False,
     ):
         """
         settings: Path to the settings file for the habitat scene and simulator.
         if None, loads default settings.
         """
         # Visual Simulator instance
-        self._hwrapper = HabitatWrapper(settings, enable_profiling=enable_profiling)
+        self._hwrapper = HabitatWrapper(settings)
 
         # Dynamics Simulator instance
         self._quadsim = Multirotor(quad_params, aero=False, integration_method="euler")
@@ -219,14 +218,6 @@ class Simulator:
         }
         print("Simulation Latency Stats: ")
         pprint.pprint(stats)
-
-        print(
-            f"Event Simulator Backend [{self._hwrapper.settings['event_camera_backend']}] Benchmark: "
-        )
-        if self._hwrapper._enable_profiling:
-            pprint.pprint(self._hwrapper._benchmark.to_dict())
-        else:
-            print("Profiling not enabled.")
 
         if save_h5:
             h5f.close()

@@ -54,9 +54,9 @@ setup(
             include_dirs=include_dirs,
             extra_compile_args={
                 "cxx": [
-                    "-O3", 
-                    "-std=c++17", 
-                    "-Wno-sign-compare", 
+                    "-O3",
+                    "-std=c++17",
+                    "-Wno-sign-compare",
                     "-fPIC",
                     "-march=native",  # Optimize for current CPU architecture
                 ],
@@ -65,14 +65,16 @@ setup(
                     "--use_fast_math",
                     "--restrict",
                     "-std=c++17",
-                    "-Xcompiler", "-fPIC",
-                    "-Xcompiler", "-march=native",  # Pass CPU optimization to host compiler
+                    "-Xcompiler",
+                    "-fPIC",
+                    "-Xcompiler",
+                    "-march=native",  # Pass CPU optimization to host compiler
                     "-gencode=arch=compute_70,code=sm_70",
                     "-gencode=arch=compute_75,code=sm_75",
                     "-gencode=arch=compute_80,code=sm_80",
                     "-gencode=arch=compute_86,code=sm_86",
                     "-gencode=arch=compute_89,code=sm_89",
-                    # "-gencode=arch=compute_120,code=sm_120",
+                    "-gencode=arch=compute_120,code=sm_120",
                 ],
             },
         )

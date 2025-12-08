@@ -47,7 +47,6 @@ def evsim_cuda(
 
 
 class EventSimulatorCUDA:
-
     # Maximum number of events to simulate per call
     MAX_EVENTS_SIM = 480 * 640
 
@@ -127,14 +126,20 @@ class EventSimulatorCUDA:
             current_image = current_image.to(self.device)
 
         log_image = torch.log(current_image)
-        self.intensity_state_ub = (log_image + self.MINIMUM_CONTRAST_THRESHOLD_POS).contiguous()
-        self.intensity_state_lb = (log_image - self.MINIMUM_CONTRAST_THRESHOLD_NEG).contiguous()
+        self.intensity_state_ub = (
+            log_image + self.MINIMUM_CONTRAST_THRESHOLD_POS
+        ).contiguous()
+        self.intensity_state_lb = (
+            log_image - self.MINIMUM_CONTRAST_THRESHOLD_NEG
+        ).contiguous()
 
     def set_contrast_thresholds(self, neg_threshold, pos_threshold):
         """Update contrast thresholds."""
         self.MINIMUM_CONTRAST_THRESHOLD_NEG = neg_threshold
         self.MINIMUM_CONTRAST_THRESHOLD_POS = pos_threshold
-        print(f"[evsim-cuda] Updated thresholds: neg={neg_threshold}, pos={pos_threshold}")
+        print(
+            f"[evsim-cuda] Updated thresholds: neg={neg_threshold}, pos={pos_threshold}"
+        )
 
     def image_callback(self, new_image, new_time):
         """

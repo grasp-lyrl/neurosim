@@ -8,21 +8,19 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     # Get the path to the config file
-    config_file = LaunchConfiguration('config_file')
-    
+    config_file = LaunchConfiguration("config_file")
+
     # Default config file path
     default_config = os.path.join(
-        get_package_share_directory('zmq_ros2_bridge'),
-        'config',
-        'zmq_ros2_bridge.yaml'
+        get_package_share_directory("zmq_ros2_bridge"), "config", "zmq_ros2_bridge.yaml"
     )
-    
+
     return LaunchDescription(
         [
             DeclareLaunchArgument(
-                'config_file',
+                "config_file",
                 default_value=default_config,
-                description='Path to the configuration YAML file'
+                description="Path to the configuration YAML file",
             ),
             Node(
                 package="zmq_ros2_bridge",

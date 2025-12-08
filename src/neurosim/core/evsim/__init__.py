@@ -44,7 +44,9 @@ class EventSimulatorType(Enum):
 class EventSimulatorProtocol(Protocol):
     """Protocol defining the interface for event simulators."""
 
-    def image_callback(self, new_image: Any, new_time: int) -> Optional[tuple[Any, ...]]:
+    def image_callback(
+        self, new_image: Any, new_time: int
+    ) -> Optional[tuple[Any, ...]]:
         """Process a new image and generate events.
 
         Args:
@@ -64,7 +66,7 @@ class EventSimulatorProtocol(Protocol):
 def _import_cuda_simulator():
     """Lazily import CUDA simulator."""
     try:
-        from neurosim.utils.evsim.cu_evsim import EventSimulatorCUDA
+        from .cu_evsim import EventSimulatorCUDA
 
         return EventSimulatorCUDA
     except ImportError as e:
@@ -78,17 +80,17 @@ def _import_cuda_simulator():
 def _import_torch_simulator():
     """Lazily import Torch simulator."""
     try:
-        from neurosim.utils.evsim.py_evsim import EventSimulatorTorch
+        from .py_evsim import EventSimulatorTorch
 
         return EventSimulatorTorch
     except ImportError as e:
-        raise ImportError(f"Torch event simulator not available. " f"Original error: {e}")
+        raise ImportError(f"Torch event simulator not available. Original error: {e}")
 
 
 def _import_airsim_simulator():
     """Lazily import AirSim simulator."""
     try:
-        from neurosim.utils.evsim.py_evsim import EventSimulatorAirsim
+        from .py_evsim import EventSimulatorAirsim
 
         return EventSimulatorAirsim
     except ImportError as e:
@@ -102,7 +104,7 @@ def _import_airsim_simulator():
 def _import_vid2e_simulator():
     """Lazily import VID2E (RPG) simulator."""
     try:
-        from neurosim.utils.evsim.cu_rpg_vid2e_esim import EventSimulatorVID2E_ESIM
+        from .cu_rpg_vid2e_esim import EventSimulatorVID2E_ESIM
 
         return EventSimulatorVID2E_ESIM
     except ImportError as e:
@@ -166,7 +168,12 @@ def get_best_available_backend() -> EventSimulatorType:
         )
 
     # Priority order
-    for backend in [EventSimulatorType.CUDA, EventSimulatorType.VID2E, EventSimulatorType.TORCH, EventSimulatorType.AIRSIM]:
+    for backend in [
+        EventSimulatorType.CUDA,
+        EventSimulatorType.VID2E,
+        EventSimulatorType.TORCH,
+        EventSimulatorType.AIRSIM,
+    ]:
         if backend in available:
             return backend
 
@@ -208,7 +215,9 @@ def create_event_simulator(
             backend = EventSimulatorType(backend.lower())
         except ValueError:
             valid_backends = [b.value for b in EventSimulatorType]
-            raise ValueError(f"Unknown backend: '{backend}'. Valid backends: {valid_backends}")
+            raise ValueError(
+                f"Unknown backend: '{backend}'. Valid backends: {valid_backends}"
+            )
 
     if backend == EventSimulatorType.CUDA:
         SimClass = _import_cuda_simulator()

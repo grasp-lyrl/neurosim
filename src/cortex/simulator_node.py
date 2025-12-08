@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 from collections import defaultdict
 
-from neurosim.habitat_wrapper import HabitatWrapper
+from neurosim.core import HabitatWrapper
 from utils import ZMQNODE
 
 from rotorpy.vehicles.multirotor import Multirotor
@@ -17,7 +17,6 @@ from rotorpy.sensors.imu import Imu
 
 
 class SimulatorNode(ZMQNODE):
-
     MAX_EVENT_BUFFER_SIZE = 4000000
 
     def __init__(
@@ -75,7 +74,9 @@ class SimulatorNode(ZMQNODE):
         # Sensors
         self.has_imu_sensor = self._hwrapper.settings["imu_sensor"]
         self.imu_sampling_rate = self._hwrapper.settings.get("imu_sampling_rate", 100)
-        self.imu = Imu(p_BS=np.zeros(3), R_BS=np.eye(3), sampling_rate=self.imu_sampling_rate)
+        self.imu = Imu(
+            p_BS=np.zeros(3), R_BS=np.eye(3), sampling_rate=self.imu_sampling_rate
+        )
 
         self.has_color_sensor = self._hwrapper.settings["color_sensor"]
         self.color_sensor_rate = self._hwrapper.settings.get("color_sensor_rate", 25)
@@ -120,8 +121,12 @@ class SimulatorNode(ZMQNODE):
         Initialize the executors for the simulator.
         """
         # Simulators and Publishers
-        self.create_constant_rate_executor(self.print_stats, 1)  # Print stats every second
-        self.create_constant_rate_executor(self.simulate_control_and_events, self.world_rate)
+        self.create_constant_rate_executor(
+            self.print_stats, 1
+        )  # Print stats every second
+        self.create_constant_rate_executor(
+            self.simulate_control_and_events, self.world_rate
+        )
         self.create_constant_rate_executor(self.publish_state, self.publish_rate)
         self.create_constant_rate_executor(self.publish_events, self.publish_rate)
 
@@ -163,7 +168,9 @@ class SimulatorNode(ZMQNODE):
         self.simsteps += 1
         self.state = self._quadsim.step(self.state, self.control, self.t_step)
 
-        position = np.array([self.state["x"][0], self.state["x"][2], -self.state["x"][1]])
+        position = np.array(
+            [self.state["x"][0], self.state["x"][2], -self.state["x"][1]]
+        )
         rotation = np.quaternion(
             self.state["q"][3],
             self.state["q"][0],
@@ -178,7 +185,9 @@ class SimulatorNode(ZMQNODE):
             _old_event_size = self._event_size
             _new_event_size = events[0].shape[0] + _old_event_size
             if _new_event_size > self.MAX_EVENT_BUFFER_SIZE:
-                print(f"Event buffer overflow: {self._event_size}/{self.MAX_EVENT_BUFFER_SIZE}")
+                print(
+                    f"Event buffer overflow: {self._event_size}/{self.MAX_EVENT_BUFFER_SIZE}"
+                )
             else:
                 self._event_buffer[0][_old_event_size:_new_event_size] = events[0]
                 self._event_buffer[1][_old_event_size:_new_event_size] = events[1]

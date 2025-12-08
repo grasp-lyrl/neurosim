@@ -6,11 +6,21 @@ from glob import glob
 from tqdm import tqdm
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--path", type=str, default="out/events_*.png", help="Folder containing images")
-parser.add_argument("--output", type=str, default="output.mp4", help="Output video file name")
-parser.add_argument("--og_fps", type=int, default=1000, help="Original frames per second")
-parser.add_argument("--video_fps", type=int, default=50, help="Output video frames per second")
-parser.add_argument("--drop", action="store_true", help="Drop frames to match video FPS")
+parser.add_argument(
+    "--path", type=str, default="out/events_*.png", help="Folder containing images"
+)
+parser.add_argument(
+    "--output", type=str, default="output.mp4", help="Output video file name"
+)
+parser.add_argument(
+    "--og_fps", type=int, default=1000, help="Original frames per second"
+)
+parser.add_argument(
+    "--video_fps", type=int, default=50, help="Output video frames per second"
+)
+parser.add_argument(
+    "--drop", action="store_true", help="Drop frames to match video FPS"
+)
 
 args = parser.parse_args()
 
@@ -38,7 +48,9 @@ def make_video(path, output, og_fps, video_fps):
     out = cv2.VideoWriter(output, fourcc, video_fps, (width, height))
 
     bucketed_img = np.zeros_like(frame, dtype=np.uint8)
-    for i, image in tqdm(enumerate(images), total=len(images), desc="Processing images"):
+    for i, image in tqdm(
+        enumerate(images), total=len(images), desc="Processing images"
+    ):
         img = cv2.imread(str(image))
         if not args.drop:
             bucketed_img[img == 255] = 255

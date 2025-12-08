@@ -41,7 +41,8 @@ class CustomInstallCommand(install):
             print("📋 Installing main requirements...")
             try:
                 subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-r", requirements_file], check=True
+                    [sys.executable, "-m", "pip", "install", "-r", requirements_file],
+                    check=True,
                 )
                 print("   ✓ pip requirements installed successfully!\n")
             except subprocess.CalledProcessError as e:
@@ -57,7 +58,10 @@ class CustomInstallCommand(install):
         if os.path.exists(cu_evsim_dir):
             try:
                 print("   - Installing cu_evsim...")
-                subprocess.run([sys.executable, "-m", "pip", "install", cu_evsim_dir, "-v"], check=True)
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", cu_evsim_dir, "-v"],
+                    check=True,
+                )
                 print("   ✓ cu_evsim installation completed successfully!\n")
             except subprocess.CalledProcessError as e:
                 print(f"   ❌ Error installing cu_evsim: {e}")
@@ -111,7 +115,8 @@ class CustomInstallCommand(install):
 
             print("   - Installing Habitat-Sim Python requirements...")
             subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True
+                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                check=True,
             )
             print("   ✓ Requirements installed")
 
@@ -139,7 +144,9 @@ class CustomInstallCommand(install):
 
             process.wait()
             if process.returncode != 0:
-                raise subprocess.CalledProcessError(process.returncode, "habitat-sim build")
+                raise subprocess.CalledProcessError(
+                    process.returncode, "habitat-sim build"
+                )
 
             print("   ✓ Habitat-Sim installation completed successfully!\n")
 
@@ -160,7 +167,9 @@ class CustomInstallCommand(install):
             try:
                 os.chdir(rotorpy_dir)
                 print("   - Installing RotorPy in development mode...")
-                subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-e", "."], check=True
+                )
                 print("   ✓ RotorPy installation completed successfully!\n")
             except subprocess.CalledProcessError as e:
                 print(f"   ❌ Error installing RotorPy: {e}")

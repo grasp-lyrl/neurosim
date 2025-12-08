@@ -139,7 +139,9 @@ class ZMQNODE(ABC):
             dt = np.dtype(dtype)
             self._dtype_cache[dt.str] = dt.str.encode("ascii")
 
-    def create_socket(self, socket_type: int, addr: str, setsockopt: dict = {}) -> zmq.Socket:
+    def create_socket(
+        self, socket_type: int, addr: str, setsockopt: dict = {}
+    ) -> zmq.Socket:
         """
         Create a ZMQ socket and connect/bind it to the specified address.
 
@@ -413,12 +415,18 @@ class ZMQNODE(ABC):
                 for msg_idx in range(1, len(messages), 5):
                     key = messages[msg_idx].buffer.tobytes().decode("ascii")
                     ndim = self._ndim_struct.unpack(messages[msg_idx + 1].buffer)[0]
-                    dtype = np.dtype(messages[msg_idx + 2].buffer.tobytes().decode("ascii"))
+                    dtype = np.dtype(
+                        messages[msg_idx + 2].buffer.tobytes().decode("ascii")
+                    )
 
                     # Use precompiled struct for shape
-                    shape = self._shape_structs[ndim].unpack(messages[msg_idx + 3].buffer)
+                    shape = self._shape_structs[ndim].unpack(
+                        messages[msg_idx + 3].buffer
+                    )
 
-                    array = np.frombuffer(messages[msg_idx + 4].buffer, dtype=dtype).reshape(shape)
+                    array = np.frombuffer(
+                        messages[msg_idx + 4].buffer, dtype=dtype
+                    ).reshape(shape)
                     result_dict[key] = array
             else:
                 topic = messages[0].decode("utf-8")
@@ -432,7 +440,9 @@ class ZMQNODE(ABC):
                     # Use precompiled struct for shape
                     shape = self._shape_structs[ndim].unpack(messages[msg_idx + 3])
 
-                    array = np.frombuffer(messages[msg_idx + 4], dtype=dtype).reshape(shape)
+                    array = np.frombuffer(messages[msg_idx + 4], dtype=dtype).reshape(
+                        shape
+                    )
                     result_dict[key] = array
 
             return topic, result_dict

@@ -1,11 +1,13 @@
-from .utils_bench import RenderEventsBenchmark
-from .utils_gen import (
-    init_h5,
+from .utils import (
+    # Benchmarking Utilities
+    RenderEventsBenchmark,
+    # General Utilities
     append_data_to_h5,
     color2intensity,
     get_pose_on_navmesh,
-    RECOLOR_MAP,
+    init_h5,
     outline_border,
+    RECOLOR_MAP,
 )
 
 # event simulator factory
@@ -16,6 +18,8 @@ from .evsim import (
     get_available_backends,
     get_best_available_backend,
 )
+
+from .visual import HabitatWrapper
 
 __all__ = [
     # Event simulator factory
@@ -33,4 +37,6 @@ __all__ = [
     "get_pose_on_navmesh",
     "RECOLOR_MAP",
     "outline_border",
+    # Visual Wrappers
+    "HabitatWrapper",
 ]

@@ -111,7 +111,9 @@ class EventSimulator:
 
         self.last_time = first_time
 
-        self.output_events = np.zeros((self.config.max_events_per_frame), dtype=EVENT_TYPE)
+        self.output_events = np.zeros(
+            (self.config.max_events_per_frame), dtype=EVENT_TYPE
+        )
         self.event_count = 0
         self.spikes = np.zeros((self.npix))
 
@@ -137,7 +139,9 @@ class EventSimulator:
         delta_time = new_time - self.last_time
 
         config = self.config
-        self.output_events = np.zeros((self.config.max_events_per_frame), dtype=EVENT_TYPE)
+        self.output_events = np.zeros(
+            (self.config.max_events_per_frame), dtype=EVENT_TYPE
+        )
         self.spikes = np.zeros((self.npix))
 
         self.crossings = self.last_image.copy()

@@ -21,8 +21,12 @@ def esim(new_image, new_time, intensity_state_ub, intensity_state_lb):
     events_yx = torch.nonzero(mask, as_tuple=True)
     events_yx = (events_yx[0].to(torch.int32), events_yx[1].to(torch.int32))  # (y, x)
 
-    intensity_state_ub[events_yx] = current_image[events_yx] + MINIMUM_CONTRAST_THRESHOLD_POS
-    intensity_state_lb[events_yx] = current_image[events_yx] - MINIMUM_CONTRAST_THRESHOLD_NEG
+    intensity_state_ub[events_yx] = (
+        current_image[events_yx] + MINIMUM_CONTRAST_THRESHOLD_POS
+    )
+    intensity_state_lb[events_yx] = (
+        current_image[events_yx] - MINIMUM_CONTRAST_THRESHOLD_NEG
+    )
     intensity_state_ub[~mask] = torch.minimum(
         intensity_state_ub[~mask],
         current_image[~mask] + MINIMUM_CONTRAST_THRESHOLD_POS,
@@ -32,7 +36,9 @@ def esim(new_image, new_time, intensity_state_ub, intensity_state_lb):
         current_image[~mask] - MINIMUM_CONTRAST_THRESHOLD_NEG,
     )
 
-    events_t = torch.full_like(events_yx[0], new_time, dtype=torch.uint64, device="cuda")
+    events_t = torch.full_like(
+        events_yx[0], new_time, dtype=torch.uint64, device="cuda"
+    )
     events_p = torch.zeros_like(events_yx[0], dtype=torch.uint8, device="cuda")
     events_p[mask_pos[events_yx]] = 1
 

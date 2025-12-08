@@ -60,7 +60,9 @@ class ControllerNode(ZMQNODE):
                 v_avg=trajectory["v_avg"],
             )
         else:
-            raise ValueError("Invalid trajectory type. Use 'constant_speed' or 'polynomial'.")
+            raise ValueError(
+                "Invalid trajectory type. Use 'constant_speed' or 'polynomial'."
+            )
 
         self._init_sockets()
         self._init_executors()
@@ -99,7 +101,9 @@ class ControllerNode(ZMQNODE):
         """
         # Publishers
         self.create_constant_rate_executor(self.publish_control, self.control_rate)
-        self.create_constant_rate_executor(self.print_stats, 1)  # Print stats every second
+        self.create_constant_rate_executor(
+            self.print_stats, 1
+        )  # Print stats every second
 
         # Subscribers
         self.create_async_executor(self.receive_state)
@@ -150,10 +154,10 @@ class ControllerNode(ZMQNODE):
         topic, arrays_dict = await self.recv_dict_of_arrays(self.socket_sub_events)
 
         if arrays_dict is not None:
-            x = arrays_dict["x"]
-            y = arrays_dict["y"]
-            p = arrays_dict["p"]
-            t = arrays_dict["t"]
+            x = arrays_dict["x"]  # noqa
+            y = arrays_dict["y"]  # noqa
+            p = arrays_dict["p"]  # noqa
+            t = arrays_dict["t"]  # noqa
 
             self._pub_sub_stats["received_event_packets"] += 1
 

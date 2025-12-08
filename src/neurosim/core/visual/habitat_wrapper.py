@@ -8,6 +8,7 @@ event camera simulation support.
 import yaml
 import torch
 import random
+import logging
 import numpy as np
 import magnum as mn
 from pathlib import Path
@@ -16,15 +17,16 @@ from typing import Any, Optional
 import habitat_sim as hsim
 
 from neurosim.settings import default_sim_settings
-from neurosim.utils import (
+from neurosim.core import (
     color2intensity,
     RECOLOR_MAP,
     outline_border,
-    RenderEventsBenchmark,
     create_event_simulator,
     get_best_available_backend,
     EventSimulatorProtocol,
 )
+
+logger = logging.getLogger("neurosim.habitat_wrapper")
 
 
 class HabitatWrapper:
@@ -46,7 +48,6 @@ class HabitatWrapper:
     def __init__(
         self,
         settings: Optional[Path] = None,
-        enable_profiling: bool = False,
     ):
         # Load settings
         if settings is None:
@@ -82,11 +83,6 @@ class HabitatWrapper:
         self.init_agent_state(self.settings["default_agent"])
         self.agent = self._sim.get_agent(self.settings["default_agent"])
 
-        # Profiling setup using CUDA events
-        self._enable_profiling = enable_profiling
-        self._benchmark = RenderEventsBenchmark() if enable_profiling else None
-        self._profiling_call_count = 0  # Counter to skip first 5 calls
-
     def init_agent_state(self, agent_id: int) -> hsim.AgentState:
         """Initialize the agent state.
 
@@ -103,7 +99,7 @@ class HabitatWrapper:
         agent.set_state(agent_state)
 
         agent_state = agent.get_state()
-        print(
+        logger.info(
             f"Agent {agent_id} initialized at "
             f"position: {agent_state.position}, "
             f"rotation: {agent_state.rotation}"
@@ -131,9 +127,7 @@ class HabitatWrapper:
 
         if backend_str == "auto":
             backend = get_best_available_backend()
-            print(
-                f"[HabitatWrapper] Auto-selected event simulator backend: {backend.value}"
-            )
+            logger.info(f"Auto-selected event simulator backend: {backend.value}")
         else:
             backend = backend_str
 
@@ -287,25 +281,7 @@ class HabitatWrapper:
         sensor.draw_observation()
         observation = sensor.get_observation()[..., :3]
         intensity_image = color2intensity(observation / 255.0)
-
-        # Use CUDA events for accurate GPU timing
-        # See: https://pytorch.org/docs/stable/notes/cuda.html#asynchronous-execution
-        if self._enable_profiling:
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-
         events = self._event_simulator.image_callback(intensity_image, time)  # in us
-
-        if self._enable_profiling:
-            end_event.record()
-            # Wait for the events to be recorded before computing elapsed time
-            torch.cuda.synchronize()
-            elapsed_ms = start_event.elapsed_time(end_event)
-            # Skip recording the first 5 calls for warm-up
-            self._profiling_call_count += 1
-            if self._profiling_call_count > 5:
-                self._benchmark.record(elapsed_ms)
 
         if to_numpy and events is not None:
             if isinstance(events[0], torch.Tensor):
