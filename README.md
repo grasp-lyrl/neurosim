@@ -1,7 +1,8 @@
 # Neurosim
 
-A habitat sim based full functional quadrotor simulator with event camera support. real. time.
+[![Neurosim Banner](assets/neurosim_banner.jpg)](assets/neurosim_banner.jpg)
 
+A Fast Pythonic Simulator for Neuromorphic Perception on Multirotors
 
 ## 📋 Table of Contents
 
