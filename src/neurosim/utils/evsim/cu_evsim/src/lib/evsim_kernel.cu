@@ -12,7 +12,7 @@ __global__ void evsim_kernel(
     torch::PackedTensorAccessor32<uint16_t, 1, torch::RestrictPtrTraits> event_y_buf,
     torch::PackedTensorAccessor32<uint64_t, 1, torch::RestrictPtrTraits> event_t_buf,
     torch::PackedTensorAccessor32<uint8_t, 1, torch::RestrictPtrTraits> event_p_buf,
-    torch::PackedTensorAccessor32<int32_t, 1, torch::RestrictPtrTraits> event_count,
+    int32_t* event_count,
     const float MINIMUM_CONTRAST_THRESHOLD_NEG,
     const float MINIMUM_CONTRAST_THRESHOLD_POS,
     const uint32_t MAX_EVENTS,
@@ -22,42 +22,47 @@ __global__ void evsim_kernel(
     const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
     const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= width || y >= height)
-        return;
+    bool has_event = false;
+    bool pos_event = false;
 
-    const scalar_t current_log_intensity = log(new_image[y][x]);
-    const scalar_t state_ub = intensity_state_ub[y][x];
-    const scalar_t state_lb = intensity_state_lb[y][x];
-
-    const bool pos_event = current_log_intensity > state_ub;
-    const bool neg_event = current_log_intensity < state_lb;
-    const bool has_event = pos_event || neg_event;
-
-    if (has_event)
+    if (x < width && y < height)
     {
-        intensity_state_ub[y][x] = current_log_intensity + static_cast<scalar_t>(MINIMUM_CONTRAST_THRESHOLD_POS);
-        intensity_state_lb[y][x] = current_log_intensity - static_cast<scalar_t>(MINIMUM_CONTRAST_THRESHOLD_NEG);
-    }
-    else
-    {
-        intensity_state_ub[y][x] = min(state_ub, current_log_intensity + static_cast<scalar_t>(MINIMUM_CONTRAST_THRESHOLD_POS));
-        intensity_state_lb[y][x] = max(state_lb, current_log_intensity - static_cast<scalar_t>(MINIMUM_CONTRAST_THRESHOLD_NEG));
+        const scalar_t current_log_intensity = log(new_image[y][x]);
+        const scalar_t state_ub = intensity_state_ub[y][x];
+        const scalar_t state_lb = intensity_state_lb[y][x];
+
+        pos_event = current_log_intensity > state_ub;
+        const bool neg_event = current_log_intensity < state_lb;
+        has_event = pos_event || neg_event;
+
+        if (has_event)
+        {
+            intensity_state_ub[y][x] = current_log_intensity + static_cast<scalar_t>(MINIMUM_CONTRAST_THRESHOLD_POS);
+            intensity_state_lb[y][x] = current_log_intensity - static_cast<scalar_t>(MINIMUM_CONTRAST_THRESHOLD_NEG);
+        }
+        else
+        {
+            intensity_state_ub[y][x] = min(state_ub, current_log_intensity + static_cast<scalar_t>(MINIMUM_CONTRAST_THRESHOLD_POS));
+            intensity_state_lb[y][x] = max(state_lb, current_log_intensity - static_cast<scalar_t>(MINIMUM_CONTRAST_THRESHOLD_NEG));
+        }
     }
 
     // Warp-level aggregation of events to reduce atomic contention
-    const int32_t lane_id = threadIdx.x & 31;  // threadIdx.x % 32
-    const int32_t warp_id = threadIdx.x >> 5;  // threadIdx.x / 32
+    const uint32_t tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int8_t lane_id = tid & 31;  // threadIdx.x % 32 max 32
+    const int8_t warp_id = tid >> 5;  // threadIdx.x / 32 max ~64
 
     const uint32_t warp_event_mask = __ballot_sync(FULL_MASK, has_event);
     const int32_t warp_event_count = __popc(warp_event_mask);
 
     if (warp_event_count > 0)
     {
-        __shared__ int32_t warp_base_indices[32];  // Max 32 warps per block
+        int32_t warp_base_idx = 0;
         if (lane_id == 0)
-            warp_base_indices[warp_id] = atomicAdd(&event_count[0], warp_event_count);
+            warp_base_idx = atomicAdd(event_count, warp_event_count);
 
-        const int32_t warp_base_idx = __shfl_sync(FULL_MASK, warp_base_indices[warp_id], 0);
+        // Broadcast the base index to all threads in the warp
+        warp_base_idx = __shfl_sync(FULL_MASK, warp_base_idx, 0);
 
         if (has_event)
         {
@@ -135,7 +140,7 @@ evsim(
             event_y_buf.packed_accessor32<uint16_t, 1, torch::RestrictPtrTraits>(),
             event_t_buf.packed_accessor32<uint64_t, 1, torch::RestrictPtrTraits>(),
             event_p_buf.packed_accessor32<uint8_t, 1, torch::RestrictPtrTraits>(),
-            event_count.packed_accessor32<int32_t, 1, torch::RestrictPtrTraits>(),
+            event_count.data_ptr<int32_t>(),
             MINIMUM_CONTRAST_THRESHOLD_NEG,
             MINIMUM_CONTRAST_THRESHOLD_POS,
             MAX_EVENTS,
