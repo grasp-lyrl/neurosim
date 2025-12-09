@@ -1,8 +1,6 @@
-# Neurosim
-
 [![Neurosim Banner](assets/neurosim_banner.jpg)](assets/neurosim_banner.jpg)
 
-A Fast Pythonic Simulator for Neuromorphic Perception on Multirotors
+**A Fast Pythonic Simulator for Neuromorphic Perception on Multirotors**
 
 ## 📋 Table of Contents
 
