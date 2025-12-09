@@ -34,7 +34,7 @@ from typing import Union, Optional, Protocol, Any
 
 class EventSimulatorType(Enum):
     """Supported event simulator backends."""
-
+    AUTO = "auto"
     CUDA = "cuda"
     TORCH = "torch"
     AIRSIM = "airsim"
@@ -218,6 +218,9 @@ def create_event_simulator(
             raise ValueError(
                 f"Unknown backend: '{backend}'. Valid backends: {valid_backends}"
             )
+
+    if backend == EventSimulatorType.AUTO:
+        backend = get_best_available_backend()
 
     if backend == EventSimulatorType.CUDA:
         SimClass = _import_cuda_simulator()
