@@ -34,6 +34,7 @@ from typing import Union, Optional, Protocol, Any
 
 class EventSimulatorType(Enum):
     """Supported event simulator backends."""
+
     AUTO = "auto"
     CUDA = "cuda"
     TORCH = "torch"
