@@ -27,7 +27,6 @@ class CustomInstallCommand(install):
             print(f"✓ Running in environment: {env_name}\n")
 
         self.install_habitat_sim()
-        self.install_rotorpy()
         self.install_pip_requirements()
         self.install_cu_evsim()
 
@@ -155,30 +154,6 @@ class CustomInstallCommand(install):
             raise
         finally:
             os.chdir(original_dir)
-
-    def install_rotorpy(self):
-        """Install RotorPy."""
-        print("🚁 Installing RotorPy...")
-
-        rotorpy_dir = os.path.join(os.getcwd(), "deps", "rotorpy")
-
-        if os.path.exists(rotorpy_dir):
-            original_dir = os.getcwd()
-            try:
-                os.chdir(rotorpy_dir)
-                print("   - Installing RotorPy in development mode...")
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-e", "."], check=True
-                )
-                print("   ✓ RotorPy installation completed successfully!\n")
-            except subprocess.CalledProcessError as e:
-                print(f"   ❌ Error installing RotorPy: {e}")
-                raise
-            finally:
-                os.chdir(original_dir)
-        else:
-            print("   ⚠️  RotorPy directory not found at deps/rotorpy")
-            print("   Please ensure the rotorpy directory exists in deps/\n")
 
 
 class CustomDevelopCommand(develop):

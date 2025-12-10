@@ -1,6 +1,8 @@
 [![Neurosim Banner](assets/neurosim_banner.jpg)](assets/neurosim_banner.jpg)
 
-**A Fast Pythonic Simulator for Neuromorphic Perception on Multirotors**
+# Neurosim
+
+Blazing fast multirotor simulator with event camera support. Pythonic and real-time.
 
 ## 📋 Table of Contents
 
@@ -132,3 +134,5 @@ This project is enabled by the following amazing open-source projects:
 - [Habitat-Sim](https://github.com/facebookresearch/habitat-sim)
 - [ZeroMQ](https://zeromq.org)
 - [RotorPy](https://github.com/spencerfolk/rotorpy)
+
+Picture credits: @ongdexter, Gemini 3
