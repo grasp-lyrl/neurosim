@@ -1,25 +1,34 @@
 import numpy as np
 
 
-def rotorpy_to_habitat(state: dict) -> tuple[np.ndarray, np.quaternion]:
-    """
-    Convert from Rotorpy coordinate system to Habitat coordinate system.
+class CoordinateTransform:
+    def __init__(
+        self,
+        pos_transform: np.ndarray = np.eye(3),
+        quat_transform: np.ndarray = np.eye(4),
+    ):
+        """
+        Initialize the coordinate transformation matrices.
+        Args:
+            pos_transform: 3x3 matrix to transform position vectors
+            quat_transform: 4x4 matrix to transform quaternion vectors
+        """
 
-    Args:
-        state: State dictionary with 'x' (position) and 'q' (quaternion) keys
+        # Position transformation matrix:
+        self.pos_transform = pos_transform
+        # Quaternion transformation matrix:
+        self.quat_transform = quat_transform
 
-    Returns:
-        Tuple of (position, rotation) in Habitat coordinate system
-    """
-    # Position: [x, y, z] -> [x, z, -y]
-    position = np.array([state["x"][0], state["x"][2], -state["x"][1]])
+    def transform(self, state: dict) -> tuple[np.ndarray, np.quaternion]:
+        """
+        Convert from Rotorpy coordinate system to Habitat coordinate system.
 
-    # Quaternion: [qx, qy, qz, qw] -> [qw, qx, qz, -qy]
-    rotation = np.quaternion(
-        state["q"][3],  # w
-        state["q"][0],  # x
-        state["q"][2],  # z
-        -state["q"][1],  # -y
-    )
+        Args:
+            state: State dictionary with 'x' (position) and 'q' (quaternion) keys
 
-    return position, rotation
+        Returns:
+            Tuple of (position, rotation) in Habitat coordinate system
+        """
+        position = self.pos_transform @ state["x"]
+        rotation = np.quaternion(*(self.quat_transform @ state["q"]))
+        return position, rotation

@@ -19,7 +19,7 @@ from neurosim.core.dynamics import create_dynamics
 from neurosim.core.control import create_controller
 from neurosim.core.trajectory import create_trajectory
 from neurosim.core.imu_sim import create_imu_sensor
-from neurosim.core.coord_trans import rotorpy_to_habitat
+from neurosim.core.coord_trans import CoordinateTransform
 from neurosim.core.utils import RerunVisualizer
 
 
@@ -210,6 +210,14 @@ class SynchronousSimulator:
         logger.info("Visual backend initialized: HabitatWrapper")
 
     def _init_dynamics(self) -> None:
+        # Hardcoded coordinate transform from rotorpy to habitat,
+        # can be made configurable later
+        self.coord_trans = CoordinateTransform(
+            pos_transform=np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]]),
+            quat_transform=np.array(
+                [[0, 0, 0, 1], [1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0]]
+            ),
+        )
         self.dynamics = create_dynamics(
             **self.settings["dynamics"],
             initial_state={
@@ -260,7 +268,7 @@ class SynchronousSimulator:
 
         # TODO: Choose the transform based on settings. Right now hardcoded from rotorpy to habitat
         # This is the coordinate transform step from the dynamics to the visual renderer
-        position, rotation = rotorpy_to_habitat(state)
+        position, rotation = self.coord_trans.transform(state)
         self.visual_backend.update_agent_state(position, rotation)
 
     def _render_sensors(self) -> dict:
