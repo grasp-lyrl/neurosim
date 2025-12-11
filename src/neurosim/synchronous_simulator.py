@@ -26,7 +26,7 @@ from neurosim.core.utils import RerunVisualizer
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class SimulationConfig:
     """Container for simulation configuration."""
 
@@ -55,7 +55,7 @@ class SimulationConfig:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SensorConfig:
     """Container for a single sensor's configuration.
 
@@ -229,10 +229,10 @@ class SynchronousSimulator:
 
     @staticmethod
     def _create_sensor_executor(sensor_type: str, **kwargs) -> Callable[[], Any]:
-        """Factory to create sensor executor functions.
+        """Factory to create optimized sensor executor functions.
 
         Uses provider functions to access current values at execution time,
-        not initialization time.
+        not initialization time. Minimizes closure depth and overhead.
 
         Args:
             sensor_type: Type of the sensor (event, color, depth, imu)
@@ -253,35 +253,42 @@ class SynchronousSimulator:
             backend = kwargs["backend"]
             uuid = kwargs["uuid"]
             time_provider = kwargs["time_provider"]
+            # Pre-bind methods to reduce attribute lookups
+            render_events = backend.render_events
 
             def executor():
-                # Call time_provider() to get CURRENT time, not initialization time
-                return backend.render_events(
+                # Minimize function call depth - call provider inline
+                return render_events(
                     uuid=uuid, time=int(time_provider() * 1e6), to_numpy=False
                 )
 
         elif sensor_type == "color":
             backend = kwargs["backend"]
             uuid = kwargs["uuid"]
+            # Pre-bind method
+            render_color = backend.render_color
 
             def executor():
-                return backend.render_color(uuid)
+                return render_color(uuid)
 
         elif sensor_type == "depth":
             backend = kwargs["backend"]
             uuid = kwargs["uuid"]
+            # Pre-bind method
+            render_depth = backend.render_depth
 
             def executor():
-                return backend.render_depth(uuid)
+                return render_depth(uuid)
 
         elif sensor_type == "imu":
             sensor = kwargs["sensor"]
             state_provider = kwargs["state_provider"]
             statedot_provider = kwargs["statedot_provider"]
+            # Pre-bind method
+            measurement = sensor.measurement
 
             def executor():
-                # Call providers to get CURRENT state/statedot, not initialization values
-                return sensor.measurement(state_provider(), statedot_provider())
+                return measurement(state_provider(), statedot_provider())
 
         else:
             raise ValueError(f"Unsupported sensor type: {sensor_type}")
