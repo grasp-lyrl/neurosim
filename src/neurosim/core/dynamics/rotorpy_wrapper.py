@@ -1,3 +1,4 @@
+import numpy as np
 from typing import Any
 from rotorpy.vehicles.multirotor import Multirotor
 
@@ -39,7 +40,7 @@ class RotorpyDynamics(DynamicsProtocol):
         self,
         vehicle: str = "crazyflie",
         dynamics_type: DynamicsType = DynamicsType.ROTORPY_MULTIROTOR,
-        initial_state: dict[str, Any] = {},
+        initial_state: dict[str, np.ndarray] = {},
     ):
         vehicle_params = get_vehicle_params(vehicle)
         self._multirotor = get_multirotor_model(dynamics_type, vehicle_params)
@@ -48,19 +49,23 @@ class RotorpyDynamics(DynamicsProtocol):
             # Update keys, keeping rest of the initial state intact
             for k, v in initial_state.items():
                 self._multirotor.initial_state[k] = v
+        self._last_control = {}
         self._state = self._multirotor.initial_state
 
     @property
-    def state(self) -> dict[str, Any]:
+    def state(self) -> dict[str, np.ndarray]:
         return self._state
 
     @state.setter
-    def state(self, value: dict[str, Any]):
+    def state(self, value: dict[str, np.ndarray]) -> None:
         self._state = value
 
-    def step(self, control: Any, dt: float) -> dict[str, Any]:
+    def step(self, control: Any, dt: float) -> dict[str, np.ndarray]:
+        """Advance dynamics by one timestep and store the control."""
+        self._last_control = control
         self._state = self._multirotor.step(self._state, control, dt)
         return self._state
 
-    def statedot(self, state: dict[str, Any], control: Any, t: float) -> dict[str, Any]:
-        return self._multirotor.statedot(state, control, t)
+    def statedot(self) -> dict[str, np.ndarray]:
+        """Compute state derivatives using current state and last control."""
+        return self._multirotor.statedot(self._state, self._last_control, 0)

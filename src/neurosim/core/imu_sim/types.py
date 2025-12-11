@@ -3,7 +3,7 @@ from typing import Protocol, Dict, Any
 
 
 class IMUSensorType(Enum):
-    ROTORPY_IMU = "rotorpy_imu"
+    ROTORPY = "rotorpy"
 
 
 class IMUSensorProtocol(Protocol):

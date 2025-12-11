@@ -17,7 +17,7 @@ import habitat_sim as hsim
 from neurosim.core.utils import color2intensity, RECOLOR_MAP, outline_border
 from neurosim.core.event_sim import create_event_simulator, EventSimulatorProtocol
 
-logger = logging.getLogger("neurosim.habitat_wrapper")
+logger = logging.getLogger(__name__)
 
 
 class HabitatWrapper:
@@ -41,12 +41,21 @@ class HabitatWrapper:
         self._scene_bounds = self._sim.pathfinder.get_bounds()
 
         # Set seed
-        random.seed(self.settings["seed"])
-        self._sim.seed(self.settings["seed"])
-        np.random.seed(self.settings["seed"])
+        self._set_seed(self.settings.get("seed", 324))
 
         # init the agent to the start position and orientation
-        self.agent = self._init_agent_state(self.settings["default_agent"])
+        # self.agent = self._init_agent_state(self.settings["default_agent"])
+        self.agent = self._sim.get_agent(self.settings["default_agent"])
+
+    def _set_seed(self, seed: int) -> None:
+        """Set the random seed for the simulator and numpy.
+
+        Args:
+            seed: The seed value to set.
+        """
+        random.seed(seed)
+        self._sim.seed(seed)
+        np.random.seed(seed)
 
     def _create_camera_spec(
         self,
@@ -118,7 +127,7 @@ class HabitatWrapper:
 
     def _create_event_simulator(
         self, sensor_name: str, sensor_cfg: dict[str, Any]
-    ) -> EventSimulatorProtocol:
+    ) -> tuple[hsim.CameraSensorSpec, EventSimulatorProtocol]:
         """Create a color sensor to generate intensity images for the event camera.
         Adds the color sensor to the habitat sim agent and creates the event simulator
         in the current HabitatWrapper instance.
@@ -141,15 +150,13 @@ class HabitatWrapper:
             orientation=sensor_cfg["orientation"],
         )
 
-        self._sim.add_sensor(color_sensor_spec, 0)  # TODO: agent_id hardcoded to 0
-
         backend = sensor_cfg.get("backend", "auto")
 
         # Get contrast thresholds from settings
         contrast_threshold_pos = sensor_cfg.get("contrast_threshold_pos", 0.35)
         contrast_threshold_neg = sensor_cfg.get("contrast_threshold_neg", 0.35)
 
-        return create_event_simulator(
+        event_simulator = create_event_simulator(
             backend=backend,
             width=sensor_cfg["width"],
             height=sensor_cfg["height"],
@@ -157,6 +164,8 @@ class HabitatWrapper:
             contrast_threshold_neg=contrast_threshold_neg,
             contrast_threshold_pos=contrast_threshold_pos,
         )
+
+        return color_sensor_spec, event_simulator
 
     def _make_cfg(self) -> hsim.Configuration:
         """Create a Habitat configuration from a settings dictionary.
@@ -185,20 +194,22 @@ class HabitatWrapper:
         sensor_specifications = []
         for sensor_name, sensor_cfg in self.settings.get("sensors", {}).items():
             if sensor_cfg["type"] == "event":
-                self._event_simulators[sensor_name] = self._create_event_simulator(
-                    sensor_name=sensor_name, sensor_cfg=sensor_cfg
+                sensor_spec, self._event_simulators[sensor_name] = (
+                    self._create_event_simulator(
+                        sensor_name=sensor_name, sensor_cfg=sensor_cfg
+                    )
                 )
-
-            sensor_spec = self._create_camera_spec(
-                uuid=sensor_name,
-                sensor_type=sensor_cfg["type"],
-                sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
-                resolution=(sensor_cfg["height"], sensor_cfg["width"]),
-                hfov=sensor_cfg["hfov"],
-                far=sensor_cfg["zfar"],
-                position=sensor_cfg["position"],
-                orientation=sensor_cfg["orientation"],
-            )
+            else:
+                sensor_spec = self._create_camera_spec(
+                    uuid=sensor_name,
+                    sensor_type=sensor_cfg["type"],
+                    sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
+                    resolution=(sensor_cfg["height"], sensor_cfg["width"]),
+                    hfov=sensor_cfg["hfov"],
+                    far=sensor_cfg["zfar"],
+                    position=sensor_cfg["position"],
+                    orientation=sensor_cfg["orientation"],
+                )
             sensor_specifications.append(sensor_spec)
 
         # Create agent specifications
@@ -210,33 +221,6 @@ class HabitatWrapper:
         # agent_cfg.radius = settings.get("agent_radius", 0.1)
 
         return hsim.Configuration(sim_cfg, [agent_cfg])
-
-    def _init_agent_state(self, agent_id: int) -> hsim.Agent:
-        """Initialize the agent state.
-
-        Args:
-            agent_id: The ID of the agent to initialize.
-
-        Returns:
-            The initialized agent.
-        """
-        agent = self._sim.initialize_agent(
-            agent_id,
-            initial_state=hsim.AgentState(
-                position=np.array(self.settings["start_position"]),
-                rotation=np.array(self.settings.get("start_orientation", [0, 0, 0, 1])),
-            ),
-        )
-
-        agent_state = agent.get_state()
-        logger.info(
-            f"Agent {agent_id} initialized at "
-            f"position: {agent_state.position}, "
-            f"rotation: {agent_state.rotation} -> "
-            f"Sensors: {agent_state.sensor_states.keys()}"
-        )
-
-        return agent
 
     def update_agent_state(self, position: np.ndarray, rotation: np.ndarray) -> None:
         """Update the agent's pose.
@@ -281,7 +265,7 @@ class HabitatWrapper:
             # else we assume they are already numpy arrays
         return events
 
-    def render_color_sensor(self, uuid: str) -> torch.Tensor:
+    def render_color(self, uuid: str) -> torch.Tensor:
         """Render the color sensor.
 
         Returns:
@@ -291,7 +275,7 @@ class HabitatWrapper:
         sensor.draw_observation()
         return sensor.get_observation()[..., :3]
 
-    def render_depth_sensor(self, uuid: str) -> torch.Tensor:
+    def render_depth(self, uuid: str) -> torch.Tensor:
         """Render the depth sensor.
 
         Returns:

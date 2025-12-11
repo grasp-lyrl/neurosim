@@ -10,14 +10,41 @@ class DynamicsType(Enum):
 
 
 class DynamicsProtocol(Protocol):
+    """Protocol for dynamics models.
+
+    The dynamics object maintains internal state and the last control input.
+    The step() method updates both the state and last control.
+    The statedot() method computes derivatives using the current state and last control.
+    """
+
     @property
-    def state(self) -> Dict[str, Any]: ...
+    def state(self) -> Dict[str, Any]:
+        """Current state of the system."""
+        ...
 
     @state.setter
-    def state(self, value: Dict[str, Any]): ...
+    def state(self, value: Dict[str, Any]):
+        """Set the current state of the system."""
+        ...
 
-    def step(self, control: Any, dt: float) -> Dict[str, Any]: ...
+    def step(self, control: Any, dt: float) -> Dict[str, Any]:
+        """
+        Advance the dynamics by one timestep.
 
-    def statedot(
-        self, state: Dict[str, Any], control: Any, t: float
-    ) -> Dict[str, Any]: ...
+        Args:
+            control: Control input
+            dt: Time step
+
+        Returns:
+            Updated state dictionary
+        """
+        ...
+
+    def statedot(self) -> Dict[str, Any]:
+        """
+        Compute state derivatives using current state and last control.
+
+        Returns:
+            Dictionary of state derivatives
+        """
+        ...

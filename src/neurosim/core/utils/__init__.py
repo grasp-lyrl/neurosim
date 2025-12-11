@@ -7,6 +7,7 @@ from .utils_gen import (
     RECOLOR_MAP,
     outline_border,
 )
+from .utils_viz import RerunVisualizer
 
 
 __all__ = [
@@ -19,4 +20,6 @@ __all__ = [
     "get_pose_on_navmesh",
     "RECOLOR_MAP",
     "outline_border",
+    # Visualization Utilities
+    "RerunVisualizer",
 ]

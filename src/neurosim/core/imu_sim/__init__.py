@@ -8,10 +8,10 @@ def create_imu_sensor(model: IMUSensorType | str, **kwargs) -> IMUSensorProtocol
         except ValueError:
             raise ValueError(f"Unknown sensor type: {model}")
 
-    if model == IMUSensorType.ROTORPY_IMU:
+    if model == IMUSensorType.ROTORPY:
         from .rotorpy_wrapper import RotorpyImuSensor
 
-        return RotorpyImuSensor(sampling_rate=kwargs.get("sampling_rate", 100))
+        return RotorpyImuSensor(sampling_rate=kwargs["sampling_rate"])
     else:
         raise ValueError(f"Unsupported sensor type: {model}")
 

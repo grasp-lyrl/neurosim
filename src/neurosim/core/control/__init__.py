@@ -15,21 +15,19 @@ def create_controller(
     """
     if not isinstance(model, ControllerType):
         try:
-            type_name = ControllerType(model.lower())
+            model = ControllerType(model.lower())
         except ValueError:
             raise ValueError(f"Unsupported controller model: {model}")
-    else:
-        type_name = model
 
-    if type_name == ControllerType.ROTORPY_SE3:
+    if model == ControllerType.ROTORPY_SE3:
         from .rotorpy_wrapper import RotorpySE3Controller
 
         return RotorpySE3Controller(
             vehicle=kwargs["vehicle"],
-            controller_type=type_name,
+            controller_type=model,
         )
     else:
-        raise ValueError(f"Unsupported controller type: {type_name}")
+        raise ValueError(f"Unsupported controller type: {model}")
 
 
 __all__ = ["ControllerType", "ControllerProtocol", "create_controller"]
