@@ -7,18 +7,25 @@ simulator:
   additional_sensors:
     imu_1:
       type: "imu"
-      noise_mean: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      noise_stddev: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      model: "rotorpy"
+      sampling_rate: 50 # Hz
 
-  # Event camera is more of an accumulation rate.
-  # That is events are generated at world rate and
-  # only displayed at this rate
+  # Sensor sampling rates - how often sensors are rendered/sampled
+  # Event camera accumulates at this rate, other sensors capture at this rate
   sensor_rates:
     imu_1: 50 # Hz
-    event_camera_1: 20 # Hz
+    event_camera_1: 1000 # Hz - high-frequency event accumulation
     color_camera_1: 10 # Hz
     depth_camera_1: 10 # Hz
-    navmesh_1: 10 # Hz
+
+  # Visualization rates (optional) - how often to display sensor data
+  # Must be <= sampling_rate for each sensor
+  # If omitted, defaults to sampling_rate (display every sample)
+  viz_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 20 # Hz - visualize every 5th accumulation
+    color_camera_1: 10 # Hz
+    depth_camera_1: 10 # Hz
 
 # Visual Backend Settings
 visual_backend:
@@ -43,7 +50,7 @@ visual_backend:
     event_camera_1:
       type: "event"
       position: [0.0, 0.0, 0.05]
-      orientation: [0.0, 0.0, 0.0, 1.0]
+      orientation: [0.0, 0.0, 0.0]
       width: 640
       height: 480
       hfov: 90
@@ -56,7 +63,7 @@ visual_backend:
       name: "color_camera_1"
       type: "color"
       position: [0.0, 0.0, 0.05]
-      orientation: [0.0, 0.0, 0.0, 1.0]
+      orientation: [0.0, 0.0, 0.0]
       width: 640
       height: 480
       hfov: 90
@@ -65,7 +72,7 @@ visual_backend:
     depth_camera_1:
       type: "depth"
       position: [0.0, 0.0, 0.05]
-      orientation: [0.0, 0.0, 0.0, 1.0]
+      orientation: [0.0, 0.0, 0.0]
       width: 640
       height: 480
       hfov: 90
@@ -82,6 +89,7 @@ dynamics:
   vehicle: "crazyflie"
 
 # Trajectory settings
+# TODO: start state
 start_position: [0, -3, 0.2]
 start_orientation: [0, 0, 0, 1] # Quaternion [x, y, z, w]
 trajectory:
