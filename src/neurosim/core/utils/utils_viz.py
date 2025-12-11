@@ -1,7 +1,8 @@
+import torch
 import logging
+import numpy as np
 from dataclasses import dataclass, field
 
-import numpy as np
 
 try:
     import rerun as rr
@@ -15,54 +16,119 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EventVisualizationState:
-    """Visualization state for an event sensor."""
+    """Visualization state for an event sensor.
+
+    Supports both CPU (numpy) and GPU (torch) buffers for efficient event accumulation.
+    """
 
     uuid: str
     width: int
     height: int
-    buffer: np.ndarray = field(init=False)
+    device: str = "cuda:0"
+    use_gpu: bool = True  # Whether to use GPU buffer
+    buffer: torch.Tensor | np.ndarray = field(init=False, default=None)
 
     def __post_init__(self):
-        self.buffer = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        try:
+            # Use GPU buffer for faster accumulation
+            self.buffer = torch.zeros(
+                (self.height, self.width, 3), dtype=torch.uint8, device=self.device
+            )
+            logger.debug(f"Event sensor {self.uuid} using GPU buffer on {self.device}")
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Could not initialize GPU buffer for sensor {self.uuid}: {e}"
+            )
+            # Fallback to CPU buffer
+            self.buffer = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+            self.use_gpu = False
+            logger.debug(f"Event sensor {self.uuid} using CPU buffer")
 
-    def accumulate(self, events: tuple) -> None:
-        """Accumulate events into the visualization buffer."""
-        if events is not None and len(events[0]) > 0:
-            x, y, t, p = events
-            self.buffer[y, x, p * 2] = 255
+    def accumulate(self, events: tuple[torch.Tensor | np.ndarray, ...]) -> None:
+        """Accumulate events into the visualization buffer.
+
+        Args:
+            events: Tuple of (x, y, t, p) event arrays. Can be GPU or CPU tensors.
+        """
+        if events is None or len(events[0]) == 0:
+            return
+
+        x, y, _, p = events
+
+        if self.use_gpu:
+            # Ensure indices are integer tensors for GPU buffer
+            x = x.to(torch.int32)
+            y = y.to(torch.int32)
+            p = p.to(torch.int32)
+        else:
+            # CPU-based accumulation
+            if isinstance(x, torch.Tensor):
+                x = x.cpu().numpy()
+                y = y.cpu().numpy()
+                p = p.cpu().numpy()
+
+        self.buffer[y, x, p * 2] = 255
 
     def reset(self) -> None:
         """Reset the visualization buffer."""
-        self.buffer.fill(0)
+        if self.use_gpu:
+            self.buffer.zero_()
+        else:
+            self.buffer.zero_
 
     def get_image(self) -> np.ndarray:
-        """Get the current visualization buffer."""
-        return self.buffer
+        """Get the current visualization buffer as numpy array (for Rerun)."""
+        if self.use_gpu:
+            # Transfer from GPU only when needed for visualization
+            return self.buffer.cpu().numpy()
+        else:
+            return self.buffer
 
 
 class RerunVisualizer:
-    """Handles Rerun visualization for the simulator."""
+    """Handles Rerun visualization for the simulator.
 
-    def __init__(self, config):
+    Optimized for GPU-based sensors to minimize CPU-GPU transfers.
+    Only transfers data to CPU when visualization is actually performed.
+    """
+
+    def __init__(self, config, use_gpu: bool = True, device: str = "cuda:0"):
         """
         Initialize the Rerun visualizer.
 
         Args:
             config: Simulation configuration
+            use_gpu: Use GPU buffers for event accumulation (default: True)
         """
         self.config = config
         self.enabled = False
+        self.use_gpu = use_gpu
+        self.device = device
+
+        if use_gpu:
+            assert self.device.startswith("cuda"), "Device must be a CUDA device string"
+            if not torch.cuda.is_available():
+                logger.warning(
+                    "⚠️ GPU requested for visualization but not available. Falling back to CPU."
+                )
+                self.use_gpu = False
+                self.device = "cpu"
 
         # Create event visualization states for each event sensor
         self.event_viz_states: dict[str, EventVisualizationState] = {}
         for sensor in config.sensor_manager.get_sensors_by_type("event"):
             sensor_cfg = config.visual_sensors[sensor.uuid]
             self.event_viz_states[sensor.uuid] = EventVisualizationState(
-                uuid=sensor.uuid, width=sensor_cfg["width"], height=sensor_cfg["height"]
+                uuid=sensor.uuid,
+                width=sensor_cfg["width"],
+                height=sensor_cfg["height"],
+                device=self.device,
+                use_gpu=self.use_gpu,
             )
 
         logger.info(
-            f"RerunVisualizer initialized with {len(self.event_viz_states)} event sensors and friends"
+            f"Visualizer ready: {len(self.event_viz_states)} event sensor(s) "
+            f"configured ({'GPU' if self.use_gpu else 'CPU'} mode)"
         )
 
     def initialize(self) -> None:
@@ -78,8 +144,11 @@ class RerunVisualizer:
         """
         Log sensor measurements to Rerun.
 
+        Optimized to minimize GPU->CPU transfers. Data is only transferred
+        when visualization is actually needed.
+
         Args:
-            measurements: Dictionary of sensor measurements by UUID
+            measurements: Dictionary of sensor measurements by UUID (can be GPU tensors)
             time: Current simulation time
             simsteps: Current simulation step
         """
@@ -92,7 +161,7 @@ class RerunVisualizer:
             sensor_cfg = self.config.sensor_manager.get_sensor_config(uuid)
             sensor_type = sensor_cfg.sensor_type
 
-            # For event sensors, always accumulate
+            # For event sensors, always accumulate (stays on GPU if possible)
             if sensor_type == "event":
                 self.event_viz_states[uuid].accumulate(measurement)
 
@@ -100,8 +169,9 @@ class RerunVisualizer:
             if not self.config.sensor_manager.should_visualize(uuid, simsteps):
                 continue
 
+            # Only transfer to CPU when we actually need to visualize
             if sensor_type == "event":
-                # Accumulate events and log the visualization
+                # Transfer from GPU and log visualization
                 rr.log(
                     f"sensors/{uuid}/events",
                     rr.Image(self.event_viz_states[uuid].get_image()),
@@ -110,12 +180,19 @@ class RerunVisualizer:
                 self.event_viz_states[uuid].reset()
 
             elif sensor_type == "color":
+                # Transfer from GPU only for visualization
+                if hasattr(measurement, "cpu"):
+                    measurement = measurement.cpu().numpy()
                 rr.log(f"sensors/{uuid}/color", rr.Image(measurement))
 
             elif sensor_type == "depth":
+                # Transfer from GPU only for visualization
+                if hasattr(measurement, "cpu"):
+                    measurement = measurement.cpu().numpy()
                 rr.log(f"sensors/{uuid}/depth", rr.DepthImage(measurement))
 
             elif sensor_type == "imu":
+                # IMU data is typically small, already on CPU
                 rr.log(f"sensors/{uuid}/accel", rr.Scalars(measurement["accel"]))
                 rr.log(f"sensors/{uuid}/gyro", rr.Scalars(measurement["gyro"]))
 

@@ -19,7 +19,7 @@ from neurosim.core.dynamics import create_dynamics
 from neurosim.core.control import create_controller
 from neurosim.core.trajectory import create_trajectory
 from neurosim.core.imu_sim import create_imu_sensor
-from neurosim.core.coord_trans import CoordinateTransform
+from neurosim.core.coord_trans import rotorpy_to_habitat
 from neurosim.core.utils import RerunVisualizer
 
 
@@ -260,15 +260,18 @@ class SynchronousSimulator:
 
         # TODO: Choose the transform based on settings. Right now hardcoded from rotorpy to habitat
         # This is the coordinate transform step from the dynamics to the visual renderer
-        position, rotation = CoordinateTransform.rotorpy_to_habitat(state)
+        position, rotation = rotorpy_to_habitat(state)
         self.visual_backend.update_agent_state(position, rotation)
 
     def _render_sensors(self) -> dict:
         """
         Render all sensors that should be sampled at this timestep.
 
+        Keeps data on GPU to minimize expensive GPU->CPU transfers.
+        Data is only moved to CPU during visualization.
+
         Returns:
-            Dictionary mapping sensor UUIDs to their measurements
+            Dictionary mapping sensor UUIDs to their measurements (GPU tensors when possible)
         """
         measurements = {}
 
@@ -282,21 +285,17 @@ class SynchronousSimulator:
                 events = self.visual_backend.render_events(
                     uuid=uuid,
                     time=int(self.time * 1e6),  # Convert to microseconds
-                    to_numpy=True,
+                    to_numpy=False,  # Keep on GPU for fast accumulation
                 )
                 measurements[uuid] = events
 
             elif sensor_type == "color":
                 color_img = self.visual_backend.render_color(uuid)
-                measurements[uuid] = (
-                    color_img.cpu().numpy() if hasattr(color_img, "cpu") else color_img
-                )
+                measurements[uuid] = color_img  # Keep as GPU tensor
 
             elif sensor_type == "depth":
                 depth_img = self.visual_backend.render_depth(uuid)
-                measurements[uuid] = (
-                    depth_img.cpu().numpy() if hasattr(depth_img, "cpu") else depth_img
-                )
+                measurements[uuid] = depth_img  # Keep as GPU tensor
 
             elif sensor_type == "imu" and uuid in self.additional_sensors:
                 imu_data = self.additional_sensors[uuid].measurement(
