@@ -1,9 +1,8 @@
-from .core import HabitatWrapper
-from .simulator import Simulator
-from .settings import default_sim_settings
+"""Neurosim - Neural Simulator for Robotics."""
+
+from .synchronous_simulator import SynchronousSimulator
+
 
 __all__ = [
-    "Simulator",
-    "HabitatWrapper",
-    "default_sim_settings",
+    "SynchronousSimulator",
 ]

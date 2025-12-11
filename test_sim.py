@@ -1,30 +1,34 @@
 import argparse
+import logging
 from pathlib import Path
 
-from neurosim import Simulator
+from neurosim import SynchronousSimulator
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--settings", type=str, default=None)
-parser.add_argument("--world_rate", type=int, default=1000)
-parser.add_argument("--control_rate", type=int, default=100)
-parser.add_argument("--sim_time", type=int, default=20)
-
+parser = argparse.ArgumentParser(description="Run Neurosim simulation")
 parser.add_argument(
-    "--save_png", type=str, default=None, help="Save the simulation data in PNG format"
+    "--settings", type=str, required=True, help="Path to settings YAML file"
 )
 parser.add_argument(
-    "--save_h5", type=str, default=None, help="Save the simulation data in HDF5 format"
+    "--display", action="store_true", help="Display live visualization with Rerun"
 )
 parser.add_argument(
-    "--display", action="store_true", help="Display the simulation data"
+    "--verbose", "-v", action="store_true", help="Enable verbose (DEBUG) logging"
 )
 args = parser.parse_args()
 
 
 def main():
-    settings = Path(args.settings) if args.settings else None
-    sim = Simulator(settings, args.world_rate, args.control_rate, args.sim_time)
-    sim.simulate_traj(args.save_h5, args.save_png, args.display)
+    # Setup logging level based on verbosity
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    settings_path = Path(args.settings)
+    sim = SynchronousSimulator(settings_path)
+    sim.run(display=args.display)
 
 
 if __name__ == "__main__":

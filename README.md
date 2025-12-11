@@ -2,7 +2,7 @@
 
 # Neurosim
 
-Blazing fast multirotor simulator with event camera support. Pythonic and real-time.
+> Blazing fast multirotor simulator with event camera support. Pythonic and real-time.
 
 ## 📋 Table of Contents
 
