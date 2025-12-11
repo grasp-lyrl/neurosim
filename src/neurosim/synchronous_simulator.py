@@ -11,8 +11,8 @@ import logging
 import pprint
 import numpy as np
 from pathlib import Path
-from typing import Optional
 from dataclasses import dataclass, field
+from typing import Optional, Callable, Any
 
 from neurosim.core.visual_backend import HabitatWrapper
 from neurosim.core.dynamics import create_dynamics
@@ -66,6 +66,7 @@ class SensorConfig:
         sampling_steps: Number of simulation steps between samples
         viz_rate: Visualization rate in Hz (how often to display)
         viz_steps: Number of simulation steps between visualization
+        executor: Callable function to execute for obtaining sensor data
     """
 
     uuid: str
@@ -74,6 +75,7 @@ class SensorConfig:
     sampling_steps: int
     viz_rate: float
     viz_steps: int
+    executor: Optional[Callable[[], Any]] = field(default=None, repr=False)
 
 
 class SensorManager:
@@ -135,6 +137,16 @@ class SensorManager:
                 f"(viz: {cfg.viz_rate}Hz)"
             )
 
+    def add_executor(self, uuid: str, executor: Callable[[], Any]) -> None:
+        """
+        Add an executor function to a sensor.
+
+        Args:
+            uuid: Sensor UUID
+            executor: Callable function to execute for obtaining sensor data
+        """
+        self.sensors[uuid].executor = executor
+
     def should_sample(self, uuid: str, simstep: int) -> bool:
         """Check if a sensor should be sampled at this simulation step."""
         return simstep % self.sensors[uuid].sampling_steps == 0
@@ -189,25 +201,106 @@ class SynchronousSimulator:
             additional_sensors=sim_cfg.get("additional_sensors", {}),
         )
 
-        # Simulation state
+        ####################
+        # Simulation state #
+        ####################
         self.time = 0.0
         self.simsteps = 0
 
-        # Initialize backends and components
+        ######################################
+        # Initialize backends and components #
+        ######################################
+
+        # Initializes the visual backend and binds visual sensor executors
         self._init_visual_backend()
+
+        # Initialize dynamics, controller, trajectory
         self._init_dynamics()
         self._init_controller()
         self._init_trajectory()
-        self._init_additional_sensors()  # Example: IMU
+
+        # Initialize additional sensors like IMU and bind their executors
+        self._init_additional_sensors()
 
         # Initialize visualizer
         self.visualizer = RerunVisualizer(self.config)
 
         logger.info("🚀 Simulator initialized successfully")
 
+    @staticmethod
+    def _create_sensor_executor(sensor_type: str, **kwargs) -> Callable[[], Any]:
+        """Factory to create sensor executor functions.
+
+        Uses provider functions to access current values at execution time,
+        not initialization time.
+
+        Args:
+            sensor_type: Type of the sensor (event, color, depth, imu)
+            **kwargs: Sensor-specific parameters:
+                Visual sensors (event, color, depth):
+                    - backend: Visual backend instance
+                    - uuid: Sensor UUID
+                    - time_provider: Callable that returns current simulation time
+                IMU sensors:
+                    - sensor: IMU sensor instance
+                    - state_provider: Callable that returns current state
+                    - statedot_provider: Callable that returns current state derivative
+
+        Returns:
+            Callable executor function that samples the sensor
+        """
+        if sensor_type == "event":
+            backend = kwargs["backend"]
+            uuid = kwargs["uuid"]
+            time_provider = kwargs["time_provider"]
+
+            def executor():
+                # Call time_provider() to get CURRENT time, not initialization time
+                return backend.render_events(
+                    uuid=uuid, time=int(time_provider() * 1e6), to_numpy=False
+                )
+
+        elif sensor_type == "color":
+            backend = kwargs["backend"]
+            uuid = kwargs["uuid"]
+
+            def executor():
+                return backend.render_color(uuid)
+
+        elif sensor_type == "depth":
+            backend = kwargs["backend"]
+            uuid = kwargs["uuid"]
+
+            def executor():
+                return backend.render_depth(uuid)
+
+        elif sensor_type == "imu":
+            sensor = kwargs["sensor"]
+            state_provider = kwargs["state_provider"]
+            statedot_provider = kwargs["statedot_provider"]
+
+            def executor():
+                # Call providers to get CURRENT state/statedot, not initialization values
+                return sensor.measurement(state_provider(), statedot_provider())
+
+        else:
+            raise ValueError(f"Unsupported sensor type: {sensor_type}")
+
+        return executor
+
     def _init_visual_backend(self) -> None:
         self.visual_backend = HabitatWrapper(self.settings["visual_backend"])
         logger.info("Visual backend initialized: HabitatWrapper")
+
+        # Bind executors for visual sensors
+        for uuid, sensor_cfg in self.config.visual_sensors.items():
+            executor = self._create_sensor_executor(
+                sensor_type=sensor_cfg.get("type"),
+                backend=self.visual_backend,
+                uuid=uuid,
+                time_provider=lambda: self.time,  # Lazy evaluation - called each time
+            )
+            self.config.sensor_manager.add_executor(uuid, executor)
 
     def _init_dynamics(self) -> None:
         # Hardcoded coordinate transform from rotorpy to habitat,
@@ -239,16 +332,25 @@ class SynchronousSimulator:
 
     def _init_additional_sensors(self) -> None:
         """Initialize additional sensors like IMU."""
-        self.additional_sensors = {}
 
         for uuid, sensor_cfg in self.config.additional_sensors.items():
             sensor_type = sensor_cfg.get("type")
 
             if sensor_type == "imu":
-                self.additional_sensors[uuid] = create_imu_sensor(**sensor_cfg)
+                sensor = create_imu_sensor(**sensor_cfg)
+
+                executor = self._create_sensor_executor(
+                    sensor_type=sensor_type,
+                    sensor=sensor,
+                    state_provider=lambda: self.dynamics.state,  # Lazy evaluation
+                    statedot_provider=lambda: self.dynamics.statedot(),  # Lazy evaluation
+                )
+
                 logger.info(f"Initialized IMU sensor: {uuid}")
             else:
                 raise ValueError(f"Unsupported additional sensor type: {sensor_type}")
+
+            self.config.sensor_manager.add_executor(uuid, executor)
 
     def step(self, control: dict) -> None:
         """
@@ -284,32 +386,8 @@ class SynchronousSimulator:
         measurements = {}
 
         for uuid, sensor_cfg in self.config.sensor_manager.sensors.items():
-            if not self.config.sensor_manager.should_sample(uuid, self.simsteps):
-                continue
-
-            sensor_type = sensor_cfg.sensor_type
-
-            if sensor_type == "event":
-                events = self.visual_backend.render_events(
-                    uuid=uuid,
-                    time=int(self.time * 1e6),  # Convert to microseconds
-                    to_numpy=False,  # Keep on GPU for fast accumulation
-                )
-                measurements[uuid] = events
-
-            elif sensor_type == "color":
-                color_img = self.visual_backend.render_color(uuid)
-                measurements[uuid] = color_img  # Keep as GPU tensor
-
-            elif sensor_type == "depth":
-                depth_img = self.visual_backend.render_depth(uuid)
-                measurements[uuid] = depth_img  # Keep as GPU tensor
-
-            elif sensor_type == "imu" and uuid in self.additional_sensors:
-                imu_data = self.additional_sensors[uuid].measurement(
-                    self.dynamics.state, self.dynamics.statedot()
-                )
-                measurements[uuid] = imu_data
+            if self.config.sensor_manager.should_sample(uuid, self.simsteps):
+                measurements[uuid] = sensor_cfg.executor()
 
         return measurements
 
