@@ -126,10 +126,12 @@ class RerunVisualizer:
                 use_gpu=self.use_gpu,
             )
 
+        logger.info("═══════════════════════════════════════════════════════════")
         logger.info(
-            f"Visualizer ready: {len(self.event_viz_states)} event sensor(s) "
+            f"🎬 RerunVisualizer ready: {len(self.event_viz_states)} event sensor(s) "
             f"configured ({'GPU' if self.use_gpu else 'CPU'} mode)"
         )
+        logger.info("═══════════════════════════════════════════════════════════")
 
     def initialize(self) -> None:
         """Initialize Rerun recording."""
@@ -138,7 +140,9 @@ class RerunVisualizer:
 
         rr.init("neurosim", spawn=True)
         self.enabled = True
-        logger.info("🎬 Rerun visualization started")
+        logger.info("═══════════════════════════════════════════════════════════")
+        logger.info("🎬 RerunVisualizer started")
+        logger.info("═══════════════════════════════════════════════════════════")
 
     def log_measurements(self, measurements: dict, time: float, simsteps: int) -> None:
         """

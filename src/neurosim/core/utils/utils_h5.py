@@ -171,7 +171,7 @@ class H5Logger:
                     break
 
                 sim_time, sim_step = batch.pop("_sim_time"), batch.pop("_sim_step")
-                if verbose and  sim_step % 1000 == 0:
+                if verbose and sim_step % 1000 == 0:
                     print("═══════════════════════════════════════════════════════")
                     print(f"📝 H5 Writer: step={sim_step}, queue_size={queue.qsize()}")
                     print("═══════════════════════════════════════════════════════")
