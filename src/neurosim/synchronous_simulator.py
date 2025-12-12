@@ -235,7 +235,7 @@ class SynchronousSimulator:
         not initialization time. Minimizes closure depth and overhead.
 
         Args:
-            sensor_type: Type of the sensor (event, color, depth, imu)
+            sensor_type: Type of the sensor (event, color, depth, imu, navmesh)
             **kwargs: Sensor-specific parameters:
                 Visual sensors (event, color, depth):
                     - backend: Visual backend instance
@@ -245,6 +245,11 @@ class SynchronousSimulator:
                     - sensor: IMU sensor instance
                     - state_provider: Callable that returns current state
                     - statedot_provider: Callable that returns current state derivative
+                Navmesh sensors:
+                    - backend: Visual backend instance
+                    - uuid: Sensor UUID
+                    - meters_per_pixel: Scale factor for the navmesh (default: 0.1)
+                    - height: Height at which to render the navmesh (optional)
 
         Returns:
             Callable executor function that samples the sensor
@@ -290,6 +295,16 @@ class SynchronousSimulator:
             def executor():
                 return measurement(state_provider(), statedot_provider())
 
+        elif sensor_type == "navmesh":
+            backend = kwargs["backend"]
+            meters_per_pixel = kwargs.get("meters_per_pixel", 0.1)
+            height = kwargs.get("height", None)
+            # Pre-bind method
+            render_navmesh = backend.render_navmesh
+
+            def executor():
+                return render_navmesh(meters_per_pixel=meters_per_pixel, height=height)
+
         else:
             raise ValueError(f"Unsupported sensor type: {sensor_type}")
 
@@ -301,12 +316,26 @@ class SynchronousSimulator:
 
         # Bind executors for visual sensors
         for uuid, sensor_cfg in self.config.visual_sensors.items():
-            executor = self._create_sensor_executor(
-                sensor_type=sensor_cfg.get("type"),
-                backend=self.visual_backend,
-                uuid=uuid,
-                time_provider=lambda: self.time,  # Lazy evaluation - called each time
-            )
+            sensor_type = sensor_cfg.get("type")
+
+            # Build kwargs for the executor
+            executor_kwargs = {
+                "sensor_type": sensor_type,
+                "backend": self.visual_backend,
+                "uuid": uuid,
+            }
+
+            # Add type-specific parameters
+            if sensor_type in ["event", "color", "depth"]:
+                executor_kwargs["time_provider"] = lambda: self.time  # Lazy evaluation
+
+            elif sensor_type == "navmesh":
+                executor_kwargs["meters_per_pixel"] = sensor_cfg.get(
+                    "meters_per_pixel", 0.1
+                )
+                executor_kwargs["height"] = sensor_cfg.get("height", None)
+
+            executor = self._create_sensor_executor(**executor_kwargs)
             self.config.sensor_manager.add_executor(uuid, executor)
 
     def _init_dynamics(self) -> None:
@@ -391,9 +420,10 @@ class SynchronousSimulator:
             Dictionary mapping sensor UUIDs to their measurements (GPU tensors when possible)
         """
         measurements = {}
+        sensor_manager = self.config.sensor_manager
 
-        for uuid, sensor_cfg in self.config.sensor_manager.sensors.items():
-            if self.config.sensor_manager.should_sample(uuid, self.simsteps):
+        for uuid, sensor_cfg in sensor_manager.sensors.items():
+            if sensor_manager.should_sample(uuid, self.simsteps):
                 measurements[uuid] = sensor_cfg.executor()
 
         return measurements

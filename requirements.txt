@@ -6,3 +6,4 @@ rerun-sdk==0.27.2
 pyzmq==27.0.0
 coverage==7.6.1
 rotorpy==2.1.0
+opencv-python==4.12.0

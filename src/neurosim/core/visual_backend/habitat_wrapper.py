@@ -5,6 +5,7 @@ This module provides a wrapper around the Habitat simulator with
 event camera simulation support.
 """
 
+import cv2
 import torch
 import random
 import logging
@@ -199,7 +200,7 @@ class HabitatWrapper:
                         sensor_name=sensor_name, sensor_cfg=sensor_cfg
                     )
                 )
-            else:
+            elif sensor_cfg["type"] in ["color", "depth", "semantic"]:
                 sensor_spec = self._create_camera_spec(
                     uuid=sensor_name,
                     sensor_type=sensor_cfg["type"],
@@ -210,6 +211,8 @@ class HabitatWrapper:
                     position=sensor_cfg["position"],
                     orientation=sensor_cfg["orientation"],
                 )
+            else:
+                continue  # Skip sensors like navmesh
             sensor_specifications.append(sensor_spec)
 
         # Create agent specifications
@@ -288,14 +291,36 @@ class HabitatWrapper:
     def render_navmesh(
         self, meters_per_pixel: float = 0.1, height: Optional[float] = None
     ) -> np.ndarray:
-        """Render the navmesh."""
+        """Render the navmesh with agent position and orientation.
+
+        Args:
+            meters_per_pixel: Scale factor for the navmesh.
+            height: Height at which to render the navmesh.
+
+        Returns:
+            RGB image of the navmesh with agent position (red circle) and
+            orientation (RGB arrows for XYZ axes in top-down view).
+        """
         if height is None:
             height = self._scene_bounds[0][1] + 0.5
         sim_topdown_map = self._sim.pathfinder.get_topdown_view(
             meters_per_pixel, height
         ).astype(np.uint8)
         outline_border(sim_topdown_map)
-        return RECOLOR_MAP[sim_topdown_map]
+        navmesh_rgb = RECOLOR_MAP[sim_topdown_map]
+
+        # Get agent position and rotation
+        agent_state = self.agent.get_state()
+        position_3d = agent_state.position
+
+        # Convert 3D position to 2D navmesh coordinates
+        px = int((position_3d[0] - self._scene_bounds[0][0]) / meters_per_pixel)
+        py = int((position_3d[2] - self._scene_bounds[0][2]) / meters_per_pixel)
+
+        # Draw agent position as red circle
+        cv2.circle(navmesh_rgb, (px, py), radius=2, color=(255, 0, 0), thickness=-1)
+
+        return navmesh_rgb
 
     def close(self) -> None:
         """Close the simulator."""

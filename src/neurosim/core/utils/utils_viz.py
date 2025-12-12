@@ -196,6 +196,10 @@ class RerunVisualizer:
                 rr.log(f"sensors/{uuid}/accel", rr.Scalars(measurement["accel"]))
                 rr.log(f"sensors/{uuid}/gyro", rr.Scalars(measurement["gyro"]))
 
+            elif sensor_type == "navmesh":
+                # Navmesh is already a numpy array on CPU
+                rr.log(f"sensors/{uuid}/navmesh", rr.Image(measurement))
+
     def log_state(self, state: dict) -> None:
         """Log vehicle state to Rerun."""
         if not self.enabled:
