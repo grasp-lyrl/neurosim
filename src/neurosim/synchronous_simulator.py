@@ -11,8 +11,8 @@ import logging
 import pprint
 import numpy as np
 from pathlib import Path
+from typing import Callable, Any
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Any
 
 from neurosim.core.visual_backend import HabitatWrapper
 from neurosim.core.dynamics import create_dynamics
@@ -20,7 +20,7 @@ from neurosim.core.control import create_controller
 from neurosim.core.trajectory import create_trajectory
 from neurosim.core.imu_sim import create_imu_sensor
 from neurosim.core.coord_trans import CoordinateTransform
-from neurosim.core.utils import RerunVisualizer
+from neurosim.core.utils import RerunVisualizer, H5Logger
 
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ class SimulationConfig:
     additional_sensors: dict = field(default_factory=dict)
     t_step: float = field(init=False)
     t_final: float = field(init=False)
-    sensor_manager: Optional["SensorManager"] = field(init=False, default=None)
+    sensor_manager: "SensorManager" = field(init=False, default=None)
 
     def __post_init__(self):
         self.t_step = 1.0 / self.world_rate
@@ -75,7 +75,7 @@ class SensorConfig:
     sampling_steps: int
     viz_rate: float
     viz_steps: int
-    executor: Optional[Callable[[], Any]] = field(default=None, repr=False)
+    executor: Callable[[], Any] | None = field(default=None, repr=False)
 
 
 class SensorManager:
@@ -155,7 +155,7 @@ class SensorManager:
         """Check if a sensor should be visualized at this simulation step."""
         return simstep % self.sensors[uuid].viz_steps == 0
 
-    def get_sensor_config(self, uuid: str) -> Optional[SensorConfig]:
+    def get_sensor_config(self, uuid: str) -> SensorConfig | None:
         """
         Get sensor configuration by UUID.
 
@@ -428,12 +428,13 @@ class SynchronousSimulator:
 
         return measurements
 
-    def run(self, display: bool = False) -> dict:
+    def run(self, display: bool = False, log_h5: str | None = None) -> dict:
         """
         Run the simulation.
 
         Args:
             display: Whether to display live visualization with Rerun
+            log_h5: Path to HDF5 file for logging. If None, no logging.
 
         Returns:
             Dictionary with simulation statistics
@@ -442,8 +443,24 @@ class SynchronousSimulator:
         if display:
             self.visualizer.initialize()
 
+        # Setup H5 logger
+        h5_logger = None
+        if log_h5:
+            h5_logger = H5Logger(
+                filename=log_h5,
+                sensor_manager=self.config.sensor_manager,
+                deepcopy_data=False,  # Use zero-copy for speed
+                compression=None,  # Disable compression for speed (can enable 'lzf' for smaller files)
+                verbose=True,
+            )
+            logger.info(f"H5 logging enabled: {log_h5}")
+
         # Run simulation loop
-        latencies = self._run_simulation_loop(display)
+        latencies = self._run_simulation_loop(display, h5_logger)
+
+        # Close H5 logger
+        if h5_logger:
+            h5_logger.close()
 
         # Compute and display statistics
         stats = self._compute_statistics(latencies)
@@ -454,7 +471,9 @@ class SynchronousSimulator:
 
         return stats
 
-    def _run_simulation_loop(self, display: bool) -> list[float]:
+    def _run_simulation_loop(
+        self, display: bool, h5_logger: H5Logger | None = None
+    ) -> list[float]:
         """Run the main simulation loop."""
         # Initialize control
         flat = self.trajectory.update(self.time)
@@ -483,6 +502,17 @@ class SynchronousSimulator:
 
                 # Record latency
                 latencies.append(time.perf_counter() - start_time)
+
+                # Log to H5
+                if h5_logger:
+                    h5_logger.log(
+                        {
+                            **measurements,
+                            "state": self.dynamics.state,
+                        },
+                        self.time,
+                        self.simsteps,
+                    )
 
                 # Display with Rerun
                 if display:

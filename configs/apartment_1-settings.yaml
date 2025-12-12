@@ -17,7 +17,7 @@ simulator:
     event_camera_1: 1000 # Hz - high-frequency event accumulation
     color_camera_1: 10 # Hz
     depth_camera_1: 10 # Hz
-    navmesh_1: 10 # Hz
+    # navmesh_1: 10 # Hz
 
   # Visualization rates (optional) - how often to display sensor data
   # Must be <= sampling_rate for each sensor
@@ -27,7 +27,7 @@ simulator:
     event_camera_1: 20 # Hz - visualize every 5th accumulation
     color_camera_1: 10 # Hz
     depth_camera_1: 10 # Hz
-    navmesh_1: 10 # Hz
+    # navmesh_1: 10 # Hz
 
 # Visual Backend Settings
 visual_backend:
@@ -80,9 +80,9 @@ visual_backend:
       hfov: 90
       zfar: 10.0
 
-    navmesh_1:
-      type: "navmesh"
-      meters_per_pixel: 0.1  # Higher resolution for better detail
+    # navmesh_1:
+    #   type: "navmesh"
+    #   meters_per_pixel: 0.1  # Higher resolution for better detail
       # height: 0.5  # Optional: height at which to render (defaults to scene bounds + 0.5)
 
 # Controller settings
