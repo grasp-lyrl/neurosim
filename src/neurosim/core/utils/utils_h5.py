@@ -65,9 +65,15 @@ class H5Logger:
         self.deepcopy_data = deepcopy_data
         self.sensor_types = {"state": "state"}
 
-        if sensor_manager is not None:
-            for uuid, cfg in sensor_manager.sensors.items():
-                self.sensor_types[uuid] = cfg.sensor_type
+        # Initialize HDF5 file and write sensor metadata
+        with h5py.File(self.filename, "w", libver="latest") as f:
+            if sensor_manager is not None:
+                for uuid, cfg in sensor_manager.sensors.items():
+                    self.sensor_types[uuid] = cfg.sensor_type
+
+                    if cfg.sensor_type not in self.IGNORED_SENSOR_TYPES:
+                        grp = f.create_group(uuid)
+                        grp.attrs.update(cfg.config)
 
         ctx = mp.get_context("spawn")
         self.queue = ctx.Queue()
@@ -162,7 +168,7 @@ class H5Logger:
             buf["sim_time"].clear()
             buf["sim_step"].clear()
 
-        with h5py.File(filename, "w", libver="latest") as f:
+        with h5py.File(filename, "a", libver="latest") as f:
             while True:
                 batch = queue.get()
                 if batch is None:

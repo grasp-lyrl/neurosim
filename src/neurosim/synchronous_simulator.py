@@ -70,6 +70,7 @@ class SensorConfig:
     """
 
     uuid: str
+    config: dict
     sensor_type: str
     sampling_rate: float
     sampling_steps: int
@@ -123,6 +124,7 @@ class SensorManager:
 
             self.sensors[uuid] = SensorConfig(
                 uuid=uuid,
+                config=sensor_cfg,
                 sensor_type=sensor_type,
                 sampling_rate=sampling_rate,
                 sampling_steps=sampling_steps,
