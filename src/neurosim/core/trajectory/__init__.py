@@ -55,6 +55,19 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
             points=np.array(kwargs.get("points", [])),
             v_avg=kwargs.get("v_avg", 1.2),
         )
+    elif model == TrajectoryType.HABITAT_RANDOM_MINSNAP:
+        from .habitat_trajs import generate_interesting_traj
+
+        return generate_interesting_traj(
+            pathfinder=kwargs.get("pathfinder"),
+            seed=kwargs.get("seed", 324),
+            target_length=kwargs.get("target_length", 20.0),
+            min_waypoint_distance=kwargs.get("min_waypoint_distance", 2.0),
+            max_waypoints=kwargs.get("max_waypoints", 100),
+            v_avg=kwargs.get("v_avg", 1.0),
+            start=kwargs.get("start", None),
+            max_tries_per_waypoint=kwargs.get("max_tries_per_waypoint", 100),
+        )
     else:
         raise ValueError(f"Unsupported trajectory type: {model}")
 

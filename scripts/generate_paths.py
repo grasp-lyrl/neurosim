@@ -1,63 +1,21 @@
-#!/usr/bin/env python3
 """Standalone Habitat-Sim NavMesh path script.
 
 - Samples two navigable points and computes the shortest path (baseline).
-- Generates an "interesting" quadrotor trajectory using RRT* style expansion.
 - Saves topdown + 3D debug visualizations; can optionally render a short video.
 """
 
-from __future__ import annotations
-
 import os
-import sys
 import argparse
-from typing import List
-
 import numpy as np
-import magnum as mn
+import matplotlib.pyplot as plt
 
+import habitat_sim
+import habitat_sim.utils.common as utils
 
-# Add src to path to import neurosim
-def get_repo_root() -> str:
-    try:
-        import git
-
-        repo = git.Repo(".", search_parent_directories=True)
-        return repo.working_tree_dir
-    except Exception:
-        # Fallback: assume we are in scripts/ and root is ../
-        return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-
-root = get_repo_root()
-if os.path.join(root, "src") not in sys.path:
-    sys.path.append(os.path.join(root, "src"))
-
-from neurosim.core.navmesh_paths import generate_interesting_path, NavmeshPath
-
-
-def _try_import_habitat_sim():
-    try:
-        import habitat_sim
-        from habitat_sim.utils import common as utils
-
-        return habitat_sim, utils
-    except ImportError:
-        candidates = [
-            os.path.join(root, "deps/habitat-sim/build/lib.linux-x86_64-cpython-310"),
-            os.path.join(root, "deps/habitat-sim/build/lib.linux-x86_64-cpython-311"),
-            os.path.join(root, "deps/habitat-sim/build/lib"),
-        ]
-        for p in candidates:
-            if os.path.isdir(p) and p not in sys.path:
-                sys.path.append(p)
-        import habitat_sim
-        from habitat_sim.utils import common as utils
-
-        return habitat_sim, utils
-
-
-habitat_sim, utils = _try_import_habitat_sim()
+from neurosim.core.trajectory.habitat_trajs import (
+    generate_interesting_traj,
+    sample_minsnap_trajectory,
+)
 
 
 def ensure_dir(path: str) -> None:
@@ -66,7 +24,6 @@ def ensure_dir(path: str) -> None:
 
 def make_cfg(
     scene_path: str,
-    scene_dataset: str | None = None,
     width: int = 256,
     height: int = 256,
     agent_height: float = 1.5,
@@ -75,8 +32,6 @@ def make_cfg(
     sim_cfg = habitat_sim.SimulatorConfiguration()
     sim_cfg.gpu_device_id = 0
     sim_cfg.scene_id = scene_path
-    if scene_dataset:
-        sim_cfg.scene_dataset_config_file = scene_dataset
     sim_cfg.enable_physics = False
 
     sensor_specs = []
@@ -97,10 +52,10 @@ def make_cfg(
 
 
 def world_to_topdown(
-    points: List[np.ndarray], pf, meters_per_pixel: float
-) -> List[np.ndarray]:
+    points: list[np.ndarray], pf, meters_per_pixel: float
+) -> list[np.ndarray]:
     bounds = pf.get_bounds()
-    out: List[np.ndarray] = []
+    out: list[np.ndarray] = []
     for p in points:
         px = (p[0] - bounds[0][0]) / meters_per_pixel
         py = (p[2] - bounds[0][2]) / meters_per_pixel
@@ -108,7 +63,7 @@ def world_to_topdown(
     return out
 
 
-def save_visualizations(sim, points: List[np.ndarray], out_dir: str, prefix: str):
+def save_visualizations(sim, points: list[np.ndarray], out_dir: str, prefix: str):
     ensure_dir(out_dir)
     pf = sim.pathfinder
 
@@ -119,61 +74,88 @@ def save_visualizations(sim, points: List[np.ndarray], out_dir: str, prefix: str
     colors = np.array([[0, 0, 0], [255, 255, 255]], dtype=np.uint8)
     td_rgb = colors[td_u8]
 
-    try:
-        import matplotlib.pyplot as plt
+    pts2d = world_to_topdown(points, pf, meters_per_pixel)
 
-        pts2d = world_to_topdown(points, pf, meters_per_pixel)
-        plt.figure(figsize=(10, 8))
-        plt.axis("off")
-        plt.imshow(td_rgb)
-        for p in pts2d:
-            plt.plot(p[0], p[1], marker="o", markersize=3, color="red")
-        plt.savefig(os.path.join(out_dir, f"{prefix}_topdown.png"), bbox_inches="tight")
-        plt.close()
+    # Top-down visualization with gradient colors
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.imshow(td_rgb)
+    ax.axis("off")
 
-        xs = [p[0] for p in points]
-        ys = [p[1] for p in points]
-        zs = [p[2] for p in points]
-        fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection="3d")
-        ax.plot(xs, zs, ys)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Z")
-        ax.set_zlabel("Y")
-        fig.savefig(os.path.join(out_dir, f"{prefix}_3d.png"), bbox_inches="tight")
-        plt.close(fig)
-    except Exception as e:
-        print(f"Skipping matplotlib visualizations: {e}")
+    # Use a colormap to color the path by progression
+    if len(pts2d) > 1:
+        cmap = plt.get_cmap("jet")
+        for i in range(len(pts2d) - 1):
+            color_idx = i / max(len(pts2d) - 1, 1)
+            color = cmap(color_idx)
+            ax.plot(
+                [pts2d[i][0], pts2d[i + 1][0]],
+                [pts2d[i][1], pts2d[i + 1][1]],
+                color=color,
+                linewidth=2,
+                alpha=0.8,
+            )
+
+    fig.savefig(
+        os.path.join(out_dir, f"{prefix}_topdown.png"), bbox_inches="tight", dpi=150
+    )
+    plt.close(fig)
+
+    # 3D visualization with gradient colors
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    zs = [p[2] for p in points]
+
+    fig = plt.figure(figsize=(12, 9))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Plot path segments with color gradient
+    if len(points) > 1:
+        cmap = plt.get_cmap("jet")
+        for i in range(len(points) - 1):
+            color_idx = i / max(len(points) - 1, 1)
+            color = cmap(color_idx)
+            ax.plot(
+                [xs[i], xs[i + 1]],
+                [zs[i], zs[i + 1]],
+                [ys[i], ys[i + 1]],
+                color=color,
+                linewidth=1.5,
+                alpha=0.7,
+            )
+
+        # Mark start and end
+        ax.scatter(
+            [xs[0]], [zs[0]], [ys[0]], color="green", s=100, label="Start", zorder=10
+        )
+        ax.scatter(
+            [xs[-1]], [zs[-1]], [ys[-1]], color="red", s=100, label="End", zorder=10
+        )
+        ax.legend()
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Z")
+    ax.set_zlabel("Y")
+    ax.set_title("3D Trajectory Path")
+    fig.savefig(os.path.join(out_dir, f"{prefix}_3d.png"), bbox_inches="tight", dpi=150)
+    plt.close(fig)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene", type=str, default=None)
-    parser.add_argument("--dataset", type=str, default=None)
+    parser.add_argument("--scene", type=str, default=None, required=True)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--out", type=str, default=None)
     parser.add_argument("--save_video", action="store_true")
-    parser.add_argument("--agent_height", type=float, default=0.2)
-    parser.add_argument("--agent_radius", type=float, default=0.2)
-    parser.add_argument(
-        "--mode",
-        type=str,
-        default="random_walk",
-        choices=["random_walk", "rrt"],
-        help="Path generation mode",
-    )
+    parser.add_argument("--v_avg", type=float, default=1.0)
+    parser.add_argument("--target_length", type=float, default=30.0)
+    parser.add_argument("--agent_height", type=float, default=1.0)
+    parser.add_argument("--agent_radius", type=float, default=0.35)
+    parser.add_argument("--agent_max_climb", type=float, default=1.0)
+    parser.add_argument("--agent_max_slope", type=float, default=90.0)
     args = parser.parse_args()
 
-    root = get_repo_root()
-    data_path = os.path.join(root, "data")
-    scene = args.scene or os.path.join(
-        data_path, "scene_datasets/habitat-test-scenes/apartment_1.glb"
-    )
-    out_dir = args.out or os.path.join(root, "examples/tutorials/nav_output")
-
     cfg = make_cfg(
-        scene,
-        args.dataset,
+        args.scene,
         agent_height=args.agent_height,
         agent_radius=args.agent_radius,
     )
@@ -190,8 +172,8 @@ def main():
     # Keep other settings at defaults (commented out for reference):
     # navmesh_settings.cell_size = 0.05
     # navmesh_settings.cell_height = 0.2
-    navmesh_settings.agent_max_climb = 0.2
-    navmesh_settings.agent_max_slope = 90.0
+    navmesh_settings.agent_max_climb = args.agent_max_climb
+    navmesh_settings.agent_max_slope = args.agent_max_slope
     # navmesh_settings.filter_low_hanging_obstacles = True
     # navmesh_settings.filter_ledge_spans = True
     # navmesh_settings.filter_walkable_low_height_spans = True
@@ -223,12 +205,14 @@ def main():
         return
 
     # Generate interesting path using new API
-    nav_path = generate_interesting_path(
-        pf, seed=args.seed, target_length=20.0, step_radius=2.0, mode=args.mode
+    traj = generate_interesting_traj(
+        pf, seed=args.seed, target_length=args.target_length, v_avg=args.v_avg
     )
 
-    print(f"Interesting path generated; points={len(nav_path.points)}")
-    save_visualizations(sim, list(nav_path.points), out_dir, prefix="interesting")
+    points, orientations = sample_minsnap_trajectory(traj)
+
+    print(f"Interesting path generated; points={len(points)}")
+    save_visualizations(sim, list(points), args.out, prefix="interesting")
 
     if args.save_video:
         try:
@@ -237,9 +221,9 @@ def main():
             agent = sim.initialize_agent(0)
             agent_state = habitat_sim.AgentState()
             observations = []
-            for i, p in enumerate(nav_path.points):
+            for i, p in enumerate(points):
                 agent_state.position = p
-                agent_state.rotation = utils.quat_from_magnum(nav_path.orientations[i])
+                agent_state.rotation = utils.quat_from_magnum(orientations[i])
                 agent.set_state(agent_state)
                 observations.append(sim.get_sensor_observations())
 
@@ -247,7 +231,7 @@ def main():
                 observations=observations,
                 primary_obs="color_sensor",
                 primary_obs_type="color",
-                video_file=os.path.join(out_dir, "interesting_path"),
+                video_file=os.path.join(args.out, "interesting_path"),
                 fps=30,
                 open_vid=False,
             )
