@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Protocol, Dict, Any
+from typing import Protocol, Any
 
 
 class DynamicsType(Enum):
@@ -18,16 +18,16 @@ class DynamicsProtocol(Protocol):
     """
 
     @property
-    def state(self) -> Dict[str, Any]:
+    def state(self) -> dict[str, Any]:
         """Current state of the system."""
         ...
 
     @state.setter
-    def state(self, value: Dict[str, Any]):
+    def state(self, value: dict[str, Any]):
         """Set the current state of the system."""
         ...
 
-    def step(self, control: Any, dt: float) -> Dict[str, Any]:
+    def step(self, control: Any, dt: float) -> dict[str, Any]:
         """
         Advance the dynamics by one timestep.
 
@@ -40,7 +40,7 @@ class DynamicsProtocol(Protocol):
         """
         ...
 
-    def statedot(self) -> Dict[str, Any]:
+    def statedot(self) -> dict[str, Any]:
         """
         Compute state derivatives using current state and last control.
 
