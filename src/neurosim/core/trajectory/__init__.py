@@ -51,8 +51,14 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
     elif model == TrajectoryType.POLYNOMIAL:
         from .polynomial_traj import Polynomial
 
+        points = np.array(kwargs.get("points", []))
+        yaw_angles = kwargs.get("yaw_angles", None)
+        if yaw_angles is not None:
+            yaw_angles = np.array(yaw_angles)
+
         return Polynomial(
-            points=np.array(kwargs.get("points", [])),
+            points=points,
+            yaw_angles=yaw_angles,
             v_avg=kwargs.get("v_avg", 1.2),
         )
     elif model == TrajectoryType.HABITAT_RANDOM_MINSNAP:
