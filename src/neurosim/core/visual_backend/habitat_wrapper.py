@@ -11,7 +11,7 @@ import random
 import logging
 import numpy as np
 import magnum as mn
-from typing import Any, Optional
+from typing import Any
 
 import habitat_sim as hsim
 
@@ -44,9 +44,18 @@ class HabitatWrapper:
         # Set seed
         self._set_seed(self.settings.get("seed", 324))
 
+        # Recompute navmesh based on settings
+        self._recompute_navmesh()
+
         # init the agent to the start position and orientation
         # self.agent = self._init_agent_state(self.settings["default_agent"])
         self.agent = self._sim.get_agent(self.settings["default_agent"])
+
+        logger.info("════════════════════════════════════════════════════════════════")
+        logger.info(
+            f"✅ Habitat simulator initialized with scene: {self.settings['scene']}"
+        )
+        logger.info("════════════════════════════════════════════════════════════════")
 
     def _set_seed(self, seed: int) -> None:
         """Set the random seed for the simulator and numpy.
@@ -57,6 +66,58 @@ class HabitatWrapper:
         random.seed(seed)
         self._sim.seed(seed)
         np.random.seed(seed)
+
+    def _recompute_navmesh(self) -> None:
+        """
+        Recompute the navmesh based on current settings.
+
+        The pathfinding random seed is handled separately in the trajectory generation.
+        """
+        agent_height = self.settings["agent_height"]
+        agent_radius = self.settings["agent_radius"]
+        agent_max_climb = self.settings["agent_max_climb"]
+        agent_max_slope = self.settings["agent_max_slope"]
+
+        # Recompute navmesh with agent-specific parameters
+        navmesh_settings = hsim.NavMeshSettings()
+        navmesh_settings.set_defaults()
+
+        # Configure agent parameters for better path planning
+        navmesh_settings.agent_height = agent_height
+        navmesh_settings.agent_radius = agent_radius
+
+        # Keep other settings at defaults (commented out for reference):
+        # navmesh_settings.cell_size = 0.05
+        # navmesh_settings.cell_height = 0.2
+        navmesh_settings.agent_max_climb = agent_max_climb
+        navmesh_settings.agent_max_slope = agent_max_slope
+        # navmesh_settings.filter_low_hanging_obstacles = True
+        # navmesh_settings.filter_ledge_spans = True
+        # navmesh_settings.filter_walkable_low_height_spans = True
+        # navmesh_settings.region_min_size = 20
+        # navmesh_settings.region_merge_size = 20
+        # navmesh_settings.edge_max_len = 12.0
+        # navmesh_settings.edge_max_error = 1.3
+        # navmesh_settings.verts_per_poly = 6.0
+        # navmesh_settings.detail_sample_dist = 6.0
+        # navmesh_settings.detail_sample_max_error = 1.0
+        # navmesh_settings.include_static_objects = False
+
+        logger.info(
+            f"Recomputing navmesh with agent_height={agent_height}, agent_radius={agent_radius}..."
+        )
+        navmesh_success = self._sim.recompute_navmesh(
+            self._sim.pathfinder, navmesh_settings
+        )
+
+        if not navmesh_success:
+            logger.error("Failed to build the navmesh! Try different parameters.")
+            self.close()
+            raise RuntimeError(
+                "Navmesh recomputation failed. Retry with different parameters?"
+            )
+        else:
+            logger.info("Navmesh recomputed successfully.")
 
     def _create_camera_spec(
         self,
@@ -74,8 +135,13 @@ class HabitatWrapper:
             0.0,
             1.0,
         ),
+        anti_aliasing: int = 0,
     ) -> hsim.CameraSensorSpec:
-        """Create a camera sensor specification."""
+        """Create a camera sensor specification.
+
+        Args:
+            anti_aliasing: Number of MSAA samples for anti-aliasing (0 disables, 8 or 16 recommended).
+        """
         camera_sensor_spec = hsim.CameraSensorSpec()
         camera_sensor_spec.uuid = uuid
         camera_sensor_spec.hfov = hfov
@@ -108,6 +174,7 @@ class HabitatWrapper:
         else:
             camera_sensor_spec.resolution = resolution
 
+        position[1] += self.settings["agent_height"]  # Adjust for agent height
         if not isinstance(position, mn.Vector3):
             camera_sensor_spec.position = mn.Vector3(position)
         else:
@@ -124,6 +191,12 @@ class HabitatWrapper:
             camera_sensor_spec.clear_color = clear_color
 
         camera_sensor_spec.gpu2gpu_transfer = True  # Keep renderings in GPU
+
+        # Enable anti-aliasing if samples > 0
+        if anti_aliasing > 0:
+            # Habitat-sim uses Magnum's MSAA through the sensor spec
+            camera_sensor_spec.samples = anti_aliasing
+
         return camera_sensor_spec
 
     def _create_event_simulator(
@@ -149,6 +222,7 @@ class HabitatWrapper:
             far=sensor_cfg["zfar"],
             position=sensor_cfg["position"],
             orientation=sensor_cfg["orientation"],
+            anti_aliasing=sensor_cfg.get("anti_aliasing", 8),
         )
 
         backend = sensor_cfg.get("backend", "auto")
@@ -210,9 +284,10 @@ class HabitatWrapper:
                     far=sensor_cfg["zfar"],
                     position=sensor_cfg["position"],
                     orientation=sensor_cfg["orientation"],
+                    anti_aliasing=sensor_cfg.get("anti_aliasing", 0),
                 )
             else:
-                continue  # Skip sensors like navmesh
+                continue  # Skip sensors like navmesh, which dont need a spec
             sensor_specifications.append(sensor_spec)
 
         # Create agent specifications
@@ -225,7 +300,9 @@ class HabitatWrapper:
 
         return hsim.Configuration(sim_cfg, [agent_cfg])
 
-    def update_agent_state(self, position: np.ndarray, rotation: np.ndarray) -> None:
+    def update_agent_state(
+        self, position: np.ndarray, quaternion: np.ndarray | np.quaternion
+    ) -> None:
         """Update the agent's pose.
 
         Args:
@@ -233,12 +310,14 @@ class HabitatWrapper:
             position: The new position.
             rotation: The new rotation.
         """
-        agent_state = hsim.AgentState(position=position, rotation=rotation)
-        self.agent.set_state(agent_state, reset_sensors=False)
+        self.agent.set_state(
+            hsim.AgentState(position=position, rotation=quaternion),
+            reset_sensors=False,
+        )
 
     def render_events(
         self, uuid: str, time: int, to_numpy: bool = False
-    ) -> Optional[tuple[Any, ...]]:
+    ) -> tuple[Any, ...] | None:
         """Render events from the event camera.
 
         Args:
@@ -289,7 +368,7 @@ class HabitatWrapper:
         return sensor.get_observation()
 
     def render_navmesh(
-        self, meters_per_pixel: float = 0.1, height: Optional[float] = None
+        self, meters_per_pixel: float = 0.1, height: float | None = None
     ) -> np.ndarray:
         """Render the navmesh with agent position and orientation.
 
