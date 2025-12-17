@@ -10,11 +10,12 @@ import numpy as np
 class Polynomial(object):
     """ """
 
-    def __init__(self, points, v_avg=1.2):
+    def __init__(self, points, v_avg=1.2, yaw_angles=None):
         """
         Inputs:
             points, (N, 3) array of N waypoint coordinates in 3D
             v_avg, the average speed between segments
+            yaw_angles, (N,) array of yaw angles at each waypoint (optional)
         """
 
         def get_poly(xi, xf, T):
@@ -75,6 +76,40 @@ class Polynomial(object):
                 self.x_dddot_poly[i, j, :] = np.polyder(self.x_poly[i, j, :], m=3)
                 self.x_ddddot_poly[i, j, :] = np.polyder(self.x_poly[i, j, :], m=4)
 
+        # Handle yaw angles if provided.
+        if yaw_angles is not None:
+            yaw_angles = np.asarray(yaw_angles)
+            # Ensure yaw_angles matches the filtered points
+            if yaw_angles.shape[0] == points.shape[0]:
+                yaw_angles = yaw_angles[seg_mask]
+
+            if yaw_angles.shape[0] >= 2:
+                # Unwrap to prevent discontinuities
+                yaw_angles = np.unwrap(yaw_angles)
+                self.yaw_poly = np.zeros((N, 6))
+                for i in range(N):
+                    self.yaw_poly[i, :] = get_poly(
+                        yaw_angles[i], yaw_angles[i + 1], self.T[i]
+                    )
+
+                # Calculate yaw derivatives
+                self.yaw_dot_poly = np.zeros((N, 5))
+                self.yaw_ddot_poly = np.zeros((N, 4))
+                for i in range(N):
+                    self.yaw_dot_poly[i, :] = np.polyder(self.yaw_poly[i, :], m=1)
+                    self.yaw_ddot_poly[i, :] = np.polyder(self.yaw_poly[i, :], m=2)
+            else:
+                # Single point: constant yaw
+                self.yaw_poly = np.zeros((N, 6))
+                self.yaw_poly[0, -1] = yaw_angles[0] if yaw_angles.size > 0 else 0.0
+                self.yaw_dot_poly = np.zeros((N, 5))
+                self.yaw_ddot_poly = np.zeros((N, 4))
+        else:
+            # No yaw specified: default to zero
+            self.yaw_poly = np.zeros((N, 6))
+            self.yaw_dot_poly = np.zeros((N, 5))
+            self.yaw_ddot_poly = np.zeros((N, 4))
+
     def update(self, t):
         """
         Given the present time, return the desired flat output and derivatives.
@@ -114,6 +149,11 @@ class Polynomial(object):
             x_ddot[j] = np.polyval(self.x_ddot_poly[i, j, :], t)
             x_dddot[j] = np.polyval(self.x_dddot_poly[i, j, :], t)
             x_ddddot[j] = np.polyval(self.x_ddddot_poly[i, j, :], t)
+
+        # Evaluate yaw polynomial
+        yaw = np.polyval(self.yaw_poly[i, :], t)
+        yaw_dot = np.polyval(self.yaw_dot_poly[i, :], t)
+        yaw_ddot = np.polyval(self.yaw_ddot_poly[i, :], t)
 
         flat_output = {
             "x": x,

@@ -1,4 +1,9 @@
+import logging
+
 from .types import IMUSensorProtocol, IMUSensorType
+from neurosim.core.utils.logging_utils import format_dict
+
+logger = logging.getLogger(__name__)
 
 
 def create_imu_sensor(model: IMUSensorType | str, **kwargs) -> IMUSensorProtocol:
@@ -11,9 +16,16 @@ def create_imu_sensor(model: IMUSensorType | str, **kwargs) -> IMUSensorProtocol
     if model == IMUSensorType.ROTORPY:
         from .rotorpy_wrapper import RotorpyImuSensor
 
-        return RotorpyImuSensor(sampling_rate=kwargs["sampling_rate"])
+        sensor = RotorpyImuSensor(sampling_rate=kwargs["sampling_rate"])
     else:
         raise ValueError(f"Unsupported sensor type: {model}")
+
+    logger.info("═══════════════════════════════════════════════════════")
+    logger.info(f"✅ IMU sensor initialized: {sensor.__class__.__name__} @")
+    logger.info(format_dict(kwargs))
+    logger.info("═══════════════════════════════════════════════════════")
+
+    return sensor
 
 
 __all__ = ["SensorType", "SensorProtocol", "create_sensor"]

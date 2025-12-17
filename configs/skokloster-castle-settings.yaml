@@ -2,7 +2,7 @@
 simulator:
   world_rate: 1000 # Hz
   control_rate: 100 # Hz
-  sim_time: 20 # seconds
+  sim_time: 30 # seconds
 
   additional_sensors:
     imu_1:
@@ -15,8 +15,8 @@ simulator:
   sensor_rates:
     imu_1: 50 # Hz
     event_camera_1: 1000 # Hz - high-frequency event accumulation
-    color_camera_1: 10 # Hz
-    depth_camera_1: 10 # Hz
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
     # navmesh_1: 10 # Hz
 
   # Visualization rates (optional) - how often to display sensor data
@@ -25,8 +25,8 @@ simulator:
   viz_rates:
     imu_1: 50 # Hz
     event_camera_1: 20 # Hz - visualize every 5th accumulation
-    color_camera_1: 10 # Hz
-    depth_camera_1: 10 # Hz
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
     # navmesh_1: 10 # Hz
 
 # Visual Backend Settings
@@ -37,12 +37,19 @@ visual_backend:
   clear_color: [0.0, 0.0, 0.0, 1.0] # BLACK in RGBA (assuming mn.Color4.from_linear_rgb_int(0))
   default_agent: 0
 
-  # default_agent_navmesh: true
-  # navmesh_include_static_objects: false
+  # navmesh_settings:
+  # TODO: Move these to a navmesh handler settings section
+  # TODO: to be more maintainable. Also get the agent radius
+  # TODO: from the vehicle model.
+  agent_height: 1.0
+  agent_radius: 0.3
+  agent_max_climb: 2.0
+  agent_max_slope: 90.0
+
   enable_hbao: false
   frustum_culling: true
 
-  seed: 1
+  seed: 324
   physics_config_file: "data/default.physics_config.json"
   enable_physics: true # Replace with false if `built_with_bullet` is False
 
@@ -58,6 +65,7 @@ visual_backend:
       backend: "cuda"
       contrast_threshold_neg: 0.35
       contrast_threshold_pos: 0.35
+      anti_aliasing: 8
 
     color_camera_1:
       name: "color_camera_1"
@@ -68,6 +76,7 @@ visual_backend:
       height: 480
       hfov: 90
       zfar: 1000.0
+      anti_aliasing: 8
 
     depth_camera_1:
       type: "depth"
@@ -94,9 +103,10 @@ dynamics:
   vehicle: "crazyflie"
 
 # Trajectory settings
-start_position: [-3.0, -14, 2]
-start_orientation: [0, 0, 0, 1] # Quaternion [x, y, z, w]
 trajectory:
-  model: "polynomial"
-  points: [[-3, -14, 2], [-4, -7, 2], [5, -7, 2], [4, -14, 2]]
-  v_avg: 2
+  model: "habitat_random_minsnap"
+  seed: 42
+  target_length: 30.0
+  min_waypoint_distance: 2.0
+  max_waypoints: 100
+  v_avg: 1.0

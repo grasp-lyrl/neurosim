@@ -1,8 +1,12 @@
+import logging
 import numpy as np
 from typing import Any
 from rotorpy.vehicles.multirotor import Multirotor
 
 from .types import DynamicsProtocol, DynamicsType
+from neurosim.core.coord_trans import CoordinateTransform
+
+logger = logging.getLogger(__name__)
 
 
 def get_vehicle_params(vehicle_name: str = "crazyflie") -> dict[str, Any]:
@@ -58,7 +62,23 @@ class RotorpyDynamics(DynamicsProtocol):
 
     @state.setter
     def state(self, value: dict[str, np.ndarray]) -> None:
-        self._state = value
+        """Partially/fully update the state dictionary.
+
+        Supports setting yaw/yaw_dot which are automatically converted to q/w.
+        """
+        # Handle yaw -> quaternion conversion if yaw is provided
+        if "yaw" in value or "yaw_dot" in value:
+            yaw = value.pop("yaw", 0.0)
+            yaw_dot = value.pop("yaw_dot", 0.0)
+            q, w = CoordinateTransform.euler_to_quat_and_body_rates(
+                0.0, 0.0, yaw, 0.0, 0.0, yaw_dot
+            )
+            value["q"] = q
+            value["w"] = w
+
+        for k, v in value.items():
+            if k in self._state:
+                self._state[k] = v
 
     def step(self, control: Any, dt: float) -> dict[str, np.ndarray]:
         """Advance dynamics by one timestep and store the control."""

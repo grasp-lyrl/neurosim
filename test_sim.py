@@ -25,7 +25,9 @@ def main():
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
         level=log_level,
-        format="[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s",
+        format="[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s"
+        if args.verbose
+        else "%(message)s",
         datefmt="%H:%M:%S",
     )
 

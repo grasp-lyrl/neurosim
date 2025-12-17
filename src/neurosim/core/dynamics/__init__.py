@@ -1,4 +1,9 @@
+import logging
+
 from .types import DynamicsProtocol, DynamicsType
+from neurosim.core.utils.logging_utils import format_dict
+
+logger = logging.getLogger(__name__)
 
 
 def create_dynamics(
@@ -29,13 +34,20 @@ def create_dynamics(
     ]:
         from .rotorpy_wrapper import RotorpyDynamics
 
-        return RotorpyDynamics(
+        dynamics = RotorpyDynamics(
             vehicle=kwargs["vehicle"],
             dynamics_type=dynamics_type,
             initial_state=kwargs.get("initial_state", {}),
         )
     else:
         raise ValueError(f"Unsupported dynamics type: {dynamics_type}")
+
+    logger.info("═══════════════════════════════════════════════════════")
+    logger.info(f"✅ Dynamics initialized: {dynamics.__class__.__name__}")
+    logger.info(format_dict(kwargs))
+    logger.info("═══════════════════════════════════════════════════════")
+
+    return dynamics
 
 
 __all__ = ["DynamicsType", "DynamicsProtocol", "create_dynamics"]
