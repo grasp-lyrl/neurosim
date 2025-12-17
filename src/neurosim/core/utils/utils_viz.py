@@ -29,19 +29,26 @@ class EventVisualizationState:
     buffer: torch.Tensor | np.ndarray = field(init=False, default=None)
 
     def __post_init__(self):
-        try:
-            # Use GPU buffer for faster accumulation
-            self.buffer = torch.zeros(
-                (self.height, self.width, 3), dtype=torch.uint8, device=self.device
-            )
-            logger.debug(f"Event sensor {self.uuid} using GPU buffer on {self.device}")
-        except Exception as e:
-            logger.warning(
-                f"⚠️ Could not initialize GPU buffer for sensor {self.uuid}: {e}"
-            )
-            # Fallback to CPU buffer
+        if self.use_gpu:
+            try:
+                # Use GPU buffer for faster accumulation
+                self.buffer = torch.zeros(
+                    (self.height, self.width, 3), dtype=torch.uint8, device=self.device
+                )
+                logger.debug(
+                    f"Event sensor {self.uuid} using GPU buffer on {self.device}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Could not initialize GPU buffer for sensor {self.uuid}: {e}"
+                )
+                # Fallback to CPU buffer
+                self.buffer = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+                self.use_gpu = False
+                logger.debug(f"Event sensor {self.uuid} using CPU buffer")
+        else:
+            # Use CPU buffer
             self.buffer = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-            self.use_gpu = False
             logger.debug(f"Event sensor {self.uuid} using CPU buffer")
 
     def accumulate(self, events: tuple[torch.Tensor | np.ndarray, ...]) -> None:
@@ -74,7 +81,7 @@ class EventVisualizationState:
         if self.use_gpu:
             self.buffer.zero_()
         else:
-            self.buffer.zero_
+            self.buffer.fill(0)
 
     def get_image(self) -> np.ndarray:
         """Get the current visualization buffer as numpy array (for Rerun)."""
