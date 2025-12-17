@@ -1,5 +1,10 @@
-from .types import TrajectoryProtocol, TrajectoryType
+import logging
 import numpy as np
+
+from .types import TrajectoryProtocol, TrajectoryType
+from neurosim.core.utils.logging_utils import format_dict
+
+logger = logging.getLogger(__name__)
 
 
 def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtocol:
@@ -23,7 +28,7 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
     if model == TrajectoryType.CONSTANT_SPEED:
         from rotorpy.trajectories.speed_traj import ConstantSpeed
 
-        return ConstantSpeed(
+        traj = ConstantSpeed(
             init_pos=kwargs.get("init_pos"),
             dist=kwargs.get("dist", 5),
             speed=kwargs.get("speed", 1),
@@ -37,7 +42,7 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
         if yaw_angles is not None:
             yaw_angles = np.array(yaw_angles)
 
-        return MinSnap(
+        traj = MinSnap(
             points=points,
             yaw_angles=yaw_angles,
             yaw_rate_max=kwargs.get("yaw_rate_max", 2 * np.pi),
@@ -56,7 +61,7 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
         if yaw_angles is not None:
             yaw_angles = np.array(yaw_angles)
 
-        return Polynomial(
+        traj = Polynomial(
             points=points,
             yaw_angles=yaw_angles,
             v_avg=kwargs.get("v_avg", 1.2),
@@ -64,7 +69,7 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
     elif model == TrajectoryType.HABITAT_RANDOM_MINSNAP:
         from .habitat_trajs import generate_interesting_traj
 
-        return generate_interesting_traj(
+        traj = generate_interesting_traj(
             pathfinder=kwargs.get("pathfinder"),
             seed=kwargs.get("seed", 324),
             target_length=kwargs.get("target_length", 20.0),
@@ -73,9 +78,17 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
             v_avg=kwargs.get("v_avg", 1.0),
             start=kwargs.get("start", None),
             max_tries_per_waypoint=kwargs.get("max_tries_per_waypoint", 100),
+            coord_transform=kwargs.get("coord_transform", None),
         )
     else:
         raise ValueError(f"Unsupported trajectory type: {model}")
+
+    logger.info("═══════════════════════════════════════════════════════")
+    logger.info(f"✅ Trajectory initialized: {traj.__class__.__name__}")
+    logger.info(format_dict(kwargs))
+    logger.info("═══════════════════════════════════════════════════════")
+
+    return traj
 
 
 __all__ = ["TrajectoryType", "TrajectoryProtocol", "create_trajectory"]

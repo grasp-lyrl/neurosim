@@ -1,4 +1,9 @@
+import logging
+
 from .types import ControllerProtocol, ControllerType
+from neurosim.core.utils.logging_utils import format_dict
+
+logger = logging.getLogger(__name__)
 
 
 def create_controller(
@@ -22,12 +27,18 @@ def create_controller(
     if model == ControllerType.ROTORPY_SE3:
         from .rotorpy_wrapper import RotorpySE3Controller
 
-        return RotorpySE3Controller(
-            vehicle=kwargs["vehicle"],
-            controller_type=model,
+        controller = RotorpySE3Controller(
+            vehicle=kwargs["vehicle"], controller_type=model
         )
     else:
         raise ValueError(f"Unsupported controller type: {model}")
+
+    logger.info("═══════════════════════════════════════════════════════")
+    logger.info(f"✅ Controller initialized: {controller.__class__.__name__}")
+    logger.info(format_dict(kwargs))
+    logger.info("═══════════════════════════════════════════════════════")
+
+    return controller
 
 
 __all__ = ["ControllerType", "ControllerProtocol", "create_controller"]
