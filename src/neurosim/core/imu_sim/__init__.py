@@ -1,7 +1,7 @@
 import logging
 
 from .types import IMUSensorProtocol, IMUSensorType
-from neurosim.core.utils.logging_utils import format_dict
+from neurosim.core.utils import format_dict
 
 logger = logging.getLogger(__name__)
 

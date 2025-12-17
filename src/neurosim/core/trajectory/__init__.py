@@ -2,7 +2,7 @@ import logging
 import numpy as np
 
 from .types import TrajectoryProtocol, TrajectoryType
-from neurosim.core.utils.logging_utils import format_dict
+from neurosim.core.utils import format_dict
 
 logger = logging.getLogger(__name__)
 

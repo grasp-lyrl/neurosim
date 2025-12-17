@@ -2,7 +2,8 @@ from .utils_bench import RenderEventsBenchmark
 from .utils_gen import color2intensity, RECOLOR_MAP, outline_border
 from .utils_viz import RerunVisualizer
 from .utils_h5 import H5Logger
-from .logging_utils import format_dict
+from .utils_logging import format_dict
+from .utils_simcfg import SimulationConfig
 
 
 __all__ = [
@@ -19,4 +20,6 @@ __all__ = [
     "H5Logger",
     # Logging Utilities
     "format_dict",
+    # Simulation Configuration
+    "SimulationConfig",
 ]
