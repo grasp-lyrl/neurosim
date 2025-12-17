@@ -199,6 +199,7 @@ def generate_interesting_traj(
     v_avg: float = 1.0,
     start: np.ndarray | None = None,
     max_tries_per_waypoint: int = 100,
+    coord_transform=None,
 ) -> MinSnap:
     """Generate a longer trajectory by sampling distant waypoints and connecting them.
 
@@ -217,6 +218,9 @@ def generate_interesting_traj(
         max_waypoints: Maximum number of waypoints to sample
         v_avg: Average velocity for MinSnap trajectory
         start: Starting point (if None, a random navigable point is used)
+        max_tries_per_waypoint: Maximum tries per waypoint sampling
+        coord_transform: Optional coordinate transform function to apply to path points.
+                         Useful to convert from visual sim to dynamics coordinate system.
 
     Returns:
         MinSnap trajectory object
@@ -288,6 +292,10 @@ def generate_interesting_traj(
                 full_path_dedup.append(full_path[i])
         full_path = np.array(full_path_dedup)
 
+    if coord_transform is not None:
+        full_path = coord_transform(full_path)
+        logger.info("Applied inverse coordinate transform to path")
+
     # Calculate desired yaw angles for waypoints to look ahead
     yaw_angles = calculate_smooth_yaw(full_path, lookahead_dist=2.0)
 
@@ -301,6 +309,7 @@ def generate_interesting_traj(
         v_avg=v_avg,
         v_start=np.zeros(3),
         v_end=np.zeros(3),
+        verbose=False,
     )
 
     return traj
