@@ -2,7 +2,7 @@
 simulator:
   world_rate: 1000 # Hz
   control_rate: 100 # Hz
-  sim_time: 20 # seconds
+  sim_time: 30 # seconds
 
   additional_sensors:
     imu_1:
@@ -105,7 +105,7 @@ dynamics:
 # Trajectory settings
 trajectory:
   model: "habitat_random_minsnap"
-  seed: 4
+  seed: 42
   target_length: 30.0
   min_waypoint_distance: 2.0
   max_waypoints: 100
