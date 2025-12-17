@@ -68,7 +68,6 @@ visual_backend:
       anti_aliasing: 8
 
     color_camera_1:
-      name: "color_camera_1"
       type: "color"
       position: [0.0, 0.0, 0.05]
       orientation: [0.0, 0.0, 0.0]

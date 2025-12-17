@@ -1,8 +1,8 @@
-import argparse
 import logging
+import argparse
 from pathlib import Path
 
-from neurosim import SynchronousSimulator
+from neurosim.sims.synchronous_simulator import SynchronousSimulator
 
 parser = argparse.ArgumentParser(description="Run Neurosim simulation")
 parser.add_argument(
