@@ -1,0 +1,9 @@
+zmq_ros2_bridge:
+  ros__parameters:
+    # Enable/disable flags
+    enable_control: true
+
+    # Control parameters
+    control_zmq_address: "ipc:///tmp/1"
+    control_zmq_topic: "control"
+    control_ros2_topic: "control"

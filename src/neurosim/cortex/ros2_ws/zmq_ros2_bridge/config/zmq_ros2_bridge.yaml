@@ -1,0 +1,33 @@
+zmq_ros2_bridge:
+  ros__parameters:
+    # Enable/disable flags
+    enable_imu: true
+    enable_color: true
+    enable_depth: true
+    enable_event: true
+    enable_state: true
+
+    # IMU parameters
+    imu_zmq_address: "ipc:///tmp/0"
+    imu_zmq_topic: "imu"
+    imu_ros2_topic: "imu"
+
+    # Color image parameters
+    color_zmq_address: "ipc:///tmp/0"
+    color_zmq_topic: "color"
+    color_ros2_topic: "color"
+
+    # Depth image parameters
+    depth_zmq_address: "ipc:///tmp/0"
+    depth_zmq_topic: "depth"
+    depth_ros2_topic: "depth"
+
+    # Event parameters
+    event_zmq_address: "ipc:///tmp/0"
+    event_zmq_topic: "events"
+    event_ros2_topic: "events"
+
+    # State parameters
+    state_zmq_address: "ipc:///tmp/0"
+    state_zmq_topic: "state"
+    state_ros2_topic: "state"
