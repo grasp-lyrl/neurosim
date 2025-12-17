@@ -78,15 +78,11 @@ class Executor:
                 await asyncio.sleep(0.001)  ###########################
 
             await asyncio.sleep(
-                min(
                     max(
                         0,
                         next_exec_time - time.perf_counter(),
                     ),
-                    0.001,  ############################################
                 )
-            )
-
 
 class ZMQNODE(ABC):
     def __init__(self, *args, **kwargs):
@@ -109,14 +105,15 @@ class ZMQNODE(ABC):
         # Pre-compiled struct formats for common array dimensions.
         # Only support up to 6D arrays for efficiency.
         self._ndim_struct = struct.Struct("!B")  # 8-bit unsigned int (0-255)
-        self._shape_structs = {
-            1: struct.Struct("!I"),
-            2: struct.Struct("!II"),
-            3: struct.Struct("!III"),
-            4: struct.Struct("!IIII"),
-            5: struct.Struct("!IIIII"),
-            6: struct.Struct("!IIIIII"),
-        }
+        self._shape_structs = [
+            None,
+            struct.Struct("!I"),
+            struct.Struct("!II"),
+            struct.Struct("!III"),
+            struct.Struct("!IIII"),
+            struct.Struct("!IIIII"),
+            struct.Struct("!IIIIII"),
+        ]
 
         # Cache for dtype strings to avoid repeated encoding
         self._dtype_cache = {}
