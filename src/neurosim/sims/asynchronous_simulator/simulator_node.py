@@ -41,7 +41,7 @@ class SimulatorNode(ZMQNODE):
 
     def __init__(
         self,
-        settings_path: Path | str,
+        settings: Path | str | dict,
         ipc_pub_addr: str = "ipc:///tmp/neurosim_sim_pub",
         ipc_sub_addr: str = "ipc:///tmp/neurosim_ctrl_pub",
     ):
@@ -55,13 +55,20 @@ class SimulatorNode(ZMQNODE):
         """
         super().__init__()
 
-        self.settings_path = Path(settings_path)
-        if not self.settings_path.exists():
-            raise FileNotFoundError(f"Settings file not found: {self.settings_path}")
+        if isinstance(settings, (str, Path)):
+            settings_path = Path(settings)
+            if not settings_path.exists():
+                raise FileNotFoundError(
+                    f"Settings file not found: {settings_path}"
+                )
 
-        # Load settings
-        with open(self.settings_path, "r") as f:
-            self.settings = yaml.safe_load(f)
+            # Load settings
+            with open(self.settings_path, "r") as f:
+                self.settings = yaml.safe_load(f)
+        elif isinstance(settings, dict):
+            self.settings = settings
+        else:
+            raise TypeError("settings must be a dict or a path to a YAML file.")
 
         # Initialize simulation configuration (includes sensor manager)
         sim_cfg = self.settings.get("simulator", {})
@@ -327,7 +334,7 @@ class SimulatorNode(ZMQNODE):
             "timestamp": self.time,
         }
 
-        if self.send_dict(self.socket_pub, imu_msg, topic="imu"):
+        if self.send_dict(self.socket_pub, imu_msg, topic=f"imu/{uuid}", copy=False):
             self._stats[f"published_{uuid}"] += 1
 
     async def publish_color(self, sensor: SensorConfig) -> None:
@@ -420,7 +427,7 @@ async def main():
     args = parser.parse_args()
 
     node = SimulatorNode(
-        settings_path=args.settings,
+        settings=args.settings,
         ipc_pub_addr=args.ipc_pub_addr,
         ipc_sub_addr=args.ipc_sub_addr,
     )

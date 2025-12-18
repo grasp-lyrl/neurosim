@@ -3,7 +3,7 @@ from .utils_gen import color2intensity, RECOLOR_MAP, outline_border
 from .utils_viz import RerunVisualizer, EventBuffer, EventVisualizationState
 from .utils_h5 import H5Logger
 from .utils_logging import format_dict
-from .utils_simcfg import SimulationConfig, SensorConfig
+from .utils_simcfg import SimulationConfig, SensorConfig, SensorManager
 
 
 __all__ = [
@@ -25,4 +25,5 @@ __all__ = [
     # Simulation Configuration
     "SimulationConfig",
     "SensorConfig",
+    "SensorManager",
 ]

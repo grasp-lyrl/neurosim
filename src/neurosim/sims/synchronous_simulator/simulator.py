@@ -27,20 +27,26 @@ logger = logging.getLogger(__name__)
 class SynchronousSimulator:
     """Main simulator class for neurosim."""
 
-    def __init__(self, settings_path: Path | str):
+    def __init__(self, settings: Path | str | dict, visualizer_disabled: bool = False):
         """
         Initialize the Simulator.
 
         Args:
-            settings_path: Path to the settings YAML file.
+            settings: Either a Path/str to settings YAML file or a settings dictionary
+            visualizer_disable: Whether to disable the visualizer
         """
-        self.settings_path = Path(settings_path)
-        if not self.settings_path.exists():
-            raise FileNotFoundError(f"Settings file not found: {self.settings_path}")
+        if isinstance(settings, (str, Path)):
+            settings_path = Path(settings)
+            if not settings_path.exists():
+                raise FileNotFoundError(f"Settings file not found: {settings_path}")
 
-        # Load settings
-        with open(self.settings_path, "r") as f:
-            self.settings = yaml.safe_load(f)
+            # Load settings
+            with open(settings_path, "r") as f:
+                self.settings = yaml.safe_load(f)
+        elif isinstance(settings, dict):
+            self.settings = settings
+        else:
+            raise TypeError("settings must be a dict or a path to a YAML file.")
 
         # Initialize simulation configuration (includes sensor manager)
         sim_cfg = self.settings.get("simulator", {})
@@ -79,7 +85,9 @@ class SynchronousSimulator:
         self._init_additional_sensors()
 
         # Initialize visualizer
-        self.visualizer = RerunVisualizer(self.config)
+        self.visualizer = None
+        if not visualizer_disabled:
+            self.visualizer = RerunVisualizer(self.config)
 
         logger.info("═══════════════════════════════════════════════════════════")
         logger.info("✅ Simulator initialized successfully")
@@ -274,19 +282,32 @@ class SynchronousSimulator:
 
         return measurements
 
-    def run(self, display: bool = False, log_h5: str | None = None) -> dict:
+    def run(
+        self,
+        display: bool = False,
+        log_h5: str | None = None,
+        callback_hook_: Callable | None = None,
+    ) -> dict:
         """
         Run the simulation.
 
         Args:
             display: Whether to display live visualization with Rerun
             log_h5: Path to HDF5 file for logging. If None, no logging.
+            callback_hook_: Optional callback function called at each step with
+                         (measurements, state, time, simsteps) as arguments.
+                         Allows custom logic injection (e.g., publishing data).
 
         Returns:
             Dictionary with simulation statistics
         """
         # Setup visualization
         if display:
+            if self.visualizer is None:
+                raise RuntimeError(
+                    "Visualizer is not initialized. Cannot display simulation."
+                    "Initialize simulator with visualizer enabled."
+                )
             self.visualizer.initialize()
 
         # Setup H5 logger
@@ -301,7 +322,7 @@ class SynchronousSimulator:
             )
 
         # Run simulation loop
-        latencies = self._run_simulation_loop(display, h5_logger)
+        latencies = self._run_simulation_loop(display, h5_logger, callback_hook_)
 
         # Close H5 logger
         if h5_logger:
@@ -317,7 +338,10 @@ class SynchronousSimulator:
         return stats
 
     def _run_simulation_loop(
-        self, display: bool, h5_logger: H5Logger | None = None
+        self,
+        display: bool,
+        h5_logger: H5Logger | None = None,
+        callback_hook_: Callable | None = None,
     ) -> list[float]:
         """Run the main simulation loop."""
         # Initialize control and state from first trajectory point
@@ -350,6 +374,12 @@ class SynchronousSimulator:
 
                 # Render sensors
                 measurements = self._render_sensors()
+
+                # Call custom step callback if provided
+                if callback_hook_:
+                    callback_hook_(
+                        measurements, self.dynamics.state, self.time, self.simsteps
+                    )
 
                 # Record latency
                 latencies.append(time.perf_counter() - start_time)
