@@ -15,6 +15,85 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class EventBuffer:
+    """Pre-allocated buffer for fast event camera data accumulation."""
+
+    max_size: int = 2000000
+    use_gpu: bool = True
+
+    def __post_init__(self):
+        """Initialize pre-allocated buffers (GPU tensors or numpy arrays)."""
+        if self.use_gpu:
+            # Keep buffers on GPU to avoid unnecessary CPU transfers
+            self.x = torch.empty((self.max_size,), dtype=torch.uint16, device="cuda")
+            self.y = torch.empty((self.max_size,), dtype=torch.uint16, device="cuda")
+            self.t = torch.empty((self.max_size,), dtype=torch.uint64, device="cuda")
+            self.p = torch.empty((self.max_size,), dtype=torch.uint8, device="cuda")
+        else:
+            # Use numpy arrays for CPU-only operation
+            self.x = np.empty((self.max_size,), dtype=np.uint16)
+            self.y = np.empty((self.max_size,), dtype=np.uint16)
+            self.t = np.empty((self.max_size,), dtype=np.uint64)
+            self.p = np.empty((self.max_size,), dtype=np.uint8)
+        self.size = 0
+
+    def append(self, events):
+        """Append events to buffer. events is (x, y, t, p) tuple of tensors."""
+        x, y, t, p = events
+        n_events = x.shape[0]
+
+        new_size = self.size + n_events
+        if new_size > self.max_size:
+            logger.warning(
+                f"Event buffer overflow: {new_size}/{self.max_size}. Dropping events."
+            )
+            return False
+
+        if self.use_gpu:
+            # Direct GPU tensor assignment - no CPU transfer
+            self.x[self.size : new_size] = x
+            self.y[self.size : new_size] = y
+            self.t[self.size : new_size] = t
+            self.p[self.size : new_size] = p
+        else:
+            # Convert to numpy for CPU buffers
+            self.x[self.size : new_size] = x.cpu().numpy()
+            self.y[self.size : new_size] = y.cpu().numpy()
+            self.t[self.size : new_size] = t.cpu().numpy()
+            self.p[self.size : new_size] = p.cpu().numpy()
+
+        self.size = new_size
+        return True
+
+    def get_and_clear(self):
+        """Get current events as dict of numpy arrays and clear buffer."""
+        if self.size == 0:
+            return None
+
+        _size = self.size  # Local copy for thread safety
+
+        if self.use_gpu:
+            # Convert GPU tensors to numpy only when publishing
+            events_dict = {
+                "x": self.x[:_size].cpu().numpy(),
+                "y": self.y[:_size].cpu().numpy(),
+                "t": self.t[:_size].cpu().numpy(),
+                "p": self.p[:_size].cpu().numpy(),
+            }
+        else:
+            # Already numpy arrays
+            events_dict = {
+                "x": self.x[:_size],
+                "y": self.y[:_size],
+                "t": self.t[:_size],
+                "p": self.p[:_size],
+            }
+
+        self.size = 0
+        return events_dict
+
+
+@dataclass
 class EventVisualizationState:
     """Visualization state for an event sensor.
 

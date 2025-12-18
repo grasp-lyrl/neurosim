@@ -16,7 +16,7 @@ import rerun as rr
 from collections import defaultdict
 
 from neurosim.cortex.utils import ZMQNODE
-from neurosim.core.utils.utils_viz import EventVisualizationState
+from neurosim.core.utils import EventVisualizationState
 
 logger = logging.getLogger(__name__)
 
@@ -173,8 +173,10 @@ class VisualizerNode(ZMQNODE):
             )
 
             # Visualize: get the accumulated image and reset
-            img = self.event_viz_states[topic].get_image()
-            rr.log(topic, rr.Image(img))
+            rr.log(
+                topic,
+                rr.Image(self.event_viz_states[topic].get_image()),
+            )
             self.event_viz_states[topic].reset()
 
     async def receive_imu(self) -> None:

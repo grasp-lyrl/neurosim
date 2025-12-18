@@ -23,7 +23,7 @@ from neurosim.core.visual_backend import HabitatWrapper
 from neurosim.core.dynamics import create_dynamics
 from neurosim.core.imu_sim import create_imu_sensor
 from neurosim.core.coord_trans import CoordinateTransform
-from neurosim.core.utils import SimulationConfig, SensorConfig
+from neurosim.core.utils import SimulationConfig, SensorConfig, EventBuffer
 from neurosim.sims.synchronous_simulator import SynchronousSimulator
 
 logger = logging.getLogger(__name__)
@@ -92,8 +92,13 @@ class SimulatorNode(ZMQNODE):
         # Storage for sensor measurements
         self.measurements = {}  # Stores latest sensor measurements
 
-        # Event camera buffers (accumulate between publishes)
-        self.event_buffers = {}  # uuid -> list of event dicts
+        # Event camera buffers (pre-allocated GPU tensor buffers)
+        self.event_buffers: dict[str, EventBuffer] = {}
+        for sensor in self.config.sensor_manager.get_sensors_by_type("event"):
+            self.event_buffers[sensor.uuid] = EventBuffer(
+                max_size=self.MAX_EVENT_BUFFER_SIZE,
+                use_gpu=True,  # Keep events on GPU until publish time
+            )
 
         # Initialize coordinate transform (rotorpy to habitat)
         self.coord_trans = CoordinateTransform("rotorpy_to_habitat")
@@ -110,11 +115,6 @@ class SimulatorNode(ZMQNODE):
 
         # Initialize additional sensors like IMU and bind their executors
         self._init_additional_sensors()
-
-        # Initialize event buffers for event cameras
-        for uuid, sensor_cfg in self.config.visual_sensors.items():
-            if sensor_cfg.get("type") == "event":
-                self.event_buffers[uuid] = []
 
         # Initialize components
         self._init_sockets()
@@ -276,7 +276,7 @@ class SimulatorNode(ZMQNODE):
                 sensor_type = sensor_cfg.sensor_type
 
                 if sensor_type == "event":
-                    # Events are special: accumulate them in a buffer
+                    # Events are accumulated in a buffer
                     events = sensor_cfg.executor()
                     if events is not None:
                         self.event_buffers[uuid].append(events)
@@ -357,27 +357,16 @@ class SimulatorNode(ZMQNODE):
             self._stats[f"published_{uuid}"] += 1
 
     async def publish_events(self, sensor: SensorConfig) -> None:
-        """Publish event camera data: concatenate accumulated events into dict of arrays."""
-
+        """Publish event camera data from pre-allocated buffer."""
         uuid = sensor.uuid
-        if uuid not in self.event_buffers or len(self.event_buffers[uuid]) == 0:
+
+        # Get events and clear buffer atomically
+        events_dict = self.event_buffers[uuid].get_and_clear()
+        if events_dict is None:
             return
 
-        # Atomically swap the buffer to avoid race condition with simulate_step()
-        # This ensures no events are lost if new events are appended during publishing
-        event_list = self.event_buffers[uuid]
-        self.event_buffers[uuid] = []  # Swap immediately after reading
-
-        # Concatenate all accumulated event dicts into a single dict of arrays
-        events_dict = {
-            "x": np.concatenate([e[0].cpu().numpy() for e in event_list]),
-            "y": np.concatenate([e[1].cpu().numpy() for e in event_list]),
-            "t": np.concatenate([e[2].cpu().numpy() for e in event_list]),
-            "p": np.concatenate([e[3].cpu().numpy() for e in event_list]),
-        }
-
         if self.send_dict_of_arrays(
-            self.socket_pub, events_dict, topic=f"events/{uuid}", copy=False
+            self.socket_pub, events_dict, topic=f"events/{uuid}", copy=True
         ):
             self._stats[f"published_{uuid}"] += 1
 
