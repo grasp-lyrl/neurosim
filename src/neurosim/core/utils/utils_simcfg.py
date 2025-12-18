@@ -143,7 +143,7 @@ class SensorManager:
     def should_visualize(self, uuid: str, simstep: int) -> bool:
         """Check if a sensor should be visualized at this simulation step."""
         return simstep % self.sensors[uuid].viz_steps == 0
-    
+
     def should_visualize_sensor(self, sensor: SensorConfig, simstep: int) -> bool:
         """Check if any sensor should be visualized at this simulation step."""
         return simstep % sensor.viz_steps == 0

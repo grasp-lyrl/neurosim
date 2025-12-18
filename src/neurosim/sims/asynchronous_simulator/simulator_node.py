@@ -58,9 +58,7 @@ class SimulatorNode(ZMQNODE):
         if isinstance(settings, (str, Path)):
             settings_path = Path(settings)
             if not settings_path.exists():
-                raise FileNotFoundError(
-                    f"Settings file not found: {settings_path}"
-                )
+                raise FileNotFoundError(f"Settings file not found: {settings_path}")
 
             # Load settings
             with open(self.settings_path, "r") as f:
