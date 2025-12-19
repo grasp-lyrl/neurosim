@@ -49,18 +49,11 @@ class EventBuffer:
             )
             return False
 
-        if self.use_gpu:
-            # Direct GPU tensor assignment - no CPU transfer
-            self.x[self.size : new_size] = x
-            self.y[self.size : new_size] = y
-            self.t[self.size : new_size] = t
-            self.p[self.size : new_size] = p
-        else:
-            # Convert to numpy for CPU buffers
-            self.x[self.size : new_size] = x.cpu().numpy()
-            self.y[self.size : new_size] = y.cpu().numpy()
-            self.t[self.size : new_size] = t.cpu().numpy()
-            self.p[self.size : new_size] = p.cpu().numpy()
+        # Assume events are already on correct device (GPU or CPU)
+        self.x[self.size : new_size] = x
+        self.y[self.size : new_size] = y
+        self.t[self.size : new_size] = t
+        self.p[self.size : new_size] = p
 
         self.size = new_size
         return True
