@@ -12,7 +12,6 @@ import multiprocessing as mp
 from collections import defaultdict
 
 from neurosim.cortex.utils import ZMQNODE
-from neurosim.sims.online_dataloader.config import DatasetConfig
 
 logger = logging.getLogger(__name__)
 
@@ -30,26 +29,23 @@ class DataSubscriber(ZMQNODE):
 
     def __init__(
         self,
-        config: DatasetConfig,
         data_queue: mp.Queue,
+        ipc_sub_addr: str,
         sensors: list[str] | set[str] | None = None,
-        ipc_sub_addr: str | None = None,
     ):
         """
         Initialize async data subscriber.
 
         Args:
-            config: Dataset configuration
             data_queue: Multiprocessing queue for sending data to dataloader
-            sensors: List of sensor UUIDs to include (None = all)
             ipc_sub_addr: ZMQ address to subscribe to (default: from config)
+            sensors: List of sensor UUIDs to include (None = all)
         """
         super().__init__()
 
-        self.config = config
         self.data_queue = data_queue
+        self.ipc_sub_addr = ipc_sub_addr
         self.sensors = set(sensors) if sensors else None
-        self.ipc_sub_addr = ipc_sub_addr or config.ipc_pub_addr
 
         # Statistics
         self._stats = defaultdict(int)
@@ -157,10 +153,9 @@ class DataSubscriber(ZMQNODE):
 
 
 def run_subscriber_process(
-    config: DatasetConfig,
     data_queue: mp.Queue,
+    ipc_sub_addr: str,
     sensors: list[str] | None,
-    ipc_sub_addr: str | None,
 ):
     """
     Entry point for running DataSubscriber in a separate process.
@@ -168,10 +163,9 @@ def run_subscriber_process(
     This function creates a new event loop and runs the subscriber asynchronously.
     """
     subscriber = DataSubscriber(
-        config=config,
         data_queue=data_queue,
-        sensors=sensors,
         ipc_sub_addr=ipc_sub_addr,
+        sensors=sensors,
     )
 
     try:
