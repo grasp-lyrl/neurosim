@@ -31,15 +31,22 @@ class VisualizerNode(ZMQNODE):
     def __init__(
         self,
         ipc_sub_addr: str = "ipc:///tmp/neurosim_sim_pub",
-        spawn: bool = True,
+        memory_limit: str = "10%",
+        keep_latest: bool = True,
     ):
         """
         Initialize the Visualizer Node.
 
+        - Can use this to visualize data from the SimulatorNode in real-time.
+
+        - Can also use this to visualize data from the OnlineDataPublisher -- so you can
+          see what data is being sent to the training process. Very cool.
+
         Args:
-            settings_path: Path to the settings YAML file
             ipc_sub_addr: ZMQ address for subscribing to simulator data
-            spawn: Whether to spawn Rerun viewer
+            memory_limit: Memory limit for Rerun process (e.g., "10%", "2GB")
+            keep_latest: If True, always keep latest timestamp in Rerun. Saves memory. Disregards sim time.
+                         Helpful for simulations which keep on loading different scenes and resetting time.
         """
         super().__init__()
 
@@ -47,8 +54,10 @@ class VisualizerNode(ZMQNODE):
         self.ipc_sub_addr = ipc_sub_addr
 
         # Initialize Rerun
-        rr.init("neurosim_async", spawn=spawn)
+        rr.init("neurosim_async")
+        rr.spawn(memory_limit=memory_limit)
         rr.set_time("sim_time", timestamp=0)
+        self.keep_latest = keep_latest
 
         # Initialize sockets and executors
         self._init_sockets()
@@ -130,7 +139,8 @@ class VisualizerNode(ZMQNODE):
             self._stats["received_state"] += 1
 
             # Visualize with Rerun
-            rr.set_time("sim_time", timestamp=timestamp)
+            if not self.keep_latest:
+                rr.set_time("sim_time", timestamp=timestamp)
             rr.log(
                 "navigation/pose",
                 rr.Transform3D(
@@ -188,7 +198,8 @@ class VisualizerNode(ZMQNODE):
             self._stats["received_" + topic] += 1
             timestamp = msg.get("timestamp", 0)
 
-            rr.set_time("sim_time", timestamp=timestamp)
+            if not self.keep_latest:
+                rr.set_time("sim_time", timestamp=timestamp)
             rr.log(f"sensors/{uuid}/accel", rr.Scalars(msg["accel"]))
             rr.log(f"sensors/{uuid}/gyro", rr.Scalars(msg["gyro"]))
 
@@ -237,18 +248,9 @@ async def main():
         default="ipc:///tmp/neurosim_sim_pub",
         help="IPC address for subscribing to simulator.",
     )
-    parser.add_argument(
-        "--no-spawn",
-        action="store_true",
-        help="Don't spawn Rerun viewer (connect to existing).",
-    )
     args = parser.parse_args()
 
-    node = VisualizerNode(
-        # settings_path=args.settings,
-        ipc_sub_addr=args.ipc_sub_addr,
-        spawn=not args.no_spawn,
-    )
+    node = VisualizerNode(ipc_sub_addr=args.ipc_sub_addr)
 
     try:
         await node.run()

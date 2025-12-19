@@ -51,13 +51,8 @@ class SynchronousSimulator:
         # Initialize simulation configuration (includes sensor manager)
         sim_cfg = self.settings.get("simulator", {})
         self.config = SimulationConfig(
-            world_rate=sim_cfg["world_rate"],
-            control_rate=sim_cfg["control_rate"],
-            sim_time=sim_cfg["sim_time"],
-            sensor_rates=sim_cfg.get("sensor_rates", {}),
-            viz_rates=sim_cfg.get("viz_rates", {}),  # Optional visualization rates
+            **sim_cfg,
             visual_sensors=self.settings.get("visual_backend", {}).get("sensors", {}),
-            additional_sensors=sim_cfg.get("additional_sensors", {}),
         )
 
         # Initialize coordinate transform utility (hardcoded for now)

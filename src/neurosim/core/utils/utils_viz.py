@@ -219,12 +219,13 @@ class RerunVisualizer:
         )
         logger.info("═══════════════════════════════════════════════════════════")
 
-    def initialize(self) -> None:
+    def initialize(self, memory_limit: str = "10%") -> None:
         """Initialize Rerun recording."""
         if not HAS_RERUN:
             raise ImportError("Rerun package is not installed.")
 
-        rr.init("neurosim", spawn=True)
+        rr.init("neurosim")
+        rr.spawn(memory_limit=memory_limit)
         self.enabled = True
         logger.info("═══════════════════════════════════════════════════════════")
         logger.info("🎬 RerunVisualizer started")
