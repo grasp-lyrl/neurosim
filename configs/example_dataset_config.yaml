@@ -1,0 +1,134 @@
+# Example Dataset Configuration for Online Dataloader
+# =======================================================
+# Total simulations = len(scenes) × len(trajectories) × len(seeds)
+
+# Publishing settings
+ipc_pub_addr: "ipc:///tmp/neurosim_data_pub"
+publish_state: true
+
+# Scene configurations
+# ====================
+scenes:
+  - name: apartment_1
+    scene_path: data/scene_datasets/habitat-test-scenes/apartment_1.glb
+    sim_time: 30.0
+
+  - name: skokloster
+    scene_path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
+    sim_time: 20.0
+
+  - name: van_gogh
+    scene_path: data/scene_datasets/habitat-test-scenes/van-gogh-room.glb
+    sim_time: 20.0
+
+# Trajectory configurations
+# =========================
+trajectories:
+  - name: slow
+    model: habitat_random_minsnap
+    target_length: 30.0
+    min_waypoint_distance: 2.0
+    max_waypoints: 100
+    v_avg: 1.0
+
+  - name: fast
+    model: habitat_random_minsnap
+    target_length: 50.0
+    min_waypoint_distance: 3.0
+    max_waypoints: 150
+    v_avg: 1.5
+
+# Random seeds for trajectory generation
+# =======================================
+seeds: [42, 123, 456]
+
+# Total runs: 3 scenes × 2 trajectories × 3 seeds = 18 simulations
+
+# Simulator settings
+# ==================
+simulator:
+  world_rate: 1000 # Hz
+  control_rate: 100 # Hz
+
+  additional_sensors:
+    imu_1:
+      type: "imu"
+      model: "rotorpy"
+      sampling_rate: 50 # Hz
+
+  sensor_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 1000 # Hz - high-frequency event accumulation
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
+
+  viz_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 20 # Hz - publish every 50th accumulation
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
+
+# Visual backend settings
+# =======================
+visual_backend:
+  gpu_id: 0
+  scene_dataset_config_file: "default"
+  clear_color: [0.0, 0.0, 0.0, 1.0]
+  default_agent: 0
+
+  agent_height: 1.0
+  agent_radius: 0.3
+  agent_max_climb: 1.0
+  agent_max_slope: 90.0
+
+  enable_hbao: false
+  frustum_culling: true
+
+  seed: 324
+  physics_config_file: "data/default.physics_config.json"
+  enable_physics: true
+
+  sensors:
+    event_camera_1:
+      type: "event"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 20.0
+      backend: "cuda"
+      contrast_threshold_neg: 0.35
+      contrast_threshold_pos: 0.35
+      anti_aliasing: 8
+
+    color_camera_1:
+      type: "color"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 20.0
+      anti_aliasing: 8
+
+    depth_camera_1:
+      type: "depth"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 10.0
+
+# Dynamics settings
+# =================
+dynamics:
+  model: "rotorpy_multirotor_euler"
+  vehicle: "crazyflie"
+
+# Controller settings
+# ===================
+controller:
+  model: "rotorpy_se3"
+  vehicle: "crazyflie"
