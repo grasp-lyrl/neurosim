@@ -33,6 +33,7 @@ class VisualizerNode(ZMQNODE):
         ipc_sub_addr: str = "ipc:///tmp/neurosim_sim_pub",
         memory_limit: str = "10%",
         keep_latest: bool = True,
+        mode: str = "spawn",
     ):
         """
         Initialize the Visualizer Node.
@@ -47,15 +48,34 @@ class VisualizerNode(ZMQNODE):
             memory_limit: Memory limit for Rerun process (e.g., "10%", "2GB")
             keep_latest: If True, always keep latest timestamp in Rerun. Saves memory. Disregards sim time.
                          Helpful for simulations which keep on loading different scenes and resetting time.
+            mode: Rerun operating mode. Options:
+                  - "spawn": Spawn local viewer (default)
+                  - "serve": Start gRPC server for remote viewing (run on server)
         """
         super().__init__()
 
         # IPC address
         self.ipc_sub_addr = ipc_sub_addr
 
-        # Initialize Rerun
+        # Initialize Rerun with appropriate mode
         rr.init("neurosim_async")
-        rr.spawn(memory_limit=memory_limit)
+
+        if mode == "spawn":
+            rr.spawn(memory_limit=memory_limit)
+            logger.info("Rerun viewer spawned locally")
+        elif mode == "serve":
+            server_uri = rr.serve_grpc(server_memory_limit=memory_limit)
+            logger.info("═══════════════════════════════════════════════════════════")
+            logger.info("🌐 Rerun gRPC server started for remote viewing")
+            logger.info(f"   Server URI: {server_uri}")
+            logger.info("   To connect from your personal machine, run:")
+            logger.info(
+                f"   rerun --connect {server_uri.replace('127.0.0.1', '<SERVER_IP_ADDRESS>')}"
+            )
+            logger.info("═══════════════════════════════════════════════════════════")
+        else:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'spawn' or 'serve'")
+
         rr.set_time("sim_time", timestamp=0)
         self.keep_latest = keep_latest
 
@@ -248,9 +268,26 @@ async def main():
         default="ipc:///tmp/neurosim_sim_pub",
         help="IPC address for subscribing to simulator.",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="spawn",
+        choices=["spawn", "serve"],
+        help="Rerun operating mode: 'spawn' (local viewer), 'serve' (gRPC server for remote)",
+    )
+    parser.add_argument(
+        "--memory-limit",
+        type=str,
+        default="10%",
+        help="Memory limit for Rerun process (e.g., '10%%', '2GB')",
+    )
     args = parser.parse_args()
 
-    node = VisualizerNode(ipc_sub_addr=args.ipc_sub_addr)
+    node = VisualizerNode(
+        ipc_sub_addr=args.ipc_sub_addr,
+        mode=args.mode,
+        memory_limit=args.memory_limit,
+    )
 
     try:
         await node.run()

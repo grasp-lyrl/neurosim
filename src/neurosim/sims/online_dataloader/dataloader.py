@@ -327,7 +327,7 @@ class OnlineDataLoader:
             self.builder_process.join(timeout=2.0)
             if self.builder_process.is_alive():
                 self.builder_process.kill()
-            logger.info("🛑 Batch builder process terminated")
+            logger.info("🛑 Batch builder (Prefetching) process terminated")
 
         if self.subscriber_process:
             self.subscriber_process.terminate()
@@ -402,6 +402,7 @@ def main():
         sensor_uuids=args.sensors,
         sensor_batch_sizes={uuid: args.batch_size for uuid in args.sensors},
         ipc_sub_addr=config.ipc_pub_addr,
+        prefetch_factor=8,
     )
 
     # Give subscriber time to initialize
