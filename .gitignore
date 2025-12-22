@@ -18,7 +18,8 @@ build/
 install/
 log/
 models/
-habitat-sim/
+outputs/
+deps/*
 
 .clang-format
 .vscode/

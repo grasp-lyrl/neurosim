@@ -53,7 +53,9 @@ class CustomInstallCommand(install):
     def install_cu_evsim(self):
         """Install cu_evsim."""
         print("🚀 Installing cu_evsim, for CUDA event simulator support...")
-        cu_evsim_dir = os.path.join(os.getcwd(), "src", "neurosim", "utils", "cu_evsim")
+        cu_evsim_dir = os.path.join(
+            os.getcwd(), "src", "neurosim", "core", "event_sim", "cu_evsim"
+        )
         if os.path.exists(cu_evsim_dir):
             try:
                 print("   - Installing cu_evsim...")
