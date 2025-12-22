@@ -61,6 +61,22 @@ class EventBuffer:
         """Reset buffer indices."""
         self.sample_idx = 0
         self.event_idx = 0
+        self.counts.fill(0)
+
+
+@dataclass(slots=True, frozen=True)
+class BatchBuildingConfig:
+    """Configuration for batch building operations.
+
+    Currently handles event normalization, with potential for additional
+    batch processing options in the future.
+    """
+
+    # Event normalization settings
+    normalize_events: bool = True
+    event_width: int = 640
+    event_height: int = 480
+    event_time_window: float = 50000.0
 
 
 class OnlineDataLoader:
@@ -87,6 +103,8 @@ class OnlineDataLoader:
         queue_maxsize: int = 1000,
         max_events: int = 8_000_000,
         prefetch_factor: int = 2,
+        verbose: bool = False,
+        batch_building_config: BatchBuildingConfig | dict = BatchBuildingConfig(),
     ):
         """
         Initialize the OnlineDataLoader.
@@ -100,6 +118,7 @@ class OnlineDataLoader:
             queue_maxsize: Max size of multiprocessing queue
             sensor_batch_sizes: Optional per-UUID batch sizes
             prefetch_factor: Number of batches to prefetch (0 = no prefetch)
+            batch_building_config: Configuration for batch building (default: event normalization enabled with 640x480, 50000 time window)
         """
         self.config = config
         self.sensor_uuids = sensor_uuids
@@ -107,6 +126,15 @@ class OnlineDataLoader:
         self.ipc_sub_addr = ipc_sub_addr
         self.max_events = max_events
         self.prefetch_factor = prefetch_factor
+
+        if isinstance(batch_building_config, dict):
+            self.batch_building_config = BatchBuildingConfig(**batch_building_config)
+        elif isinstance(batch_building_config, BatchBuildingConfig):
+            self.batch_building_config = batch_building_config
+        else:
+            raise ValueError(
+                "batch_building_config must be a BatchBuildingConfig or dict"
+            )
 
         # Statistics (shared across processes)
         self._stats = defaultdict(int)
@@ -122,7 +150,7 @@ class OnlineDataLoader:
         # Start subscriber in separate process
         self.subscriber_process = mp.Process(
             target=run_subscriber_process,
-            args=(self.data_queue, ipc_sub_addr, sensor_uuids),
+            args=(self.data_queue, ipc_sub_addr, sensor_uuids, verbose),
             daemon=True,
         )
         self.subscriber_process.start()
@@ -132,6 +160,7 @@ class OnlineDataLoader:
         if prefetch_factor > 0:
             self.builder_process = mp.Process(
                 target=self._batch_builder_worker,
+                args=(self.batch_building_config,),
                 daemon=True,
             )
             self.builder_process.start()
@@ -199,6 +228,7 @@ class OnlineDataLoader:
         sensor_type: str,
         data: np.ndarray | dict,
         batch_sizes: dict[str, int],
+        batch_building_config: BatchBuildingConfig,
     ) -> None:
         """Process a single sample into buffer (shared logic)."""
         buf = buffers[uuid]
@@ -219,15 +249,25 @@ class OnlineDataLoader:
 
             if buf.sample_idx < target:
                 if end <= buf.max_events:
-                    # Vectorized event stacking (4x faster than 4 separate assignments)
-                    events_stacked = np.column_stack(
-                        [
-                            events_dict["x"],
-                            events_dict["y"],
-                            events_dict["t"],
-                            events_dict["p"],
-                        ]
-                    )
+                    if batch_building_config.normalize_events:
+                        events_stacked = np.column_stack(
+                            [
+                                events_dict["x"] / batch_building_config.event_width,
+                                events_dict["y"] / batch_building_config.event_height,
+                                (events_dict["t"][-1] - events_dict["t"])
+                                / batch_building_config.event_time_window,
+                                events_dict["p"],
+                            ]
+                        )
+                    else:
+                        events_stacked = np.column_stack(
+                            [
+                                events_dict["x"],
+                                events_dict["y"],
+                                events_dict["t"],
+                                events_dict["p"],
+                            ]
+                        )
                     buf.events[start:end] = events_stacked
                     buf.counts[buf.sample_idx] = n_events
                     buf.event_idx = end
@@ -244,7 +284,10 @@ class OnlineDataLoader:
         else:
             logger.warning(f"Unknown sensor type: {sensor_type}")
 
-    def _batch_builder_worker(self) -> None:
+    def _batch_builder_worker(
+        self,
+        batch_building_config: BatchBuildingConfig,
+    ) -> None:
         """
         Worker process that builds batches and puts them in the batch queue.
         Runs continuously in background.
@@ -266,7 +309,13 @@ class OnlineDataLoader:
 
                 # Process sample
                 self._process_sample(
-                    buffers, ready, uuid, sensor_type, data, self.batch_sizes
+                    buffers,
+                    ready,
+                    uuid,
+                    sensor_type,
+                    data,
+                    self.batch_sizes,
+                    batch_building_config,
                 )
 
         except KeyboardInterrupt:
@@ -306,7 +355,13 @@ class OnlineDataLoader:
                     sensor_type, uuid, data = self.data_queue.get()
 
                     self._process_sample(
-                        buffers, ready, uuid, sensor_type, data, self.batch_sizes
+                        buffers,
+                        ready,
+                        uuid,
+                        sensor_type,
+                        data,
+                        self.batch_sizes,
+                        self.batch_building_config,
                     )
 
             except KeyboardInterrupt:

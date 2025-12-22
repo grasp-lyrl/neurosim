@@ -32,6 +32,7 @@ class DataSubscriber(ZMQNODE):
         data_queue: mp.Queue,
         ipc_sub_addr: str,
         sensors: list[str] | set[str] | None = None,
+        verbose: bool = False,
     ):
         """
         Initialize async data subscriber.
@@ -46,6 +47,7 @@ class DataSubscriber(ZMQNODE):
         self.data_queue = data_queue
         self.ipc_sub_addr = ipc_sub_addr
         self.sensors = set(sensors) if sensors else None
+        self.verbose = verbose
 
         # Statistics
         self._stats = defaultdict(int)
@@ -92,7 +94,8 @@ class DataSubscriber(ZMQNODE):
         self.create_async_executor(self.receive_events)
 
         # Stats printer
-        self.create_constant_rate_executor(self.print_stats, 1)
+        if self.verbose:
+            self.create_constant_rate_executor(self.print_stats, 1)
 
     def _should_include_sensor(self, uuid: str) -> bool:
         """Check if sensor should be included based on filter."""
@@ -156,6 +159,7 @@ def run_subscriber_process(
     data_queue: mp.Queue,
     ipc_sub_addr: str,
     sensors: list[str] | None,
+    verbose: bool = False,
 ):
     """
     Entry point for running DataSubscriber in a separate process.
@@ -166,6 +170,7 @@ def run_subscriber_process(
         data_queue=data_queue,
         ipc_sub_addr=ipc_sub_addr,
         sensors=sensors,
+        verbose=verbose,
     )
 
     try:
