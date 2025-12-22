@@ -1,0 +1,44 @@
+# Monocular Depth Training Configuration for OnlineDataLoader
+# Reference: https://github.com/grasp-lyrl/fast-feature-fields/blob/main/confs/monocular_depth/dav2b_fullttairv2indoor_pseudo_308x308x20.yml
+
+# Training options
+lr: 6.0e-6 # Learning rate
+lr_end_factor: 1.0 # Learning rate decay (linear scheduler end factor)
+clip_grad: 0 # Gradient clipping (0 = disabled)
+epochs: 200 # Number of epochs
+log_interval: 10 # Save checkpoint interval in epochs
+val_interval: 10 # Validation interval in epochs
+
+# Event options
+polarity: [False, False] # [use_polarity_ctx, use_polarity_pred]
+
+# Training data options
+train:
+  batch: 8 # Effective batch size (with gradient accumulation)
+  mini_batch: 8 # Mini batch size per forward pass
+
+# Loss options
+loss: ssimae # Loss function: 'ssimae', 'silog', 'siloggrad'
+scales: 4 # Number of scales for gradient matching loss
+alpha: 0.3 # Weight for gradient matching loss
+max_disparity: 384 # Maximum disparity for depth map
+
+# DepthAnythingV2 config
+dav2_config:
+  size: 308 # Input size for DAv2
+  encoder: vitb # Encoder type: 'vits', 'vitb', 'vitl'
+  # ckpt: null # Path to DAv2 checkpoint (set via --dav2-ckpt)
+
+# EventFF (F3) config - the feature backbone
+eventff:
+  config: deps/fast-feature-fields/confs/ff/modeloptions/640x480x50_patchff_ds1_small_v1.yml # Path to EventFF config YAML (set via --f3-config)
+  # ckpt: null # Path to EventFF checkpoint (set via --f3-ckpt)
+
+# OnlineDataLoader settings
+dataloader:
+  dataset_config: "configs/example_dataset_config.yaml" # Path to dataset config
+  event_sensor: "event_camera_1" # UUID of event sensor
+  depth_sensor: "depth_camera_1" # UUID of depth sensor
+  queue_maxsize: 1000
+  max_events: 16_000_000
+  prefetch_factor: 8

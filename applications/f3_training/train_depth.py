@@ -1,0 +1,732 @@
+"""
+Monocular Depth Training Script with F3 and OnlineDataLoader
+
+This script trains a monocular depth model using F3 (EventPatchFF) as the backbone
+and DepthAnythingV2 as the depth decoder. Data is streamed from the neurosim
+OnlineDataLoader.
+
+The F3 backbone extracts dense feature representations from events, which are
+then processed by DepthAnythingV2 to predict monocular depth.
+
+Reference: https://github.com/grasp-lyrl/fast-feature-fields/tree/main/src/f3/tasks/depth
+"""
+
+import os
+import copy
+import yaml
+import torch
+import logging
+import argparse
+import datetime
+import numpy as np
+from tqdm import tqdm
+
+from f3.utils import num_params, setup_torch, log_dict
+from f3.tasks.depth.utils import (
+    EventFFDepthAnythingV2,
+    ScaleAndShiftInvariantLoss,
+    eval_disparity,
+    get_disparity_image,
+    set_best_results,
+)
+
+# Import from neurosim
+from neurosim.sims.online_dataloader import OnlineDataLoader, DatasetConfig
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+def setup_experiment(
+    args, base_path: str, models_path: str
+) -> tuple[logging.Logger, bool]:
+    """Setup experiment directories and check for resume."""
+    os.makedirs(base_path, exist_ok=True)
+    os.makedirs(models_path, exist_ok=True)
+    os.makedirs(f"{base_path}/predictions", exist_ok=True)
+    os.makedirs(f"{base_path}/training_events", exist_ok=True)
+
+    # Check if we should resume
+    resume = os.path.exists(f"{models_path}/last.pth")
+
+    # Save config
+    with open(f"{base_path}/config.yaml", "w") as f:
+        yaml.dump(vars(args), f, default_flow_style=False)
+
+    return resume
+
+
+def process_batch(
+    batch: dict,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Process a batch from the OnlineDataLoader.
+
+    The OnlineDataLoader provides:
+    - Event sensor: (counts, events) tuple where:
+        - counts: (B,) array of event counts per sample
+        - events: (N_total, 4) array of events [x, y, t, p]
+    - Depth sensor: (B, H, W) depth images
+
+    Events are assumed to already be normalized by the simulator.
+
+    Args:
+        batch: Dictionary from OnlineDataLoader
+        args: Training arguments
+        device: Target device
+
+    Returns:
+        (ff_events, event_counts, disparity, src_ofst_res)
+    """
+    event_sensor = args.event_sensor
+    depth_sensor = args.depth_sensor
+
+    # Get event data
+    if event_sensor not in batch:
+        raise ValueError(
+            f"Event sensor '{event_sensor}' not found in batch. Available: {list(batch.keys())}"
+        )
+
+    counts, events = batch[event_sensor]
+
+    # Convert to torch tensors
+    ff_events = torch.from_numpy(events).float().to(device)  # (N, 4)
+    event_counts = torch.from_numpy(counts).to(device)  # (B,)
+
+    # Get depth data
+    if depth_sensor not in batch:
+        raise ValueError(
+            f"Depth sensor '{depth_sensor}' not found in batch. Available: {list(batch.keys())}"
+        )
+
+    depth = batch[depth_sensor]
+
+    # Convert depth to disparity (inverse depth)
+    # Avoid division by zero
+    depth = np.clip(depth, 1e-3, None)
+    disparity = 1.0 / depth  # Convert to disparity
+    disparity = torch.from_numpy(disparity).float().to(device)  # (B, H, W)
+
+    # Remove polarity if not using it
+    if not args.polarity[0]:
+        ff_events = ff_events[..., :3]  # (N, 3) - [x, y, t]
+
+    B = event_counts.shape[0]
+    H, W = disparity.shape[1], disparity.shape[2]
+
+    # Source offset and resolution for cropping
+    # Format: (xofst, yofst, h, w) per batch
+    src_ofst_res = torch.zeros(B, 4, device=device)
+    src_ofst_res[:, 2] = H
+    src_ofst_res[:, 3] = W
+
+    return ff_events, event_counts, disparity, src_ofst_res
+
+
+def train_epoch(
+    args: argparse.Namespace,
+    model: torch.nn.Module,
+    dataloader: OnlineDataLoader,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    loss_fn: torch.nn.Module,
+    scaler: torch.cuda.amp.GradScaler,
+    epoch: int,
+    iters_to_accumulate: int = 1,
+    max_batches: int | None = None,
+) -> float:
+    """
+    Train for one epoch.
+
+    Args:
+        args: Training arguments
+        model: EventFFDepthAnythingV2 model
+        dataloader: OnlineDataLoader instance
+        optimizer: Optimizer
+        scheduler: Learning rate scheduler
+        loss_fn: Loss function (ScaleAndShiftInvariantLoss)
+        epoch: Current epoch
+        scaler: Gradient scaler for AMP
+        iters_to_accumulate: Gradient accumulation steps
+        max_batches: Maximum batches per epoch
+
+    Returns:
+        Average training loss
+    """
+    model.train()
+    train_loss = 0.0
+    iter_loss = 0.0
+
+    pbar = tqdm(enumerate(dataloader), desc=f"Epoch {epoch}", total=max_batches)
+
+    for idx, batch in pbar:
+        if max_batches is not None and idx >= max_batches:
+            break
+
+        try:
+            # Process batch
+            ff_events, event_counts, disparity, src_ofst_res = process_batch(
+                batch, args, torch.device("cuda")
+            )
+
+            # Compute crop parameters for the depth head
+            # Format: (x1, y1, x2, y2) per batch
+            B = event_counts.shape[0]
+            src_0ofst_res = src_ofst_res.clone()
+            src_0ofst_res[:, :2] = 0
+
+            H, W = int(src_ofst_res[0, 2].item()), int(src_ofst_res[0, 3].item())
+            cparams = torch.zeros(B, 4, dtype=torch.int, device=ff_events.device)
+            cparams[:, 2] = H
+            cparams[:, 3] = W
+
+            # Forward pass with AMP
+            with torch.autocast(
+                device_type="cuda", enabled=args.amp, dtype=torch.bfloat16
+            ):
+                disparity_pred = model(ff_events, event_counts, cparams)[0]  # (B, H, W)
+
+                # Mask invalid disparities
+                disparity_valid_mask = disparity < args.max_disparity
+
+                loss = loss_fn(disparity_pred, disparity, disparity_valid_mask)
+                loss = loss / iters_to_accumulate
+
+            # Backward pass with GradScaler
+            scaler.scale(loss).backward()
+
+            train_loss += loss.item()
+            iter_loss += loss.item()
+
+            # Gradient accumulation step
+            if (idx + 1) % iters_to_accumulate == 0:
+                # Unscale before clipping when using AMP
+                if args.clip_grad > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+
+                # Optimizer step via scaler
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
+                pbar.set_postfix(
+                    {
+                        "loss": f"{iter_loss:.4f}",
+                        "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                    }
+                )
+                iter_loss = 0.0
+
+        except Exception as e:
+            logger.warning(f"Error processing batch {idx}: {e}")
+            continue
+
+    # Normalize loss
+    num_iters = (idx + 1) // iters_to_accumulate if idx > 0 else 1
+    train_loss /= num_iters
+
+    logger.info("#" * 50)
+    logger.info(f"Training: Epoch: {epoch}, Loss: {train_loss:.4f}")
+    logger.info("#" * 50)
+
+    return train_loss
+
+
+@torch.no_grad()
+def validate(
+    args: argparse.Namespace,
+    model: torch.nn.Module,
+    dataloader: OnlineDataLoader,
+    loss_fn: torch.nn.Module,
+    epoch: int,
+    max_batches: int = 50,
+    save_preds: bool = False,
+) -> dict[str, torch.Tensor]:
+    """
+    Validate the model.
+
+    Args:
+        args: Training arguments
+        model: EventFFDepthAnythingV2 model
+        dataloader: OnlineDataLoader instance
+        loss_fn: Loss function
+        epoch: Current epoch
+        max_batches: Maximum batches for validation
+        save_preds: Whether to save prediction visualizations
+
+    Returns:
+        Dictionary of validation results
+    """
+    model.eval()
+
+    from matplotlib import cm
+
+    cmap = cm.get_cmap("magma")
+
+    results = {
+        "1pe": torch.tensor([0.0]).cuda(),
+        "2pe": torch.tensor([0.0]).cuda(),
+        "3pe": torch.tensor([0.0]).cuda(),
+        "rmse": torch.tensor([0.0]).cuda(),
+        "rmse_log": torch.tensor([0.0]).cuda(),
+        "log10": torch.tensor([0.0]).cuda(),
+        "silog": torch.tensor([0.0]).cuda(),
+        loss_fn.name: torch.tensor([0.0]).cuda(),
+    }
+    nsamples = torch.tensor([0.0]).cuda()
+
+    for idx, batch in tqdm(enumerate(dataloader), total=max_batches, desc="Validation"):
+        if idx >= max_batches:
+            break
+
+        try:
+            ff_events, event_counts, disparity, src_ofst_res = process_batch(
+                batch, args, torch.device("cuda")
+            )
+
+            H, W = int(src_ofst_res[0, 2].item()), int(src_ofst_res[0, 3].item())
+
+            # Crop parameters
+            crop_params = torch.zeros(4, dtype=torch.int, device=ff_events.device)
+            crop_params[2] = H
+            crop_params[3] = W
+
+            # Inference
+            disparity_pred = model.infer_image(ff_events, event_counts, crop_params)[0]
+            disparity_pred = disparity_pred.unsqueeze(0)  # (1, H, W)
+
+            valid_mask = disparity < args.max_disparity
+
+            if valid_mask.sum() < 10:
+                continue
+
+            # Evaluate
+            cur_results = eval_disparity(
+                disparity_pred[valid_mask], disparity[valid_mask]
+            )
+
+            for k in cur_results:
+                results[k] += cur_results[k]
+
+            results[loss_fn.name] += loss_fn(
+                disparity_pred, disparity, valid_mask
+            ).item()
+            nsamples += 1
+
+            # Save visualizations
+            if idx % 20 == 0 and save_preds:
+                import cv2
+
+                base_path = f"outputs/monoculardepth/{args.name}"
+
+                for i in range(disparity_pred.shape[0]):
+                    disp_img = get_disparity_image(disparity[i], valid_mask[i], cmap)
+                    pred_img = get_disparity_image(
+                        disparity_pred[i],
+                        torch.ones_like(disparity_pred[i], dtype=torch.bool),
+                        cmap,
+                    )
+
+                    cv2.imwrite(
+                        f"{base_path}/training_events/disparity_{idx}_{i}.png", disp_img
+                    )
+                    cv2.imwrite(
+                        f"{base_path}/predictions/disparity_pred_{epoch}_{idx}_{i}.png",
+                        pred_img,
+                    )
+
+        except Exception as e:
+            logger.warning(f"Validation error on batch {idx}: {e}")
+            continue
+
+    # Average results
+    for k in results:
+        results[k] /= nsamples
+
+    logger.info("#" * 50)
+    logger.info(f"Validation: Epoch: {epoch}")
+    log_dict(logger, results)
+    logger.info("#" * 50)
+
+    return results
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description="Train Monocular Depth model with F3 backbone using OnlineDataLoader"
+    )
+
+    # Config files
+    parser.add_argument(
+        "--conf", type=str, required=True, help="Path to training configuration YAML"
+    )
+
+    # Training options
+    parser.add_argument("--name", type=str, default=None, help="Experiment name")
+    parser.add_argument(
+        "--compile", action="store_true", help="Use torch.compile for faster training"
+    )
+    parser.add_argument(
+        "--retrain-f3",
+        action="store_true",
+        help="Allow F3 backbone to be fine-tuned (default: frozen)",
+    )
+    parser.add_argument(
+        "--init",
+        type=str,
+        default=None,
+        help="Path to initial weights for the model (to finetune)",
+    )
+    parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
+    parser.add_argument(
+        "--batches-per-epoch", type=int, default=100, help="Number of batches per epoch"
+    )
+
+    # Mixed precision (AMP)
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Enable mixed precision training (fp16) with GradScaler",
+    )
+
+    args = parser.parse_args()
+    return args
+
+
+def main():
+    """Main training function."""
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # CONFIGURATION & SETUP
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    args = get_args()
+
+    # Load and merge training configuration
+    with open(args.conf, "r") as f:
+        conf = yaml.safe_load(f)
+
+    for key, value in conf.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+
+    # Extract dataloader settings
+    dl_conf = conf["dataloader"]
+    args.event_sensor = dl_conf["event_sensor"]
+    args.depth_sensor = dl_conf["depth_sensor"]
+
+    # Setup PyTorch and create experiment directories
+    setup_torch(cudnn_benchmark=True)
+
+    if args.name is None:
+        args.name = (
+            f"f3depth_neurosim_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        )
+
+    base_path = f"outputs/monoculardepth/{args.name}"
+    models_path = f"outputs/monoculardepth/{args.name}/models"
+
+    resume = setup_experiment(args, base_path, models_path)
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # MODEL INITIALIZATION
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    logger.info("#" * 50)
+    logger.info("Initializing EventFFDepthAnythingV2 model...")
+
+    model = EventFFDepthAnythingV2(
+        args.eventff["config"], args.dav2_config, args.retrain_f3
+    )
+    model_uncompiled = model  # Keep reference for saving uncompiled weights
+
+    # Optional: Compile model for faster training
+    model.eventff = torch.compile(model.eventff, fullgraph=False)
+    if args.compile:
+        model.dav2 = torch.compile(model.dav2)
+
+    # Load pretrained F3 backbone weights
+    # model.load_weights(args.eventff["ckpt"])
+    model.save_configs(models_path)
+
+    # Optional: Load additional initialization weights for fine-tuning
+    if args.init is not None:
+        logger.info(f"Loading initial weights from {args.init}")
+        state_dict = torch.load(args.init)
+        model.load_state_dict(state_dict["model"])
+        torch.cuda.empty_cache()
+        logger.info("Initial weights loaded successfully.")
+    else:
+        logger.info("No initial weights provided, starting from scratch.")
+
+    logger.info(f"Feature Field + Monocular Depth: {model}")
+    logger.info(f"Trainable parameters in Depth Anything V2: {num_params(model.dav2)}")
+    logger.info(f"Total Trainable parameters: {num_params(model)}")
+    logger.info("#" * 50)
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # OPTIMIZER & SCHEDULER SETUP
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    # Create parameter groups with different learning rates:
+    # - Pretrained layers: standard LR
+    # - Patch embedding (first layer): standard LR, no weight decay (adapts RGB→events)
+    # - F3 backbone: 0.5x LR (fine-tuning or frozen)
+    # - Decoder head: 10x LR (trained from scratch)
+    param_groups = []
+    for name, param in model.named_parameters():
+        if "pretrained" in name:
+            if "patch_embed.proj" in name:
+                param_groups.append(
+                    {"params": param, "lr": args.lr, "weight_decay": 0.0}
+                )
+            else:
+                param_groups.append({"params": param, "lr": args.lr})
+        elif "eventff" in name:
+            param_groups.append({"params": param, "lr": 0.5 * args.lr})
+        else:
+            param_groups.append({"params": param, "lr": 10 * args.lr})
+
+    optimizer = torch.optim.AdamW(
+        param_groups, lr=args.lr, betas=(0.9, 0.999), weight_decay=0.01
+    )
+    scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=1,
+        end_factor=args.lr_end_factor,
+        total_iters=args.epochs,
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # LOSS FUNCTION & METRICS TRACKING
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    assert args.loss == "ssimae", (
+        "ScaleAndShiftInvariantLoss for monocular relative depth"
+    )
+    loss_fn = ScaleAndShiftInvariantLoss(alpha=args.alpha, scales=args.scales)
+
+    # Initialize best results tracker (lower is better for all metrics)
+    best_results = {
+        "1pe": 100.0,
+        "2pe": 100.0,
+        "3pe": 100.0,
+        "rmse": 100.0,
+        "rmse_log": 100.0,
+        "log10": 100.0,
+        "silog": 100.0,
+        loss_fn.name: 100.0,
+    }
+
+    start = 0
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # RESUME FROM CHECKPOINT
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    if resume:
+        logger.info(f"Resuming from {models_path}/last.pth")
+        last_dict = torch.load(f"{models_path}/last.pth")
+        model.load_state_dict(last_dict["model"])
+        optimizer.load_state_dict(last_dict["optimizer"])
+        scheduler.load_state_dict(last_dict["scheduler"])
+        start = last_dict["epoch"] + 1
+        del last_dict
+
+        try:
+            best_dict = torch.load(f"{models_path}/best.pth")
+            best_results = best_dict.get("results", best_results)
+            del best_dict
+        except FileNotFoundError:
+            logger.info("No best model found, so falling back on default best results")
+
+        torch.cuda.empty_cache()
+        logger.info(f"Resuming from epoch: {start}")
+        log_dict(logger, best_results)
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # DATALOADER INITIALIZATION
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    logger.info("Initializing OnlineDataLoader...")
+
+    # Load dataset configuration from YAML
+    if (dataset_config_path := dl_conf.get("dataset_config")) is None:
+        raise ValueError(
+            "dataloader.dataset_config must be specified in training config"
+        )
+
+    logger.info(f"Loading dataset config from: {dataset_config_path}")
+    dataset_config = DatasetConfig.from_yaml(dataset_config_path)
+
+    # Configure sensors and batch sizes
+    sensor_uuids = [args.event_sensor, args.depth_sensor]
+    sensor_batch_sizes = {
+        args.event_sensor: args.train["mini_batch"],
+        args.depth_sensor: args.train["mini_batch"],
+    }
+
+    # Create dataloader (starts subscriber process automatically)
+    dataloader = OnlineDataLoader(
+        config=dataset_config,
+        sensor_uuids=sensor_uuids,
+        sensor_batch_sizes=sensor_batch_sizes,
+        ipc_sub_addr=dataset_config.ipc_pub_addr,
+        queue_maxsize=dl_conf.get("queue_maxsize", 1000),
+        max_events=dl_conf.get("max_events", 8_000_000),
+        prefetch_factor=dl_conf.get("prefetch_factor", 4),
+    )
+
+    logger.info(f"  Event sensor: {args.event_sensor}")
+    logger.info(f"  Depth sensor: {args.depth_sensor}")
+    logger.info(f"  Mini batch size: {args.train['mini_batch']}")
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # EXPERIMENT TRACKING
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    if args.wandb:
+        import wandb
+
+        wandb.init(project="f3-depth-neurosim", name=args.name, config=vars(args))
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # TRAINING LOOP
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    logger.info("=" * 60)
+    logger.info("Starting training...")
+    logger.info("=" * 60)
+
+    val_results = copy.deepcopy(best_results)
+    iters_to_accumulate = args.train["batch"] // args.train["mini_batch"]
+    # Initialize GradScaler for AMP
+    scaler = torch.GradScaler(enabled=args.amp)
+
+    try:
+        for epoch in range(start, args.epochs):
+            train_loss = train_epoch(
+                args,
+                model,
+                dataloader,
+                optimizer,
+                scheduler,
+                loss_fn,
+                scaler,
+                epoch,
+                iters_to_accumulate,
+                max_batches=args.batches_per_epoch,
+            )
+
+            if args.wandb:
+                wandb.log({"train_loss": train_loss, "epoch": epoch})
+
+            if (epoch + 1) % args.val_interval == 0:
+                save_preds = (epoch + 1) % args.log_interval == 0
+
+                with torch.autocast(
+                    device_type="cuda", enabled=args.amp, dtype=torch.float16
+                ):
+                    val_results = validate(
+                        args,
+                        model,
+                        dataloader,
+                        loss_fn,
+                        epoch,
+                        max_batches=args.batches_per_epoch // 2,
+                        save_preds=save_preds,
+                    )
+
+                # Check for improvements
+                better_ssimae = val_results[loss_fn.name] < best_results[loss_fn.name]
+                better_2pe = val_results["2pe"] < best_results["2pe"]
+
+                set_best_results(best_results, val_results)
+
+                # Save best model based on loss
+                if better_ssimae:
+                    best_dict = {
+                        "epoch": epoch,
+                        "results": best_results,
+                        "model": model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "scheduler": scheduler.state_dict(),
+                    }
+                    torch.save(best_dict, f"{models_path}/best.pth")
+                    if args.compile:
+                        torch.save(
+                            model_uncompiled.state_dict(),
+                            f"{models_path}/best_uncompiled.pth",
+                        )
+                    logger.info(f"Saving best model at epoch: {epoch}")
+                    log_dict(logger, best_results)
+
+                # Save best model based on 2-pixel error
+                if better_2pe:
+                    best_2pe_dict = {
+                        "epoch": epoch,
+                        "results": best_results,
+                        "model": model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "scheduler": scheduler.state_dict(),
+                    }
+                    torch.save(best_2pe_dict, f"{models_path}/best_2pe.pth")
+                    if args.compile:
+                        torch.save(
+                            model_uncompiled.state_dict(),
+                            f"{models_path}/best_2pe_uncompiled.pth",
+                        )
+                    logger.info(f"Saving best 2pe model at epoch: {epoch}")
+
+                if args.wandb:
+                    wandb_dict = {
+                        f"val_{k}": v.item() if isinstance(v, torch.Tensor) else v
+                        for k, v in val_results.items()
+                    }
+                    wandb_dict["epoch"] = epoch
+                    wandb.log(wandb_dict)
+
+            # ─────────────────────────────────────────────────────────────────────
+            # Checkpoint Saving
+            # ─────────────────────────────────────────────────────────────────────
+            scheduler.step()
+
+            # Save latest checkpoint (every epoch)
+            last_dict = {
+                "epoch": epoch,
+                "results": val_results,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+            }
+            torch.save(last_dict, f"{models_path}/last.pth")
+            if args.compile:
+                torch.save(
+                    model_uncompiled.state_dict(), f"{models_path}/last_uncompiled.pth"
+                )
+
+            # Save periodic checkpoint (for recovery/analysis)
+            if (epoch + 1) % args.log_interval == 0:
+                torch.save(last_dict, f"{models_path}/checkpoint_{epoch}.pth")
+
+    except KeyboardInterrupt:
+        logger.info("Training interrupted by user")
+
+    finally:
+        dataloader.close()
+        if args.wandb:
+            wandb.finish()
+
+        logger.info("Training completed!")
+        logger.info("Best results:")
+        log_dict(logger, best_results)
+
+
+if __name__ == "__main__":
+    main()
