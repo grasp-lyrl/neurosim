@@ -17,9 +17,9 @@ scenes:
     scene_path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
     sim_time: 20.0
 
-  - name: van_gogh
-    scene_path: data/scene_datasets/habitat-test-scenes/van-gogh-room.glb
-    sim_time: 20.0
+  # - name: van_gogh
+  #   scene_path: data/scene_datasets/habitat-test-scenes/van-gogh-room.glb
+  #   sim_time: 20.0
 
 # Trajectory configurations
 # =========================
@@ -31,18 +31,18 @@ trajectories:
     max_waypoints: 100
     v_avg: 1.0
 
-  - name: fast
-    model: habitat_random_minsnap
-    target_length: 50.0
-    min_waypoint_distance: 3.0
-    max_waypoints: 150
-    v_avg: 1.5
+  # - name: fast
+  #   model: habitat_random_minsnap
+  #   target_length: 50.0
+  #   min_waypoint_distance: 3.0
+  #   max_waypoints: 150
+  #   v_avg: 1.5
 
 # Random seeds for trajectory generation
 # =======================================
-seeds: [42, 123, 456]
+seeds: [42, 123, 324, 456]
 
-# Total runs: 3 scenes × 2 trajectories × 3 seeds = 18 simulations
+# Total runs: 2 scenes × 1 trajectories × 4 seeds = 8 simulations
 
 # Simulator settings
 # ==================

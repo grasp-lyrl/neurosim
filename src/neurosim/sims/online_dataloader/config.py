@@ -163,10 +163,15 @@ class DatasetConfig:
 
         return cls(**data)
 
-    def generate_run_configs(self) -> Iterator[tuple[dict, dict]]:
+    def generate_run_configs(
+        self, infinite: bool = True
+    ) -> Iterator[tuple[dict, dict]]:
         """Generate (settings_dict, metadata) tuples for each simulation run.
 
-        Total runs = len(scenes) x len(trajectories) x len(seeds)
+        Loops through all configurations:
+        Total runs per cycle = len(scenes) x len(trajectories) x len(seeds)
+
+        If infinite=True, continues indefinitely cycling through all runs.
 
         Yields:
             Tuple of (settings_dict, metadata) where:
@@ -175,43 +180,47 @@ class DatasetConfig:
         """
         run_idx = 0
 
-        for scene in self.scenes:
-            for traj in self.trajectories:
-                for seed in self.seeds:
-                    # Build complete settings dict
-                    settings = {
-                        "simulator": deepcopy(self.simulator),
-                        "visual_backend": deepcopy(self.visual_backend),
-                        "dynamics": deepcopy(self.dynamics),
-                        "controller": deepcopy(self.controller),
-                    }
+        while True:
+            for scene in self.scenes:
+                for traj in self.trajectories:
+                    for seed in self.seeds:
+                        # Build complete settings dict
+                        settings = {
+                            "simulator": deepcopy(self.simulator),
+                            "visual_backend": deepcopy(self.visual_backend),
+                            "dynamics": deepcopy(self.dynamics),
+                            "controller": deepcopy(self.controller),
+                        }
 
-                    # Set scene-specific settings
-                    settings["visual_backend"]["scene"] = scene.scene_path
-                    settings["simulator"]["sim_time"] = scene.sim_time
+                        # Set scene-specific settings
+                        settings["visual_backend"]["scene"] = scene.scene_path
+                        settings["simulator"]["sim_time"] = scene.sim_time
 
-                    # Set trajectory with seed
-                    settings["trajectory"] = {
-                        "model": traj.model,
-                        "seed": seed,
-                        "target_length": traj.target_length,
-                        "min_waypoint_distance": traj.min_waypoint_distance,
-                        "max_waypoints": traj.max_waypoints,
-                        "v_avg": traj.v_avg,
-                    }
+                        # Set trajectory with seed
+                        settings["trajectory"] = {
+                            "model": traj.model,
+                            "seed": seed,
+                            "target_length": traj.target_length,
+                            "min_waypoint_distance": traj.min_waypoint_distance,
+                            "max_waypoints": traj.max_waypoints,
+                            "v_avg": traj.v_avg,
+                        }
 
-                    # Build metadata
-                    metadata = {
-                        "scene_name": scene.name,
-                        "scene_path": scene.scene_path,
-                        "trajectory_name": traj.name,
-                        "seed": seed,
-                        "run_idx": run_idx,
-                        "sim_time": scene.sim_time,
-                    }
+                        # Build metadata
+                        metadata = {
+                            "scene_name": scene.name,
+                            "scene_path": scene.scene_path,
+                            "trajectory_name": traj.name,
+                            "seed": seed,
+                            "run_idx": run_idx,
+                            "sim_time": scene.sim_time,
+                        }
 
-                    yield settings, metadata
-                    run_idx += 1
+                        yield settings, metadata
+                        run_idx += 1
+
+            if not infinite:
+                break
 
     def get_total_runs(self) -> int:
         """Get total number of simulation runs.
