@@ -148,8 +148,11 @@ class DataSubscriber(ZMQNODE):
             return
 
         elapsed = time.perf_counter() - self._cpu_clock_start_time
+        queue_size = self.data_queue.qsize()
+
         logger.info("─" * 50)
         logger.info(f"[DataSubscriber] Elapsed: {elapsed:.2f}s")
+        logger.info(f"  queue_size: {queue_size} (monitoring training backlog)")
         for key, value in sorted(self._stats.items()):
             logger.info(f"  {key}: {value / elapsed:.1f}/s")
         logger.info("─" * 50)

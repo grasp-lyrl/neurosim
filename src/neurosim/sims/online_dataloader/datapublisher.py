@@ -44,7 +44,7 @@ class DataPublisher(ZMQNODE):
     This publisher runs synchronously and publishes immediately after rendering.
     """
 
-    MAX_EVENT_BUFFER_SIZE = 2000000
+    MAX_EVENT_BUFFER_SIZE = 4000000
 
     def __init__(
         self,
@@ -295,7 +295,7 @@ class DataPublisher(ZMQNODE):
 
         return num_samples
 
-    def run(self, verbose: bool = True) -> defaultdict:
+    def run(self, infinite: bool = True, verbose: bool = True) -> defaultdict:
         """
         Run all configured simulations and publish data.
 
@@ -307,7 +307,7 @@ class DataPublisher(ZMQNODE):
         """
         start_time = time.perf_counter()
 
-        for settings, metadata in self.config.generate_run_configs():
+        for settings, metadata in self.config.generate_run_configs(infinite=infinite):
             if verbose:
                 logger.info(
                     f"▶ Starting run {metadata['run_idx'] + 1}/{self.config.get_total_runs()}: "
@@ -373,6 +373,11 @@ def main():
         help="Override ZMQ IPC address (default: from config)",
     )
     parser.add_argument(
+        "--no-infinite",
+        action="store_true",
+        help="Run through the simulations once instead of infinitely",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Reduce logging verbosity",
@@ -384,7 +389,7 @@ def main():
     publisher = DataPublisher(config, ipc_pub_addr=args.ipc_addr)
 
     try:
-        publisher.run(verbose=not args.quiet)
+        publisher.run(verbose=not args.quiet, infinite=not args.no_infinite)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     finally:

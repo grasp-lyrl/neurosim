@@ -76,7 +76,7 @@ class BatchBuildingConfig:
     normalize_events: bool = True
     event_width: int = 640
     event_height: int = 480
-    event_time_window: float = 50000.0
+    event_time_window: int = 50000
 
 
 class OnlineDataLoader:
@@ -243,6 +243,19 @@ class OnlineDataLoader:
 
         elif sensor_type == "events":
             events_dict = data
+
+            # Filter events based on time window (events are sorted in time)
+            if len(events_dict["t"]) > 0:
+                t_max = events_dict["t"][-1]
+                t_threshold = t_max - batch_building_config.event_time_window
+                start_idx = np.searchsorted(events_dict["t"], t_threshold, side="right")
+
+                # Filter all event arrays to keep only events within time window
+                events_dict["x"] = events_dict["x"][start_idx:]
+                events_dict["y"] = events_dict["y"][start_idx:]
+                events_dict["t"] = events_dict["t"][start_idx:]
+                events_dict["p"] = events_dict["p"][start_idx:]
+
             n_events = len(events_dict["x"])
             start = buf.event_idx
             end = start + n_events
