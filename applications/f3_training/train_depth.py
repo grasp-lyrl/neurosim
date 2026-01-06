@@ -12,16 +12,26 @@ Reference: https://github.com/grasp-lyrl/fast-feature-fields/tree/main/src/f3/ta
 """
 
 import os
+import cv2
 import copy
 import yaml
 import torch
+import wandb
 import logging
 import argparse
 import datetime
 import numpy as np
 from tqdm import tqdm
+from matplotlib import colormaps
 
-from f3.utils import num_params, setup_torch, log_dict
+from f3.utils import (
+    num_params,
+    setup_torch,
+    log_dict,
+    get_random_crop_params,
+    batch_cropper,
+    ev_to_frames,
+)
 from f3.tasks.depth.utils import (
     EventFFDepthAnythingV2,
     ScaleAndShiftInvariantLoss,
@@ -32,13 +42,6 @@ from f3.tasks.depth.utils import (
 
 # Import from neurosim
 from neurosim.sims.online_dataloader import OnlineDataLoader, DatasetConfig
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-)
-logger = logging.getLogger(__name__)
 
 
 def setup_experiment(
@@ -53,11 +56,20 @@ def setup_experiment(
     # Check if we should resume
     resume = os.path.exists(f"{models_path}/last.pth")
 
+    # Setup logging
+    logging.basicConfig(
+        filename=f"{base_path}/training.log",
+        filemode="a" if resume else "w",
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+    logger = logging.getLogger(__name__)
+
     # Save config
     with open(f"{base_path}/config.yaml", "w") as f:
         yaml.dump(vars(args), f, default_flow_style=False)
 
-    return resume
+    return logger, resume
 
 
 def process_batch(
@@ -95,6 +107,10 @@ def process_batch(
 
     counts, events = batch[event_sensor]
 
+    # Remove polarity if not using it
+    if not args.polarity[0]:
+        events = events[..., :3]  # (N, 3) - [x, y, t]
+
     # Convert to torch tensors
     ff_events = torch.from_numpy(events).float().to(device)  # (N, 4)
     event_counts = torch.from_numpy(counts).to(device)  # (B,)
@@ -106,31 +122,23 @@ def process_batch(
         )
 
     depth = batch[depth_sensor]
+    # Invalid depths are marked as 0.0
 
     # Convert depth to disparity (inverse depth)
     # Avoid division by zero
-    depth = np.clip(depth, 1e-3, None)
-    disparity = 1.0 / depth  # Convert to disparity
+    # TODO: add min disparity
+    depth = np.clip(depth, 0.5 / args.max_disparity, 20.0)
+    disparity = (
+        1.0 / depth
+    )  # Convert to disparity 0.05 -> 2 * max_disparity, just for safety
     disparity = torch.from_numpy(disparity).float().to(device)  # (B, H, W)
 
-    # Remove polarity if not using it
-    if not args.polarity[0]:
-        ff_events = ff_events[..., :3]  # (N, 3) - [x, y, t]
-
-    B = event_counts.shape[0]
-    H, W = disparity.shape[1], disparity.shape[2]
-
-    # Source offset and resolution for cropping
-    # Format: (xofst, yofst, h, w) per batch
-    src_ofst_res = torch.zeros(B, 4, device=device)
-    src_ofst_res[:, 2] = H
-    src_ofst_res[:, 3] = W
-
-    return ff_events, event_counts, disparity, src_ofst_res
+    return ff_events, event_counts, disparity
 
 
 def train_epoch(
     args: argparse.Namespace,
+    logger: logging.Logger,
     model: torch.nn.Module,
     dataloader: OnlineDataLoader,
     optimizer: torch.optim.Optimizer,
@@ -138,8 +146,8 @@ def train_epoch(
     loss_fn: torch.nn.Module,
     scaler: torch.cuda.amp.GradScaler,
     epoch: int,
+    max_batches: int,
     iters_to_accumulate: int = 1,
-    max_batches: int | None = None,
 ) -> float:
     """
     Train for one epoch.
@@ -153,8 +161,8 @@ def train_epoch(
         loss_fn: Loss function (ScaleAndShiftInvariantLoss)
         epoch: Current epoch
         scaler: Gradient scaler for AMP
-        iters_to_accumulate: Gradient accumulation steps
         max_batches: Maximum batches per epoch
+        iters_to_accumulate: Gradient accumulation steps
 
     Returns:
         Average training loss
@@ -166,25 +174,20 @@ def train_epoch(
     pbar = tqdm(enumerate(dataloader), desc=f"Epoch {epoch}", total=max_batches)
 
     for idx, batch in pbar:
-        if max_batches is not None and idx >= max_batches:
+        if idx >= max_batches:
             break
 
         try:
             # Process batch
-            ff_events, event_counts, disparity, src_ofst_res = process_batch(
+            ff_events, event_counts, disparity = process_batch(
                 batch, args, torch.device("cuda")
             )
 
-            # Compute crop parameters for the depth head
-            # Format: (x1, y1, x2, y2) per batch
-            B = event_counts.shape[0]
-            src_0ofst_res = src_ofst_res.clone()
-            src_0ofst_res[:, :2] = 0
-
-            H, W = int(src_ofst_res[0, 2].item()), int(src_ofst_res[0, 3].item())
-            cparams = torch.zeros(B, 4, dtype=torch.int, device=ff_events.device)
-            cparams[:, 2] = H
-            cparams[:, 3] = W
+            B, H, W = disparity.shape
+            cparams = get_random_crop_params((H, W), (H, H), batch_size=B).to(
+                ff_events.device
+            )
+            disparity = batch_cropper(disparity.unsqueeze(1), cparams).squeeze(1)
 
             # Forward pass with AMP
             with torch.autocast(
@@ -194,6 +197,11 @@ def train_epoch(
 
                 # Mask invalid disparities
                 disparity_valid_mask = disparity < args.max_disparity
+
+                if (
+                    disparity_valid_mask.sum() < W * H / 2
+                ):  # at least half of the disparities need to be valid
+                    continue
 
                 loss = loss_fn(disparity_pred, disparity, disparity_valid_mask)
                 loss = loss / iters_to_accumulate
@@ -222,6 +230,15 @@ def train_epoch(
                         "lr": f"{scheduler.get_last_lr()[0]:.2e}",
                     }
                 )
+                if args.wandb:
+                    wandb.log(
+                        {
+                            "train_iter_loss": iter_loss,
+                            "train_lr": scheduler.get_last_lr()[0],
+                            "epoch": epoch,
+                            "iteration": idx,
+                        }
+                    )
                 iter_loss = 0.0
 
         except Exception as e:
@@ -229,7 +246,7 @@ def train_epoch(
             continue
 
     # Normalize loss
-    num_iters = (idx + 1) // iters_to_accumulate if idx > 0 else 1
+    num_iters = (idx + 1) // iters_to_accumulate
     train_loss /= num_iters
 
     logger.info("#" * 50)
@@ -242,6 +259,7 @@ def train_epoch(
 @torch.no_grad()
 def validate(
     args: argparse.Namespace,
+    logger: logging.Logger,
     model: torch.nn.Module,
     dataloader: OnlineDataLoader,
     loss_fn: torch.nn.Module,
@@ -266,9 +284,7 @@ def validate(
     """
     model.eval()
 
-    from matplotlib import cm
-
-    cmap = cm.get_cmap("magma")
+    cmap = colormaps["magma"]
 
     results = {
         "1pe": torch.tensor([0.0]).cuda(),
@@ -287,24 +303,30 @@ def validate(
             break
 
         try:
-            ff_events, event_counts, disparity, src_ofst_res = process_batch(
+            ff_events, event_counts, disparity = process_batch(
                 batch, args, torch.device("cuda")
             )
 
-            H, W = int(src_ofst_res[0, 2].item()), int(src_ofst_res[0, 3].item())
+            B, H, W = disparity.shape
 
-            # Crop parameters
-            crop_params = torch.zeros(4, dtype=torch.int, device=ff_events.device)
-            crop_params[2] = H
-            crop_params[3] = W
+            # Crop parameters. Center crop to square.
+            # TODO: Handle non-square images better. This is an issue in F3 codebase
+            crop_params = torch.tensor(
+                [[0, (W - H) // 2, H, (W + H) // 2]],
+                dtype=torch.int32,
+                device=ff_events.device,
+            ).repeat(B, 1)
+
+            # Apply cropping
+            disparity = batch_cropper(disparity.unsqueeze(1), crop_params).squeeze(1)
 
             # Inference
-            disparity_pred = model.infer_image(ff_events, event_counts, crop_params)[0]
-            disparity_pred = disparity_pred.unsqueeze(0)  # (1, H, W)
+            disparity_pred = model(ff_events, event_counts, crop_params)[0]  # (B, H, H)
 
             valid_mask = disparity < args.max_disparity
-
-            if valid_mask.sum() < 10:
+            if (
+                valid_mask.sum() < W * H / 2
+            ):  # at least half of the disparities need to be valid
                 continue
 
             # Evaluate
@@ -321,10 +343,10 @@ def validate(
             nsamples += 1
 
             # Save visualizations
-            if idx % 20 == 0 and save_preds:
-                import cv2
-
+            if idx % 10 == 0 and save_preds:
                 base_path = f"outputs/monoculardepth/{args.name}"
+
+                event_frames = ev_to_frames(ff_events, event_counts, W, H).cpu().numpy()
 
                 for i in range(disparity_pred.shape[0]):
                     disp_img = get_disparity_image(disparity[i], valid_mask[i], cmap)
@@ -335,11 +357,16 @@ def validate(
                     )
 
                     cv2.imwrite(
-                        f"{base_path}/training_events/disparity_{idx}_{i}.png", disp_img
+                        f"{base_path}/training_events/disparity_{epoch}_{idx}_{i}.png",
+                        disp_img,
                     )
                     cv2.imwrite(
                         f"{base_path}/predictions/disparity_pred_{epoch}_{idx}_{i}.png",
                         pred_img,
+                    )
+                    cv2.imwrite(
+                        f"{base_path}/training_events/events_{epoch}_{idx}_{i}.png",
+                        event_frames[i].T,
                     )
 
         except Exception as e:
@@ -415,8 +442,10 @@ def main():
     for key, value in conf.items():
         if not hasattr(args, key):
             setattr(args, key, value)
+        else:
+            raise ValueError(f"Argument '{key}' in config overrides command-line arg")
 
-    # Extract dataloader settings
+    # Extract data loader settings
     dl_conf = conf["dataloader"]
     args.event_sensor = dl_conf["event_sensor"]
     args.depth_sensor = dl_conf["depth_sensor"]
@@ -432,7 +461,7 @@ def main():
     base_path = f"outputs/monoculardepth/{args.name}"
     models_path = f"outputs/monoculardepth/{args.name}/models"
 
-    resume = setup_experiment(args, base_path, models_path)
+    logger, resume = setup_experiment(args, base_path, models_path)
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # MODEL INITIALIZATION
@@ -452,7 +481,7 @@ def main():
         model.dav2 = torch.compile(model.dav2)
 
     # Load pretrained F3 backbone weights
-    # model.load_weights(args.eventff["ckpt"])
+    model.load_weights(args.eventff["ckpt"])
     model.save_configs(models_path)
 
     # Optional: Load additional initialization weights for fine-tuning
@@ -568,11 +597,12 @@ def main():
     # Configure sensors and batch sizes
     sensor_uuids = [args.event_sensor, args.depth_sensor]
     sensor_batch_sizes = {
-        args.event_sensor: args.train["mini_batch"],
-        args.depth_sensor: args.train["mini_batch"],
+        sensor_uuids[0]: args.train["mini_batch"],
+        sensor_uuids[1]: args.train["mini_batch"],
     }
 
     # Create dataloader (starts subscriber process automatically)
+    event_W, event_H, event_T = model.eventff.frame_sizes
     dataloader = OnlineDataLoader(
         config=dataset_config,
         sensor_uuids=sensor_uuids,
@@ -580,11 +610,18 @@ def main():
         ipc_sub_addr=dataset_config.ipc_pub_addr,
         queue_maxsize=dl_conf.get("queue_maxsize", 1000),
         max_events=dl_conf.get("max_events", 8_000_000),
-        prefetch_factor=dl_conf.get("prefetch_factor", 4),
+        prefetch_factor=dl_conf.get("prefetch_factor", 8),
+        verbose=True,
+        batch_building_config={
+            "normalize_events": True,
+            "event_width": event_W,
+            "event_height": event_H,
+            "event_time_window": event_T * 1000,  # in us
+        },
     )
 
-    logger.info(f"  Event sensor: {args.event_sensor}")
-    logger.info(f"  Depth sensor: {args.depth_sensor}")
+    logger.info(f"  Event sensor: {dl_conf['event_sensor']}")
+    logger.info(f"  Depth sensor: {dl_conf['depth_sensor']}")
     logger.info(f"  Mini batch size: {args.train['mini_batch']}")
 
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -592,8 +629,6 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════════════
 
     if args.wandb:
-        import wandb
-
         wandb.init(project="f3-depth-neurosim", name=args.name, config=vars(args))
 
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -613,6 +648,7 @@ def main():
         for epoch in range(start, args.epochs):
             train_loss = train_epoch(
                 args,
+                logger,
                 model,
                 dataloader,
                 optimizer,
@@ -620,8 +656,8 @@ def main():
                 loss_fn,
                 scaler,
                 epoch,
-                iters_to_accumulate,
-                max_batches=args.batches_per_epoch,
+                args.batches_per_epoch,
+                iters_to_accumulate=iters_to_accumulate,
             )
 
             if args.wandb:
@@ -635,6 +671,7 @@ def main():
                 ):
                     val_results = validate(
                         args,
+                        logger,
                         model,
                         dataloader,
                         loss_fn,
