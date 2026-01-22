@@ -173,7 +173,7 @@ def process_batch(
 
     # Get color camera data
     color_images = (
-        batch[color_sensor].astype(np.uint8) # (B, H, W, 3)
+        batch[color_sensor].astype(np.uint8)  # (B, H, W, 3)
         if color_sensor
         else None
     )
@@ -234,9 +234,7 @@ def train_epoch(
         disparity = batch_cropper(disparity.unsqueeze(1), cparams).squeeze(1)
 
         # Forward pass with AMP
-        with torch.autocast(
-            device_type="cuda", enabled=args.amp, dtype=torch.bfloat16
-        ):
+        with torch.autocast(device_type="cuda", enabled=args.amp, dtype=torch.bfloat16):
             disparity_pred = model(ff_events, event_counts, cparams)[0]  # (B, H, W)
 
             # Mask invalid disparities
@@ -369,16 +367,12 @@ def validate(
             continue
 
         # Evaluate
-        cur_results = eval_disparity(
-            disparity_pred[valid_mask], disparity[valid_mask]
-        )
+        cur_results = eval_disparity(disparity_pred[valid_mask], disparity[valid_mask])
 
         for k in cur_results:
             results[k] += cur_results[k]
 
-        results[loss_fn.name] += loss_fn(
-            disparity_pred, disparity, valid_mask
-        ).item()
+        results[loss_fn.name] += loss_fn(disparity_pred, disparity, valid_mask).item()
         nsamples += 1
 
         # Save visualizations
@@ -387,9 +381,7 @@ def validate(
 
             # Create event visualizations with polarity coloring
             event_frames_polarity = (
-                ev_to_frames_with_polarity(ff_events, event_counts, W, H)
-                .cpu()
-                .numpy()
+                ev_to_frames_with_polarity(ff_events, event_counts, W, H).cpu().numpy()
             )  # (B, H, W, 3)
 
             for i in range(disparity_pred.shape[0]):
