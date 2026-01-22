@@ -61,7 +61,7 @@ class SimulatorNode(ZMQNODE):
                 raise FileNotFoundError(f"Settings file not found: {settings_path}")
 
             # Load settings
-            with open(self.settings_path, "r") as f:
+            with open(settings_path, "r") as f:
                 self.settings = yaml.safe_load(f)
         elif isinstance(settings, dict):
             self.settings = settings

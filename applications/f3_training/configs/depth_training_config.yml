@@ -21,7 +21,8 @@ train:
 loss: ssimae # Loss function: 'ssimae', 'silog', 'siloggrad'
 scales: 4 # Number of scales for gradient matching loss
 alpha: 0.3 # Weight for gradient matching loss
-max_disparity: 1000 # Maximum disparity for depth map
+min_disparity: 0.05 # Minimum disparity for max depth 20.0 m
+max_disparity: 1000.0 # Maximum disparity for min depth 0.001 m
 
 # DepthAnythingV2 config
 dav2_config:
@@ -39,6 +40,7 @@ dataloader:
   dataset_config: "configs/example_dataset_config.yaml" # Path to dataset config
   event_sensor: "event_camera_1" # UUID of event sensor
   depth_sensor: "depth_camera_1" # UUID of depth sensor
+  color_sensor: "color_camera_1" # UUID of color sensor (used for visualization)
   queue_maxsize: 1000
   max_events: 8_000_000
   prefetch_factor: 8

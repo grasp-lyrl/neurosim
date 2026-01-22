@@ -91,7 +91,7 @@ def save_visualizations(sim, points: list[np.ndarray], out_dir: str, prefix: str
                 [pts2d[i][0], pts2d[i + 1][0]],
                 [pts2d[i][1], pts2d[i + 1][1]],
                 color=color,
-                linewidth=2,
+                linewidth=3,
                 alpha=0.8,
             )
 
@@ -119,23 +119,27 @@ def save_visualizations(sim, points: list[np.ndarray], out_dir: str, prefix: str
                 [zs[i], zs[i + 1]],
                 [ys[i], ys[i + 1]],
                 color=color,
-                linewidth=1.5,
+                linewidth=2,
                 alpha=0.7,
             )
 
         # Mark start and end
         ax.scatter(
-            [xs[0]], [zs[0]], [ys[0]], color="green", s=100, label="Start", zorder=10
+            [xs[0]], [zs[0]], [ys[0]], color="Blue", s=100, zorder=10
         )
         ax.scatter(
-            [xs[-1]], [zs[-1]], [ys[-1]], color="red", s=100, label="End", zorder=10
+            [xs[-1]], [zs[-1]], [ys[-1]], color="Red", s=100, zorder=10
         )
-        ax.legend()
+        ax.text(xs[0]-0.1, zs[0], ys[0]-0.1, "  Start", fontsize=14, color="Blue", weight="bold")
+        ax.text(xs[-1]+0.1, zs[-1]-0.1, ys[-1], "  End", fontsize=14, color="Red", weight="bold")
 
-    ax.set_xlabel("X")
-    ax.set_ylabel("Z")
-    ax.set_zlabel("Y")
-    ax.set_title("3D Trajectory Path")
+    ax.set_xlabel("X", fontsize=18)
+    ax.set_ylabel("Z", fontsize=18)
+    ax.set_zlabel("Y", fontsize=18)
+
+    ax.tick_params(axis="x", labelsize=16)
+    ax.tick_params(axis="y", labelsize=16)
+    ax.tick_params(axis="z", labelsize=16)
     fig.savefig(os.path.join(out_dir, f"{prefix}_3d.png"), bbox_inches="tight", dpi=150)
     plt.close(fig)
 

@@ -30,7 +30,7 @@ from f3.utils import (
     log_dict,
     get_random_crop_params,
     batch_cropper,
-    ev_to_frames,
+    unnormalize_events,
 )
 from f3.tasks.depth.utils import (
     EventFFDepthAnythingV2,
@@ -42,6 +42,45 @@ from f3.tasks.depth.utils import (
 
 # Import from neurosim
 from neurosim.sims.online_dataloader import OnlineDataLoader, DatasetConfig
+
+
+def ev_to_frames_with_polarity(events, counts, w, h):
+    """
+    Converts events to RGB frames with polarity-based coloring.
+    Positive polarity (1) = Red, Negative polarity (0) = Blue
+
+    events: (N, 4) where events[:, 3] is polarity (0 or 1)
+    counts: (B,) event counts per batch
+
+    Returns: (B, H, W, 3) RGB tensor (uint8)
+    """
+    if events.max() <= 1.0:
+        events = unnormalize_events(events, (w, h, 1, 1))
+
+    B = counts.shape[0]
+
+    if isinstance(events, torch.Tensor):
+        event_frames = torch.zeros(B, h, w, 3, dtype=torch.uint8).to(events.device)
+        c = torch.cumsum(torch.cat((torch.zeros(1).to(counts.device), counts)), 0).to(
+            torch.int32
+        )
+    elif isinstance(events, np.ndarray):
+        event_frames = np.zeros((B, h, w, 3), dtype=np.uint8)
+        c = np.cumsum(np.concatenate((np.zeros(1), counts))).astype(np.int32)
+
+    for i in range(B):
+        x_coords = events[c[i] : c[i + 1], 0]
+        y_coords = events[c[i] : c[i + 1], 1]
+        polarities = events[c[i] : c[i + 1], 3]
+
+        # Positive polarity (1) -> Red (255, 0, 0)
+        # Negative polarity (0) -> Blue (0, 0, 255)
+        pos_mask = polarities == 1
+        neg_mask = polarities == 0
+        event_frames[i, y_coords[pos_mask], x_coords[pos_mask], 0] = 255  # Red channel
+        event_frames[i, y_coords[neg_mask], x_coords[neg_mask], 2] = 255  # Blue channel
+
+    return event_frames
 
 
 def setup_experiment(
@@ -76,7 +115,7 @@ def process_batch(
     batch: dict,
     args: argparse.Namespace,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray | None]:
     """
     Process a batch from the OnlineDataLoader.
 
@@ -85,6 +124,7 @@ def process_batch(
         - counts: (B,) array of event counts per sample
         - events: (N_total, 4) array of events [x, y, t, p]
     - Depth sensor: (B, H, W) depth images
+    - Color camera: (B, H, W, 3) RGB images
 
     Events are assumed to already be normalized by the simulator.
 
@@ -94,10 +134,11 @@ def process_batch(
         device: Target device
 
     Returns:
-        (ff_events, event_counts, disparity, src_ofst_res)
+        (ff_events, event_counts, disparity, color_images)
     """
     event_sensor = args.event_sensor
     depth_sensor = args.depth_sensor
+    color_sensor = args.color_sensor
 
     # Get event data
     if event_sensor not in batch:
@@ -106,10 +147,6 @@ def process_batch(
         )
 
     counts, events = batch[event_sensor]
-
-    # Remove polarity if not using it
-    if not args.polarity[0]:
-        events = events[..., :3]  # (N, 3) - [x, y, t]
 
     # Convert to torch tensors
     ff_events = torch.from_numpy(events).float().to(device)  # (N, 4)
@@ -126,14 +163,22 @@ def process_batch(
 
     # Convert depth to disparity (inverse depth)
     # Avoid division by zero
-    # TODO: add min disparity
-    depth = np.clip(depth, 0.5 / args.max_disparity, 20.0)
+    depth = np.clip(
+        depth, 0.5 / args.max_disparity, 1 / args.min_disparity
+    )  # (B, H, W)
     disparity = (
         1.0 / depth
     )  # Convert to disparity 0.05 -> 2 * max_disparity, just for safety
     disparity = torch.from_numpy(disparity).float().to(device)  # (B, H, W)
 
-    return ff_events, event_counts, disparity
+    # Get color camera data
+    color_images = (
+        batch[color_sensor].astype(np.uint8) # (B, H, W, 3)
+        if color_sensor
+        else None
+    )
+
+    return ff_events, event_counts, disparity, color_images
 
 
 def train_epoch(
@@ -177,73 +222,68 @@ def train_epoch(
         if idx >= max_batches:
             break
 
-        try:
-            # Process batch
-            ff_events, event_counts, disparity = process_batch(
-                batch, args, torch.device("cuda")
+        # Process batch
+        ff_events, event_counts, disparity, _ = process_batch(
+            batch, args, torch.device("cuda")
+        )
+
+        B, H, W = disparity.shape
+        cparams = get_random_crop_params((H, W), (H, H), batch_size=B).to(
+            ff_events.device
+        )
+        disparity = batch_cropper(disparity.unsqueeze(1), cparams).squeeze(1)
+
+        # Forward pass with AMP
+        with torch.autocast(
+            device_type="cuda", enabled=args.amp, dtype=torch.bfloat16
+        ):
+            disparity_pred = model(ff_events, event_counts, cparams)[0]  # (B, H, W)
+
+            # Mask invalid disparities
+            disparity_valid_mask = disparity < args.max_disparity
+
+            if (
+                disparity_valid_mask.sum() < W * H / 2
+            ):  # at least half of the disparities need to be valid
+                continue
+
+            loss = loss_fn(disparity_pred, disparity, disparity_valid_mask)
+            loss = loss / iters_to_accumulate
+
+        # Backward pass with GradScaler
+        scaler.scale(loss).backward()
+
+        train_loss += loss.item()
+        iter_loss += loss.item()
+
+        # Gradient accumulation step
+        if (idx + 1) % iters_to_accumulate == 0:
+            # Unscale before clipping when using AMP
+            if args.clip_grad > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+
+            # Optimizer step via scaler
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+            pbar.set_postfix(
+                {
+                    "loss": f"{iter_loss:.4f}",
+                    "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                }
             )
-
-            B, H, W = disparity.shape
-            cparams = get_random_crop_params((H, W), (H, H), batch_size=B).to(
-                ff_events.device
-            )
-            disparity = batch_cropper(disparity.unsqueeze(1), cparams).squeeze(1)
-
-            # Forward pass with AMP
-            with torch.autocast(
-                device_type="cuda", enabled=args.amp, dtype=torch.bfloat16
-            ):
-                disparity_pred = model(ff_events, event_counts, cparams)[0]  # (B, H, W)
-
-                # Mask invalid disparities
-                disparity_valid_mask = disparity < args.max_disparity
-
-                if (
-                    disparity_valid_mask.sum() < W * H / 2
-                ):  # at least half of the disparities need to be valid
-                    continue
-
-                loss = loss_fn(disparity_pred, disparity, disparity_valid_mask)
-                loss = loss / iters_to_accumulate
-
-            # Backward pass with GradScaler
-            scaler.scale(loss).backward()
-
-            train_loss += loss.item()
-            iter_loss += loss.item()
-
-            # Gradient accumulation step
-            if (idx + 1) % iters_to_accumulate == 0:
-                # Unscale before clipping when using AMP
-                if args.clip_grad > 0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
-
-                # Optimizer step via scaler
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-
-                pbar.set_postfix(
+            if args.wandb:
+                wandb.log(
                     {
-                        "loss": f"{iter_loss:.4f}",
-                        "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                        "train_iter_loss": iter_loss,
+                        "train_lr": scheduler.get_last_lr()[0],
+                        "epoch": epoch,
+                        "iteration": idx,
                     }
                 )
-                if args.wandb:
-                    wandb.log(
-                        {
-                            "train_iter_loss": iter_loss,
-                            "train_lr": scheduler.get_last_lr()[0],
-                            "epoch": epoch,
-                            "iteration": idx,
-                        }
-                    )
-                iter_loss = 0.0
-
-        except Exception as e:
-            logger.warning(f"Error processing batch {idx}: {e}")
-            continue
+            iter_loss = 0.0
 
     # Normalize loss
     num_iters = (idx + 1) // iters_to_accumulate
@@ -302,76 +342,82 @@ def validate(
         if idx >= max_batches:
             break
 
-        try:
-            ff_events, event_counts, disparity = process_batch(
-                batch, args, torch.device("cuda")
-            )
+        ff_events, event_counts, disparity, color_images = process_batch(
+            batch, args, torch.device("cuda")
+        )
 
-            B, H, W = disparity.shape
+        B, H, W = disparity.shape
 
-            # Crop parameters. Center crop to square.
-            # TODO: Handle non-square images better. This is an issue in F3 codebase
-            crop_params = torch.tensor(
-                [[0, (W - H) // 2, H, (W + H) // 2]],
-                dtype=torch.int32,
-                device=ff_events.device,
-            ).repeat(B, 1)
+        # Crop parameters. Center crop to square.
+        # TODO: Handle non-square images better. This is an issue in F3 codebase
+        crop_params = torch.tensor(
+            [[0, (W - H) // 2, H, (W + H) // 2]],
+            dtype=torch.int32,
+            device=ff_events.device,
+        ).repeat(B, 1)
 
-            # Apply cropping
-            disparity = batch_cropper(disparity.unsqueeze(1), crop_params).squeeze(1)
+        # Apply cropping
+        disparity = batch_cropper(disparity.unsqueeze(1), crop_params).squeeze(1)
 
-            # Inference
-            disparity_pred = model(ff_events, event_counts, crop_params)[0]  # (B, H, H)
+        # Inference
+        disparity_pred = model(ff_events, event_counts, crop_params)[0]  # (B, H, H)
 
-            valid_mask = disparity < args.max_disparity
-            if (
-                valid_mask.sum() < W * H / 2
-            ):  # at least half of the disparities need to be valid
-                continue
-
-            # Evaluate
-            cur_results = eval_disparity(
-                disparity_pred[valid_mask], disparity[valid_mask]
-            )
-
-            for k in cur_results:
-                results[k] += cur_results[k]
-
-            results[loss_fn.name] += loss_fn(
-                disparity_pred, disparity, valid_mask
-            ).item()
-            nsamples += 1
-
-            # Save visualizations
-            if idx % 10 == 0 and save_preds:
-                base_path = f"outputs/monoculardepth/{args.name}"
-
-                event_frames = ev_to_frames(ff_events, event_counts, W, H).cpu().numpy()
-
-                for i in range(disparity_pred.shape[0]):
-                    disp_img = get_disparity_image(disparity[i], valid_mask[i], cmap)
-                    pred_img = get_disparity_image(
-                        disparity_pred[i],
-                        torch.ones_like(disparity_pred[i], dtype=torch.bool),
-                        cmap,
-                    )
-
-                    cv2.imwrite(
-                        f"{base_path}/training_events/disparity_{epoch}_{idx}_{i}.png",
-                        disp_img,
-                    )
-                    cv2.imwrite(
-                        f"{base_path}/predictions/disparity_pred_{epoch}_{idx}_{i}.png",
-                        pred_img,
-                    )
-                    cv2.imwrite(
-                        f"{base_path}/training_events/events_{epoch}_{idx}_{i}.png",
-                        event_frames[i].T,
-                    )
-
-        except Exception as e:
-            logger.warning(f"Validation error on batch {idx}: {e}")
+        valid_mask = disparity < args.max_disparity
+        if (
+            valid_mask.sum() < W * H / 2
+        ):  # at least half of the disparities need to be valid
             continue
+
+        # Evaluate
+        cur_results = eval_disparity(
+            disparity_pred[valid_mask], disparity[valid_mask]
+        )
+
+        for k in cur_results:
+            results[k] += cur_results[k]
+
+        results[loss_fn.name] += loss_fn(
+            disparity_pred, disparity, valid_mask
+        ).item()
+        nsamples += 1
+
+        # Save visualizations
+        if idx % 10 == 0 and save_preds:
+            base_path = f"outputs/monoculardepth/{args.name}"
+
+            # Create event visualizations with polarity coloring
+            event_frames_polarity = (
+                ev_to_frames_with_polarity(ff_events, event_counts, W, H)
+                .cpu()
+                .numpy()
+            )  # (B, H, W, 3)
+
+            for i in range(disparity_pred.shape[0]):
+                disp_img = get_disparity_image(disparity[i], valid_mask[i], cmap)
+                pred_img = get_disparity_image(
+                    disparity_pred[i],
+                    torch.ones_like(disparity_pred[i], dtype=torch.bool),
+                    cmap,
+                )
+
+                cv2.imwrite(
+                    f"{base_path}/training_events/disparity_{epoch}_{idx}_{i}.png",
+                    disp_img,
+                )
+                cv2.imwrite(
+                    f"{base_path}/predictions/disparity_pred_{epoch}_{idx}_{i}.png",
+                    pred_img,
+                )
+                cv2.imwrite(
+                    f"{base_path}/training_events/events_{epoch}_{idx}_{i}.png",
+                    event_frames_polarity[i],
+                )
+
+                if color_images is not None:
+                    cv2.imwrite(
+                        f"{base_path}/training_events/color_{epoch}_{idx}_{i}.png",
+                        cv2.cvtColor(color_images[i], cv2.COLOR_RGB2BGR),
+                    )
 
     # Average results
     for k in results:
@@ -449,6 +495,7 @@ def main():
     dl_conf = conf["dataloader"]
     args.event_sensor = dl_conf["event_sensor"]
     args.depth_sensor = dl_conf["depth_sensor"]
+    args.color_sensor = dl_conf.get("color_sensor", None)
 
     # Setup PyTorch and create experiment directories
     setup_torch(cudnn_benchmark=True)
@@ -595,10 +642,11 @@ def main():
     dataset_config = DatasetConfig.from_yaml(dataset_config_path)
 
     # Configure sensors and batch sizes
-    sensor_uuids = [args.event_sensor, args.depth_sensor]
+    sensor_uuids = [args.event_sensor, args.depth_sensor, args.color_sensor]
     sensor_batch_sizes = {
         sensor_uuids[0]: args.train["mini_batch"],
         sensor_uuids[1]: args.train["mini_batch"],
+        sensor_uuids[2]: args.train["mini_batch"],
     }
 
     # Create dataloader (starts subscriber process automatically)
@@ -622,6 +670,7 @@ def main():
 
     logger.info(f"  Event sensor: {dl_conf['event_sensor']}")
     logger.info(f"  Depth sensor: {dl_conf['depth_sensor']}")
+    logger.info(f"  Color sensor: {args.color_sensor}")
     logger.info(f"  Mini batch size: {args.train['mini_batch']}")
 
     # ═══════════════════════════════════════════════════════════════════════════════

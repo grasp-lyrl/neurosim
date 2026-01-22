@@ -6,16 +6,16 @@
 
 ## 📋 Table of Contents
 
-- [Installation](#🚀-installation)
+- [Installation](#installation)
   - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
   - [Option 2: Conda](#option-2-conda)
-- [Usage](#🎯-usage)
+- [Usage](#usage)
 - [Troubleshooting](#-troubleshooting)
 
 ---
 
 
-## 🚀 Installation
+## Installation
 
 ### Option 1: Docker (Recommended)
 
@@ -103,7 +103,7 @@ pip install -e . -v
 
 ---
 
-## 🎯 Usage
+## Usage
 
 ### Download Example Data
 
@@ -135,4 +135,4 @@ This project is enabled by the following amazing open-source projects:
 - [ZeroMQ](https://zeromq.org)
 - [RotorPy](https://github.com/spencerfolk/rotorpy)
 
-Picture credits: @ongdexter, Gemini 3
+Picture credits: [@ongdexter](https://dexterong.com/), Gemini 3
