@@ -124,14 +124,26 @@ def save_visualizations(sim, points: list[np.ndarray], out_dir: str, prefix: str
             )
 
         # Mark start and end
-        ax.scatter(
-            [xs[0]], [zs[0]], [ys[0]], color="Blue", s=100, zorder=10
+        ax.scatter([xs[0]], [zs[0]], [ys[0]], color="Blue", s=100, zorder=10)
+        ax.scatter([xs[-1]], [zs[-1]], [ys[-1]], color="Red", s=100, zorder=10)
+        ax.text(
+            xs[0] - 0.1,
+            zs[0],
+            ys[0] - 0.1,
+            "  Start",
+            fontsize=14,
+            color="Blue",
+            weight="bold",
         )
-        ax.scatter(
-            [xs[-1]], [zs[-1]], [ys[-1]], color="Red", s=100, zorder=10
+        ax.text(
+            xs[-1] + 0.1,
+            zs[-1] - 0.1,
+            ys[-1],
+            "  End",
+            fontsize=14,
+            color="Red",
+            weight="bold",
         )
-        ax.text(xs[0]-0.1, zs[0], ys[0]-0.1, "  Start", fontsize=14, color="Blue", weight="bold")
-        ax.text(xs[-1]+0.1, zs[-1]-0.1, ys[-1], "  End", fontsize=14, color="Red", weight="bold")
 
     ax.set_xlabel("X", fontsize=18)
     ax.set_ylabel("Z", fontsize=18)

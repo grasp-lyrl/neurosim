@@ -296,6 +296,8 @@ class RerunVisualizer:
                 rotation=rr.Quaternion(xyzw=state["q"]),
                 relation=rr.TransformRelation.ParentFromChild,
             ),
-            rr.TransformAxes3D(1.0),  # Separate archetype for axis visualization in 0.28.1+
+            rr.TransformAxes3D(
+                1.0
+            ),  # Separate archetype for axis visualization in 0.28.1+
         )
         rr.log("navigation/trajectory", rr.Points3D(positions=state["x"][None, :]))

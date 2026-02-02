@@ -185,7 +185,7 @@ def calculate_smooth_yaw(points: np.ndarray, lookahead_dist: float = 1.0) -> np.
                 yaw_angles[i] = 0.0
         else:
             # Habitat convention: yaw=0 is +Z, so atan2(x, z)
-            yaw_angles[i] = np.atan2(-direction[0], direction[2])
+            yaw_angles[i] = np.arctan2(-direction[0], direction[2])
 
     return np.unwrap(yaw_angles)
 
