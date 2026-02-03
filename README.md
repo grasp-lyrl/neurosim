@@ -4,7 +4,7 @@
 
 > Blazing fast multirotor simulator with event camera support. Pythonic and real-time.
 
-<div style="text-align: center;">
+<div align="center">
   <img src="assets/neurosim.gif" width="80%">
 </div>
 
