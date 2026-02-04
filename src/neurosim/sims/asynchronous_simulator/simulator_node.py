@@ -186,7 +186,9 @@ class SimulatorNode(ZMQNODE):
                     sensor_type=sensor_type,
                     sensor=sensor,
                     state_provider=lambda: self.dynamics.state,  # Lazy evaluation
-                    statedot_provider=lambda: self.dynamics.statedot(),  # Lazy evaluation
+                    statedot_provider=lambda: (
+                        self.dynamics.statedot()
+                    ),  # Lazy evaluation
                 )
             else:
                 raise ValueError(f"Unsupported additional sensor type: {sensor_type}")
