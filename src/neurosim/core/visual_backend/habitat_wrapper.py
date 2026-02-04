@@ -17,11 +17,12 @@ import habitat_sim as hsim
 
 from neurosim.core.utils import color2intensity, RECOLOR_MAP, outline_border
 from neurosim.core.event_sim import create_event_simulator, EventSimulatorProtocol
+from neurosim.core.visual_backend.base import VisualBackendProtocol
 
 logger = logging.getLogger(__name__)
 
 
-class HabitatWrapper:
+class HabitatWrapper(VisualBackendProtocol):
     """Wrapper around Habitat simulator with event camera support.
 
     Args:

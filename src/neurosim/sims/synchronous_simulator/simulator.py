@@ -12,7 +12,7 @@ import numpy as np
 from pathlib import Path
 from typing import Callable, Any
 
-from neurosim.core.visual_backend import HabitatWrapper
+from neurosim.core.visual_backend import create_visual_backend
 from neurosim.core.dynamics import create_dynamics
 from neurosim.core.control import create_controller
 from neurosim.core.trajectory import create_trajectory
@@ -55,8 +55,8 @@ class SynchronousSimulator:
             visual_sensors=self.settings.get("visual_backend", {}).get("sensors", {}),
         )
 
-        # Initialize coordinate transform utility (hardcoded for now)
-        self.coord_trans = CoordinateTransform("rotorpy_to_habitat")
+        # Initialize coordinate transform utility from config
+        self.coord_trans = CoordinateTransform(self.config.coord_transform)
 
         ####################
         # Simulation state #
@@ -175,7 +175,7 @@ class SynchronousSimulator:
         return executor
 
     def _init_visual_backend(self) -> None:
-        self.visual_backend = HabitatWrapper(self.settings["visual_backend"])
+        self.visual_backend = create_visual_backend(self.settings["visual_backend"])
 
         # Bind executors for visual sensors
         for uuid, sensor_cfg in self.config.visual_sensors.items():
@@ -213,7 +213,8 @@ class SynchronousSimulator:
         # TODO: Ideally, we want to move on from habitat pathfinder to a more general navmesh handler
         # TODO: and path planner, say GCOPTER with Recast/Detour or similar.
         traj_kwargs = self.settings.get("trajectory", {}).copy()
-        traj_kwargs["pathfinder"] = self.visual_backend._sim.pathfinder
+        if hasattr(self.visual_backend, "_sim"):
+            traj_kwargs["pathfinder"] = self.visual_backend._sim.pathfinder
         traj_kwargs["coord_transform"] = self.coord_trans.inverse_transform_batch
         self.trajectory = create_trajectory(**traj_kwargs)
 

@@ -16,6 +16,7 @@ class SimulationConfig:
     world_rate: int
     control_rate: int
     sim_time: float
+    coord_transform: str = field(default="rotorpy_to_hm3d")
     sensor_rates: dict = field(default_factory=dict)
     viz_rates: dict = field(default_factory=dict)  # Optional visualization rates
     visual_sensors: dict = field(default_factory=dict)

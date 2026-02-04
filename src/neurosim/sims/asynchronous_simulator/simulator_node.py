@@ -19,7 +19,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from neurosim.cortex.utils import ZMQNODE
-from neurosim.core.visual_backend import HabitatWrapper
+from neurosim.core.visual_backend import create_visual_backend
 from neurosim.core.dynamics import create_dynamics
 from neurosim.core.imu_sim import create_imu_sensor
 from neurosim.core.coord_trans import CoordinateTransform
@@ -74,6 +74,7 @@ class SimulatorNode(ZMQNODE):
             world_rate=sim_cfg["world_rate"],
             control_rate=sim_cfg["control_rate"],  # sends state at control rate
             sim_time=sim_cfg["sim_time"],
+            coord_transform=sim_cfg.get("coord_transform", "rotorpy_to_hm3d"),
             sensor_rates=sim_cfg.get("sensor_rates", {}),
             viz_rates=sim_cfg.get("viz_rates", {}),  # Optional visualization rates
             visual_sensors=self.settings.get("visual_backend", {}).get("sensors", {}),
@@ -105,8 +106,8 @@ class SimulatorNode(ZMQNODE):
                 use_gpu=True,  # Keep events on GPU until publish time
             )
 
-        # Initialize coordinate transform (rotorpy to habitat)
-        self.coord_trans = CoordinateTransform("rotorpy_to_habitat")
+        # Initialize coordinate transform from config
+        self.coord_trans = CoordinateTransform(self.config.coord_transform)
 
         ######################################
         # Initialize backends and components #
@@ -137,8 +138,8 @@ class SimulatorNode(ZMQNODE):
         logger.info("═══════════════════════════════════════════════════════════")
 
     def _init_visual_backend(self) -> None:
-        """Initialize the visual backend (Habitat)."""
-        self.visual_backend = HabitatWrapper(self.settings["visual_backend"])
+        """Initialize the visual backend (Habitat or CARLA)."""
+        self.visual_backend = create_visual_backend(self.settings["visual_backend"])
 
         # Bind executors for visual sensors
         for uuid, sensor_cfg in self.config.visual_sensors.items():

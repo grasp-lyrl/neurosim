@@ -61,6 +61,7 @@ class ControllerNode(ZMQNODE):
         # Parse configuration
         sim_cfg = self.settings.get("simulator", {})
         self.control_rate = sim_cfg["control_rate"]
+        coord_transform = sim_cfg.get("coord_transform", "rotorpy_to_hm3d")
 
         # IPC addresses
         self.ipc_pub_addr = ipc_pub_addr
@@ -71,7 +72,7 @@ class ControllerNode(ZMQNODE):
         self.time = 0.0
 
         # Initialize coordinate transform for trajectory
-        self.coord_trans = CoordinateTransform("rotorpy_to_habitat")
+        self.coord_trans = CoordinateTransform(coord_transform)
 
         # TODO: Visual backend instantiation shouldn't be necessary here in the future.
         # TODO: Ideally, we want to move to a more general navmesh handler and path planner

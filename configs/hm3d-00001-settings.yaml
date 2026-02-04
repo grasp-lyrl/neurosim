@@ -3,6 +3,7 @@ simulator:
   world_rate: 1000 # Hz
   control_rate: 100 # Hz
   sim_time: 30 # seconds
+  coord_transform: "rotorpy_to_hm3d"
 
   additional_sensors:
     imu_1:

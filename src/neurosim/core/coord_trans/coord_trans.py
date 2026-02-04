@@ -6,19 +6,29 @@ class CoordinateTransform:
     def __init__(
         self,
         pos_transform: np.ndarray | str = np.eye(3),
-        quat_transform: np.ndarray = np.eye(4),
+        quat_transform: np.quaternion = np.quaternion(1, 0, 0, 0),
     ):
         """
         Initialize the coordinate transformation matrices.
         Args:
-            pos_transform: 3x3 matrix to transform position vectors, or string like "rotorpy_to_habitat"
-            quat_transform: 4x4 matrix to transform quaternion vectors
+            pos_transform: 3x3 matrix to transform position vectors, or string like "rotorpy_to_hm3d"
+            quat_transform: quaternion to transform incoming quaternions
         """
         if isinstance(pos_transform, str):
-            if pos_transform == "rotorpy_to_habitat":
+            if pos_transform == "rotorpy_to_hm3d":
                 self.pos_transform = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]])
                 self.quat_transform = np.array(
                     [[0, 0, 0, 1], [1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0]]
+                )
+            elif pos_transform == "rotorpy_to_replica":
+                self.pos_transform = np.eye(3, dtype=np.float32)
+                self.quat_transform = np.array(
+                    [
+                        [-0.7071067811865475, 0.0, 0.0, 0.7071067811865475],
+                        [0.7071067811865475, 0.0, 0.0, 0.7071067811865475],
+                        [0.0, 0.7071067811865475, 0.7071067811865475, 0.0],
+                        [0.0, -0.7071067811865475, 0.7071067811865475, 0.0],
+                    ]
                 )
             else:
                 raise ValueError(f"Unknown coordinate transform: {pos_transform}")
@@ -31,7 +41,7 @@ class CoordinateTransform:
         self.quat_transform_inv = np.linalg.inv(self.quat_transform)
 
     def transform(
-        self, position: np.ndarray, quaternion: np.quaternion
+        self, position: np.ndarray, quaternion: np.ndarray
     ) -> tuple[np.ndarray, np.quaternion]:
         """
         Convert from one coordinate system to another.
