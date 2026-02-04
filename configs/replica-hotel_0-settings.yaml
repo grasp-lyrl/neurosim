@@ -90,7 +90,6 @@ visual_backend:
     # navmesh_1:
     #   type: "navmesh"
     #   meters_per_pixel: 0.1  # Higher resolution for better detail
-      # height: 2.0  # Optional: height at which to render (defaults to scene bounds + 0.5)
 
 # Controller settings
 controller:
@@ -105,7 +104,7 @@ dynamics:
 # Trajectory settings
 trajectory:
   model: "habitat_random_minsnap"
-  seed: 325
+  seed: 100
   target_length: 30.0
   min_waypoint_distance: 2.0
   max_waypoints: 100

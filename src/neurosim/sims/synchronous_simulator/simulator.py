@@ -162,12 +162,11 @@ class SynchronousSimulator:
         elif sensor_type == "navmesh":
             backend = kwargs["backend"]
             meters_per_pixel = kwargs.get("meters_per_pixel", 0.1)
-            height = kwargs.get("height", None)
             # Pre-bind method
             render_navmesh = backend.render_navmesh
 
             def executor():
-                return render_navmesh(meters_per_pixel=meters_per_pixel, height=height)
+                return render_navmesh(meters_per_pixel=meters_per_pixel)
 
         else:
             raise ValueError(f"Unsupported sensor type: {sensor_type}")
