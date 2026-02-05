@@ -33,8 +33,14 @@ def create_visual_backend(settings: dict[str, Any]) -> VisualBackendProtocol:
     if backend_type == "habitat":
         from .habitat_wrapper import HabitatWrapper
 
-        logger.info("Creating Habitat visual backend (indoor scenes)")
+        logger.info("Creating Habitat visual backend")
         return HabitatWrapper(settings)
+
+    elif backend_type == "carla":
+        from .carla_wrapper import CarlaWrapper
+
+        logger.info("Creating CARLA visual backend")
+        return CarlaWrapper(settings)
 
     else:
         raise ValueError(f"Unknown visual backend type: '{backend_type}'. ")

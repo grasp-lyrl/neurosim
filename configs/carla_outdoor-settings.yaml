@@ -1,0 +1,130 @@
+# CARLA Outdoor Scene Settings for Neurosim
+# ==========================================
+# This configuration uses CARLA (Unreal Engine) for outdoor scene rendering.
+#
+# Prerequisites:
+#   1. CARLA simulator server must be running:
+#      ./CarlaUE4.sh -RenderOffScreen  (Linux)
+#      CarlaUE4.exe -RenderOffScreen   (Windows)
+#
+#   2. CARLA Python package installed:
+#      pip install carla
+#
+# Performance Notes:
+#   - CARLA uses client-server architecture
+#   - For 1000+ Hz, ensure server runs on same machine (localhost)
+#   - Use synchronous_mode: true for deterministic simulation
+#   - Disable no_rendering_mode for actual sensor data
+#
+# Available Maps: Town01, Town02, Town03, Town04, Town05, Town06, Town07,
+#                 Town10HD, Town11, Town12, Town13, Town15
+#
+# Weather Presets: ClearNoon, CloudyNoon, WetNoon, WetCloudyNoon,
+#                  SoftRainNoon, MidRainyNoon, HardRainNoon,
+#                  ClearSunset, CloudySunset, WetSunset, WetCloudySunset,
+#                  SoftRainSunset, MidRainSunset, HardRainSunset
+
+# Simulator Global Settings
+simulator:
+  world_rate: 1000 # Hz - target simulation rate
+  control_rate: 100 # Hz - control loop rate
+  sim_time: 100 # seconds
+  coord_transform: "rotorpy_to_hm3d"
+
+  additional_sensors:
+    imu_1:
+      type: "imu"
+      model: "rotorpy"
+      sampling_rate: 50  # Hz
+
+  sensor_rates:
+    imu_1: 50  # Hz
+    event_camera_1: 1000 # Hz - high-frequency event accumulation
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
+
+  viz_rates:
+    imu_1: 50
+    event_camera_1: 20
+    color_camera_1: 20
+    depth_camera_1: 20
+
+# Visual Backend Settings - CARLA Configuration
+visual_backend:
+  # Backend type: "habitat" (indoor) or "carla" (outdoor)
+  backend_type: "carla"
+
+  # CARLA server connection
+  host: "localhost"
+  port: 2000
+  timeout: 20.0
+
+  # Simulation mode settings
+  synchronous_mode: true # Required for deterministic high-rate simulation
+  fixed_delta_seconds: 0.001 # 100 Hz simulation rate
+  no_rendering_mode: false # Must be false to get sensor data
+
+  # Map/World selection
+  # Options: Town01-Town15, or custom imported maps
+  map: "/Game/Carla/Maps/Town10HD_Opt"
+
+  # Weather preset
+  weather: "ClearNoon"
+
+  # Initial spawn position [x, y, z] in CARLA world coordinates
+  # Town01 example: near the center of town
+  spawn_point: [0.0, 0.0, 50.0] # Start 50m above ground for aerial sim
+  spawn_rotation: [-45.0, 0.0, 0.0] # Looking down at 45 degrees
+
+  # Agent parameters (used for coordinate transforms)
+  agent_height: 0.0 # For aerial: 0, for ground: ~1.5
+
+  # Sensor definitions
+  sensors:
+    event_camera_1:
+      type: "event"
+      position: [0.0, 0.0, 0.0] # Relative to agent
+      rotation: [0.0, 0.0, 0.0] # [pitch, yaw, roll] in degrees
+      width: 640
+      height: 480
+      fov: 90
+      backend: "cuda" # Event simulator backend
+      contrast_threshold_neg: 0.35
+      contrast_threshold_pos: 0.35
+
+    color_camera_1:
+      type: "color"
+      position: [0.0, 0.0, 0.0]
+      rotation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      fov: 90
+
+    depth_camera_1:
+      type: "depth"
+      position: [0.0, 0.0, 0.0]
+      rotation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      fov: 90
+
+# Controller settings (same as indoor config)
+controller:
+  model: "rotorpy_se3"
+  vehicle: "crazyflie"
+
+# Dynamics settings
+dynamics:
+  model: "rotorpy_multirotor_euler"
+  vehicle: "crazyflie"
+
+# Trajectory settings for outdoor flight
+trajectory:
+  model: "polynomial"
+  points:
+    - [0.0, 0.0, 2.0] # Start hovering at 50m
+    - [100.0, 0.0, 2.0] # Move 100m forward
+    - [100.0, 100.0, 5.0] # Move to corner, descend
+    - [0.0, 100.0, 2.0] # Return path
+    - [0.0, 0.0, 2.0] # Back to start
+  v_avg: 10.0 # m/s average speed
