@@ -358,6 +358,16 @@ class HabitatWrapper(VisualBackendProtocol):
         sensor.draw_observation()
         return sensor.get_observation()[..., :3]
 
+    def render_semantic(self, uuid: str) -> torch.Tensor:
+        """Render the semantic sensor.
+
+        Returns:
+            Semantic image tensor.
+        """
+        sensor = self._sim._sensors[uuid]
+        sensor.draw_observation()
+        return sensor.get_observation()
+
     def render_depth(self, uuid: str) -> torch.Tensor:
         """Render the depth sensor.
 
@@ -396,8 +406,6 @@ class HabitatWrapper(VisualBackendProtocol):
         # Convert 3D position to 2D navmesh coordinates
         px = int((position_3d[0] - self._scene_bounds[0][0]) / meters_per_pixel)
         py = int((position_3d[2] - self._scene_bounds[0][2]) / meters_per_pixel)
-
-        print(px, py, navmesh_rgb.shape)
 
         # Draw agent position as red circle
         cv2.circle(navmesh_rgb, (px, py), radius=2, color=(255, 0, 0), thickness=-1)

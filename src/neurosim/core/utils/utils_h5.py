@@ -33,6 +33,7 @@ class H5Logger:
         "color": 50,
         "depth": 50,
         "semantic": 50,
+        "navmesh": 50,
         "imu": 100,
         "state": 100,
     }
@@ -43,14 +44,13 @@ class H5Logger:
         "color": 100,  # Medium chunks for images
         "depth": 100,
         "semantic": 100,
+        "navmesh": 100,
         "imu": 1000,  # Small chunks for IMU data
         "state": 1000,  # Small chunks for state data
         "metadata": 1000,  # Small chunks for metadata (sim_time, sim_step)
     }
 
-    IGNORED_SENSOR_TYPES = {
-        "navmesh",
-    }
+    IGNORED_SENSOR_TYPES = set()
 
     def __init__(
         self,
@@ -143,7 +143,7 @@ class H5Logger:
                     H5Logger.CHUNK_SIZES["event"],
                     compression,
                 )
-            elif stype in ["color", "depth", "semantic"]:
+            elif stype in ["color", "depth", "semantic", "navmesh"]:
                 H5Logger._write_images(
                     grp,
                     buf["data"],

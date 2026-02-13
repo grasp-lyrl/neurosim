@@ -140,6 +140,15 @@ class SynchronousSimulator:
             def executor():
                 return render_color(uuid)
 
+        elif sensor_type == "semantic":
+            backend = kwargs["backend"]
+            uuid = kwargs["uuid"]
+            # Pre-bind method
+            render_semantic = backend.render_semantic
+
+            def executor():
+                return render_semantic(uuid)
+
         elif sensor_type == "depth":
             backend = kwargs["backend"]
             uuid = kwargs["uuid"]

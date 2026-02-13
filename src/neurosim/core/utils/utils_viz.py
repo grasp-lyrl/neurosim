@@ -269,6 +269,12 @@ class RerunVisualizer:
                     measurement = measurement.cpu().numpy()
                 rr.log(f"sensors/{uuid}/color", rr.Image(measurement))
 
+            elif sensor_type == "semantic":
+                # Transfer from GPU only for visualization
+                if hasattr(measurement, "cpu"):
+                    measurement = measurement.cpu().numpy()
+                rr.log(f"sensors/{uuid}/semantic", rr.Image(measurement))
+
             elif sensor_type == "depth":
                 # Transfer from GPU only for visualization
                 if hasattr(measurement, "cpu"):
