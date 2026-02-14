@@ -292,6 +292,7 @@ class SynchronousSimulator:
         self,
         display: bool = False,
         log_h5: str | None = None,
+        log_rrd: str | None = None,
         callback_hook_: Callable | None = None,
     ) -> dict:
         """
@@ -300,6 +301,7 @@ class SynchronousSimulator:
         Args:
             display: Whether to display live visualization with Rerun
             log_h5: Path to HDF5 file for logging. If None, no logging.
+            log_rrd: Path to Rerun .rrd file for recording. If None, no recording saved.
             callback_hook_: Optional callback function called at each step with
                          (measurements, state, time, simsteps) as arguments.
                          Allows custom logic injection (e.g., publishing data).
@@ -308,13 +310,13 @@ class SynchronousSimulator:
             Dictionary with simulation statistics
         """
         # Setup visualization
-        if display:
+        if display or log_rrd:
             if self.visualizer is None:
                 raise RuntimeError(
-                    "Visualizer is not initialized. Cannot display simulation."
+                    "Visualizer is not initialized. Cannot display simulation or save recording."
                     "Initialize simulator with visualizer enabled."
                 )
-            self.visualizer.initialize()
+            self.visualizer.initialize(rrd_path=log_rrd)
 
         # Setup H5 logger
         h5_logger = None

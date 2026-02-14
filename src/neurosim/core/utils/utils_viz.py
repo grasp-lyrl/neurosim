@@ -212,13 +212,26 @@ class RerunVisualizer:
         )
         logger.info("═══════════════════════════════════════════════════════════")
 
-    def initialize(self, memory_limit: str = "10%") -> None:
-        """Initialize Rerun recording."""
+    def initialize(
+        self, memory_limit: str = "10%", rrd_path: str | None = None
+    ) -> None:
+        """Initialize Rerun recording.
+
+        Args:
+            memory_limit: Memory limit for the viewer (default: "10%")
+            rrd_path: Optional path to save the recording to an .rrd file
+        """
         if not HAS_RERUN:
             raise ImportError("Rerun package is not installed.")
 
         rr.init("neurosim")
         rr.spawn(memory_limit=memory_limit)
+
+        # Save to rrd file if path is provided
+        if rrd_path:
+            rr.save(rrd_path)
+            logger.info(f"💾 Recording will be saved to: {rrd_path}")
+
         self.enabled = True
         logger.info("═══════════════════════════════════════════════════════════")
         logger.info("🎬 RerunVisualizer started")

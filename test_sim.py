@@ -15,6 +15,9 @@ parser.add_argument(
     "--log-h5", type=str, default=None, help="Path to HDF5 file for logging data"
 )
 parser.add_argument(
+    "--log-rrd", type=str, default=None, help="Path to Rerun .rrd file for recording"
+)
+parser.add_argument(
     "--verbose", "-v", action="store_true", help="Enable verbose (DEBUG) logging"
 )
 args = parser.parse_args()
@@ -33,7 +36,7 @@ def main():
 
     settings_path = Path(args.settings)
     sim = SynchronousSimulator(settings_path)
-    sim.run(display=args.display, log_h5=args.log_h5)
+    sim.run(display=args.display, log_h5=args.log_h5, log_rrd=args.log_rrd)
 
 
 if __name__ == "__main__":
