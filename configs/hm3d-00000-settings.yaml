@@ -64,8 +64,8 @@ visual_backend:
       hfov: 90
       zfar: 1000.0
       backend: "cuda"
-      contrast_threshold_neg: 0.35
-      contrast_threshold_pos: 0.35
+      contrast_threshold_neg: 0.15
+      contrast_threshold_pos: 0.15
       anti_aliasing: 8
 
     color_camera_1:
@@ -90,7 +90,6 @@ visual_backend:
     # navmesh_1:
     #   type: "navmesh"
     #   meters_per_pixel: 0.1  # Higher resolution for better detail
-      # height: 2.0  # Optional: height at which to render (defaults to scene bounds + 0.5)
 
 # Controller settings
 controller:

@@ -316,7 +316,7 @@ class SynchronousSimulator:
                     "Visualizer is not initialized. Cannot display simulation or save recording."
                     "Initialize simulator with visualizer enabled."
                 )
-            self.visualizer.initialize(rrd_path=log_rrd)
+            self.visualizer.initialize(display=display, rrd_path=log_rrd)
 
         # Setup H5 logger
         h5_logger = None
@@ -330,7 +330,9 @@ class SynchronousSimulator:
             )
 
         # Run simulation loop
-        latencies = self._run_simulation_loop(display, h5_logger, callback_hook_)
+        latencies = self._run_simulation_loop(
+            display or log_rrd, h5_logger, callback_hook_
+        )
 
         # Close H5 logger
         if h5_logger:
@@ -347,7 +349,7 @@ class SynchronousSimulator:
 
     def _run_simulation_loop(
         self,
-        display: bool,
+        rerun_logger: bool,
         h5_logger: H5Logger | None = None,
         callback_hook_: Callable | None = None,
     ) -> list[float]:
@@ -404,7 +406,7 @@ class SynchronousSimulator:
                     )
 
                 # Display with Rerun
-                if display:
+                if rerun_logger:
                     self.visualizer.log_measurements(
                         measurements, self.time, self.simsteps
                     )

@@ -16,8 +16,8 @@ simulator:
   sensor_rates:
     imu_1: 50 # Hz
     event_camera_1: 1000 # Hz - high-frequency event accumulation
-    color_camera_1: 30 # Hz
-    depth_camera_1: 30 # Hz
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
     # navmesh_1: 10 # Hz
 
   # Visualization rates (optional) - how often to display sensor data
@@ -25,9 +25,9 @@ simulator:
   # If omitted, defaults to sampling_rate (display every sample)
   viz_rates:
     imu_1: 50 # Hz
-    event_camera_1: 30 # Hz - visualize every 5th accumulation
-    color_camera_1: 30 # Hz
-    depth_camera_1: 30 # Hz
+    event_camera_1: 20 # Hz - visualize every 5th accumulation
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
     # navmesh_1: 10 # Hz
 
 # Visual Backend Settings
@@ -50,7 +50,7 @@ visual_backend:
   enable_hbao: false
   frustum_culling: true
 
-  seed: 325
+  seed: 326
   physics_config_file: "data/default.physics_config.json"
   enable_physics: true # Replace with false if `built_with_bullet` is False
 
@@ -64,8 +64,8 @@ visual_backend:
       hfov: 90
       zfar: 1000.0
       backend: "cuda"
-      contrast_threshold_neg: 0.35
-      contrast_threshold_pos: 0.35
+      contrast_threshold_neg: 0.15
+      contrast_threshold_pos: 0.15
       anti_aliasing: 8
 
     color_camera_1:
@@ -90,7 +90,6 @@ visual_backend:
     # navmesh_1:
     #   type: "navmesh"
     #   meters_per_pixel: 0.1  # Higher resolution for better detail
-      # height: 2.0  # Optional: height at which to render (defaults to scene bounds + 0.5)
 
 # Controller settings
 controller:

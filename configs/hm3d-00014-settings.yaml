@@ -33,7 +33,7 @@ simulator:
 # Visual Backend Settings
 visual_backend:
   gpu_id: 0
-  scene: "data/scene_datasets/habitat-test-scenes/skokloster-castle.glb"
+  scene: "data/hm3d/00014-nYYcLpSzihC/nYYcLpSzihC.basis.glb"
   scene_dataset_config_file: "default"
   clear_color: [0.0, 0.0, 0.0, 1.0] # BLACK in RGBA (assuming mn.Color4.from_linear_rgb_int(0))
   default_agent: 0
@@ -50,7 +50,7 @@ visual_backend:
   enable_hbao: false
   frustum_culling: true
 
-  seed: 324
+  seed: 326
   physics_config_file: "data/default.physics_config.json"
   enable_physics: true # Replace with false if `built_with_bullet` is False
 

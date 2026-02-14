@@ -64,8 +64,8 @@ visual_backend:
       hfov: 90
       zfar: 20.0
       backend: "cuda"
-      contrast_threshold_neg: 0.35
-      contrast_threshold_pos: 0.35
+      contrast_threshold_neg: 0.15
+      contrast_threshold_pos: 0.15
       anti_aliasing: 8
 
     color_camera_1:
