@@ -5,6 +5,18 @@
 > Blazing fast multirotor simulator with event camera support. Pythonic and real-time.
 
 <div align="center">
+
+[Richeek Das](https://www.seas.upenn.edu/~richeek/), [Pratik Chaudhari](https://pratikac.github.io/)
+
+*GRASP Laboratory, University of Pennsylvania*
+
+[[📜 Paper](https://arxiv.org/abs/2602.15018)] • [[📖 BibTeX](#citation)]
+
+</div>
+
+**Quick Start:** If you only need a fast CUDA event simulator, we've made it standalone. Learn how to use our optimized event simulator at [grasp-lyrl/neurosim_cu_esim](https://github.com/grasp-lyrl/neurosim_cu_esim).
+
+<div align="center">
   <img src="assets/neurosim.gif" width="80%">
 </div>
 
@@ -130,9 +142,29 @@ python test_sim.py --settings configs/skokloster-castle-settings.yaml --display 
 - `pip==25.3` breaks installation due to changes in the build isolation process. Use `pip==25.1.1` as specified.
 
 
+## Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@misc{das2026neurosim,
+      title={Neurosim: A Fast Simulator for Neuromorphic Robot Perception}, 
+      author={Richeek Das and Pratik Chaudhari},
+      year={2026},
+      eprint={2602.15018},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2602.15018}, 
+}
+```
+
+## Issues
+
+Please report any bugs or feature requests on GitHub issues. Pull requests are very welcome!
+
 ## License
 
-This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
+Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgements
 
