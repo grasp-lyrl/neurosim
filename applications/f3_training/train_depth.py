@@ -15,6 +15,7 @@ import os
 import cv2
 import copy
 import yaml
+import time
 import torch
 import wandb
 import logging
@@ -216,16 +217,38 @@ def train_epoch(
     train_loss = 0.0
     iter_loss = 0.0
 
+    # Timer-based profiling accumulators
+    epoch_start_time = time.perf_counter()
+    prev_iter_end_time = None
+    total_events = 0
+    total_event_bytes = 0
+    total_data_wait_time = 0.0
+    total_batch_prep_time = 0.0
+    total_forward_time = 0.0
+    total_backward_time = 0.0
+    total_optimizer_time = 0.0
+    profiled_steps = 0
+
     pbar = tqdm(enumerate(dataloader), desc=f"Epoch {epoch}", total=max_batches)
 
     for idx, batch in pbar:
         if idx >= max_batches:
             break
 
+        iter_start_time = time.perf_counter()
+        if prev_iter_end_time is not None:
+            total_data_wait_time += max(0.0, iter_start_time - prev_iter_end_time)
+
         # Process batch
+        prep_t0 = time.perf_counter()
         ff_events, event_counts, disparity, _ = process_batch(
             batch, args, torch.device("cuda")
         )
+        total_batch_prep_time += time.perf_counter() - prep_t0
+
+        num_events = int(ff_events.shape[0])
+        total_events += num_events
+        total_event_bytes += num_events * ff_events.shape[1] * ff_events.element_size()
 
         B, H, W = disparity.shape
         cparams = get_random_crop_params((H, W), (H, H), batch_size=B).to(
@@ -234,6 +257,9 @@ def train_epoch(
         disparity = batch_cropper(disparity.unsqueeze(1), cparams).squeeze(1)
 
         # Forward pass with AMP
+        if args.profile_timers:
+            torch.cuda.synchronize()
+            fw_t0 = time.perf_counter()
         with torch.autocast(device_type="cuda", enabled=args.amp, dtype=torch.bfloat16):
             disparity_pred = model(ff_events, event_counts, cparams)[0]  # (B, H, W)
 
@@ -247,9 +273,19 @@ def train_epoch(
 
             loss = loss_fn(disparity_pred, disparity, disparity_valid_mask)
             loss = loss / iters_to_accumulate
+        if args.profile_timers:
+            torch.cuda.synchronize()
+            total_forward_time += time.perf_counter() - fw_t0
 
         # Backward pass with GradScaler
+        if args.profile_timers:
+            torch.cuda.synchronize()
+            bw_t0 = time.perf_counter()
         scaler.scale(loss).backward()
+        if args.profile_timers:
+            torch.cuda.synchronize()
+            total_backward_time += time.perf_counter() - bw_t0
+            profiled_steps += 1
 
         train_loss += loss.item()
         iter_loss += loss.item()
@@ -262,9 +298,15 @@ def train_epoch(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
 
             # Optimizer step via scaler
+            if args.profile_timers:
+                torch.cuda.synchronize()
+                opt_t0 = time.perf_counter()
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            if args.profile_timers:
+                torch.cuda.synchronize()
+                total_optimizer_time += time.perf_counter() - opt_t0
 
             pbar.set_postfix(
                 {
@@ -283,9 +325,74 @@ def train_epoch(
                 )
             iter_loss = 0.0
 
+        # Periodic profiling log
+        if args.profile_timers and (idx + 1) % args.profile_log_interval == 0:
+            elapsed = max(1e-6, time.perf_counter() - epoch_start_time)
+            events_per_sec = total_events / elapsed
+            bytes_per_event = (
+                ff_events.shape[1] * ff_events.element_size()
+            )  # usually 16B
+            mb_per_sec = events_per_sec * bytes_per_event / (1024**2)
+            gb_per_hour = mb_per_sec * 3600 / 1024
+            wait_frac = total_data_wait_time / elapsed
+            gpu_busy_frac = (
+                total_forward_time + total_backward_time + total_optimizer_time
+            ) / elapsed
+            logger.info(
+                "[PROFILE][Epoch %d][Batch %d] events/s=%.2fM, data_rate=%.2f MB/s, "
+                "disk_est=%.2f GB/hr, wait=%.1f%%, gpu_busy~=%.1f%%",
+                epoch,
+                idx + 1,
+                events_per_sec / 1e6,
+                mb_per_sec,
+                gb_per_hour,
+                100.0 * wait_frac,
+                100.0 * gpu_busy_frac,
+            )
+
+        prev_iter_end_time = time.perf_counter()
+
     # Normalize loss
     num_iters = (idx + 1) // iters_to_accumulate
     train_loss /= num_iters
+
+    # End-of-epoch profiling summary
+    if args.profile_timers:
+        elapsed = max(1e-6, time.perf_counter() - epoch_start_time)
+        events_per_sec = total_events / elapsed
+        bytes_per_event = (
+            (total_event_bytes / total_events) if total_events > 0 else 16.0
+        )
+        mb_per_sec = events_per_sec * bytes_per_event / (1024**2)
+        gb_per_hour = mb_per_sec * 3600 / 1024
+        wait_frac = total_data_wait_time / elapsed
+        gpu_busy_frac = (
+            total_forward_time + total_backward_time + total_optimizer_time
+        ) / elapsed
+
+        logger.info("[PROFILE][Epoch %d Summary]", epoch)
+        logger.info(
+            "[PROFILE] events=%d, elapsed=%.2fs, events/s=%.2fM",
+            total_events,
+            elapsed,
+            events_per_sec / 1e6,
+        )
+        logger.info(
+            "[PROFILE] bytes/event=%.1f, stream_rate=%.2f MB/s, disk_est=%.2f GB/hr",
+            bytes_per_event,
+            mb_per_sec,
+            gb_per_hour,
+        )
+        logger.info(
+            "[PROFILE] time_breakdown: dataloader_wait=%.1f%%, batch_prep=%.1f%%, "
+            "forward=%.1f%%, backward=%.1f%%, optimizer=%.1f%%, gpu_busy~=%.1f%%",
+            100.0 * wait_frac,
+            100.0 * (total_batch_prep_time / elapsed),
+            100.0 * (total_forward_time / elapsed),
+            100.0 * (total_backward_time / elapsed),
+            100.0 * (total_optimizer_time / elapsed),
+            100.0 * gpu_busy_frac,
+        )
 
     logger.info("#" * 50)
     logger.info(f"Training: Epoch: {epoch}, Loss: {train_loss:.4f}")
@@ -459,6 +566,17 @@ def get_args():
         "--amp",
         action="store_true",
         help="Enable mixed precision training (fp16) with GradScaler",
+    )
+    parser.add_argument(
+        "--profile-timers",
+        action="store_true",
+        help="Enable timer-based profiling logs (events/s, disk estimate, GPU/data wait)",
+    )
+    parser.add_argument(
+        "--profile-log-interval",
+        type=int,
+        default=20,
+        help="How often (in batches) to log profiling stats",
     )
 
     args = parser.parse_args()
