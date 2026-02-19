@@ -278,14 +278,16 @@ class HabitatWrapper(VisualBackendProtocol):
 
         # Pre-compute sensor local pose (position with agent_height, orientation)
         p_local = np.array(
-            sensor_cfg["position"]
+            sensor_cfg["position"], dtype=np.float32
         )  # (3,) local position relative to agent origin
 
         orientation = sensor_cfg["orientation"]
         if any(o != 0 for o in orientation):
-            R_local = Rotation.from_euler("XYZ", orientation).as_matrix()
+            R_local = (
+                Rotation.from_euler("XYZ", orientation).as_matrix().astype(np.float32)
+            )
         else:
-            R_local = np.eye(3)
+            R_local = np.eye(3, dtype=np.float32)
 
         self._flow_computers[sensor_name] = OpticalFlowComputer(
             width=sensor_cfg["width"],

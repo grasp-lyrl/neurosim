@@ -75,8 +75,8 @@ class OpticalFlowComputer:
         if sensor_local_pose is not None:
             self._p_local, self._R_local = sensor_local_pose
         else:
-            self._p_local = np.zeros(3, dtype=np.float64)
-            self._R_local = np.eye(3, dtype=np.float64)
+            self._p_local = np.zeros(3, dtype=np.float32)
+            self._R_local = np.eye(3, dtype=np.float32)
 
         self._prev_R_cam: np.ndarray | None = None
         self._prev_t_cam: np.ndarray | None = None
@@ -197,9 +197,14 @@ class OpticalFlowComputer:
                 dtype=torch.float32,
             )
 
-        # Compute relative transform: current -> previous
+        # Compute relative transform: current camera frame -> previous camera frame
+        # We want: P_prev_frame = R_rel @ P_curr_frame + t_rel
+        # Where P_curr_frame = R_cam.T @ (P_world - t_cam)
+        # And P_prev_frame = R_prev.T @ (P_world - t_prev)
+        # Substituting: R_prev.T @ (P_world - t_prev) = R_rel @ R_cam.T @ (P_world - t_cam) + t_rel
+        # Solving: R_rel = R_prev.T @ R_cam, t_rel = R_prev.T @ (t_cam - t_prev)
         R_rel = self._prev_R_cam.T @ R_cam
-        t_rel = self._prev_R_cam.T @ (t_cam - self._prev_t_cam)
+        t_rel = self._prev_R_cam.T @ (self._prev_t_cam - t_cam)
 
         R_rel_gpu = torch.from_numpy(R_rel.astype(np.float32)).to(self.device)
         t_rel_gpu = torch.from_numpy(t_rel.astype(np.float32)).to(self.device)
