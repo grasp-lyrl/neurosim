@@ -18,6 +18,7 @@ import habitat_sim as hsim
 from neurosim.core.utils import color2intensity, RECOLOR_MAP, outline_border
 from neurosim.core.event_sim import create_event_simulator, EventSimulatorProtocol
 from neurosim.core.visual_backend.base import VisualBackendProtocol
+from neurosim.core.visual_backend.optical_flow import OpticalFlowComputer
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,9 @@ class HabitatWrapper(VisualBackendProtocol):
 
         # Initialize event simulator container
         self._event_simulators: dict[str, EventSimulatorProtocol] = {}
+
+        # Initialize optical flow computers
+        self._flow_computers: dict[str, OpticalFlowComputer] = {}
 
         # Create Habitat configuration and fill in event simulators if any
         self._cfg = self._make_cfg()
@@ -243,6 +247,61 @@ class HabitatWrapper(VisualBackendProtocol):
 
         return color_sensor_spec, event_simulator
 
+    def _create_flow_sensor(
+        self, sensor_name: str, sensor_cfg: dict[str, Any]
+    ) -> hsim.CameraSensorSpec:
+        """Create an internal depth sensor for optical flow computation.
+
+        Similar to how event cameras create an internal color sensor, optical
+        flow sensors create an internal depth sensor and a GPUOpticalFlowComputer.
+
+        Args:
+            sensor_name: UUID for the sensor.
+            sensor_cfg: Configuration dictionary for the optical flow sensor.
+
+        Returns:
+            CameraSensorSpec for the internal depth sensor.
+        """
+        from scipy.spatial.transform import Rotation
+
+        # Create internal depth sensor spec
+        depth_sensor_spec = self._create_camera_spec(
+            uuid=sensor_name,
+            sensor_type="depth",
+            sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
+            resolution=(sensor_cfg["height"], sensor_cfg["width"]),
+            hfov=sensor_cfg["hfov"],
+            far=sensor_cfg["zfar"],
+            position=sensor_cfg["position"],
+            orientation=sensor_cfg["orientation"],
+        )
+
+        # Pre-compute sensor local pose (position with agent_height, orientation)
+        p_local = np.array(
+            sensor_cfg["position"]
+        )  # (3,) local position relative to agent origin
+
+        orientation = sensor_cfg["orientation"]
+        if any(o != 0 for o in orientation):
+            R_local = Rotation.from_euler("XYZ", orientation).as_matrix()
+        else:
+            R_local = np.eye(3)
+
+        self._flow_computers[sensor_name] = OpticalFlowComputer(
+            width=sensor_cfg["width"],
+            height=sensor_cfg["height"],
+            hfov=sensor_cfg["hfov"],
+            sensor_local_pose=(p_local, R_local),
+        )
+
+        logger.info(
+            f"Optical flow sensor '{sensor_name}' created: "
+            f"{sensor_cfg['width']}x{sensor_cfg['height']}, "
+            f"flow_duration_ms={sensor_cfg.get('flow_duration_ms', 'auto')}"
+        )
+
+        return depth_sensor_spec
+
     def _make_cfg(self) -> hsim.Configuration:
         """Create a Habitat configuration from a settings dictionary.
 
@@ -286,6 +345,10 @@ class HabitatWrapper(VisualBackendProtocol):
                     position=sensor_cfg["position"],
                     orientation=sensor_cfg["orientation"],
                     anti_aliasing=sensor_cfg.get("anti_aliasing", 0),
+                )
+            elif sensor_cfg["type"] == "optical_flow":
+                sensor_spec = self._create_flow_sensor(
+                    sensor_name=sensor_name, sensor_cfg=sensor_cfg
                 )
             else:
                 continue  # Skip sensors like navmesh, which dont need a spec
@@ -347,6 +410,36 @@ class HabitatWrapper(VisualBackendProtocol):
             ]
             # else we assume they are already numpy arrays
         return events
+
+    def render_optical_flow(self, uuid: str) -> torch.Tensor:
+        """Render optical flow for the given sensor.
+
+        Computes ground-truth optical flow by passing depth and agent pose
+        to the flow computer, which manages its own state.
+
+        Args:
+            uuid: Sensor UUID (maps to internal depth sensor and flow computer).
+
+        Returns:
+            (H, W, 2) flow tensor on GPU. flow[...,0] = du, flow[...,1] = dv.
+            Returns zeros on the first call (no previous pose available).
+        """
+        flow_computer = self._flow_computers[uuid]
+
+        # Render depth from internal depth sensor (stays on GPU)
+        depth_sensor = self._sim._sensors[uuid]
+        depth_sensor.draw_observation()
+        depth = depth_sensor.get_observation()  # (H, W) or (H, W, 1) on GPU
+        if depth.ndim == 3:
+            depth = depth.squeeze(-1)
+
+        # Get current agent state
+        agent_state = self.agent.get_state()
+        flow = flow_computer.compute_flow(
+            depth, agent_state.position, agent_state.rotation
+        )
+
+        return flow
 
     def render_color(self, uuid: str) -> torch.Tensor:
         """Render the color sensor.
