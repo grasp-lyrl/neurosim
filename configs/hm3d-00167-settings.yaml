@@ -18,6 +18,7 @@ simulator:
     event_camera_1: 1000 # Hz - high-frequency event accumulation
     color_camera_1: 20 # Hz
     depth_camera_1: 20 # Hz
+    optical_flow_1: 50 # Hz
     # navmesh_1: 10 # Hz
 
   # Visualization rates (optional) - how often to display sensor data
@@ -28,6 +29,7 @@ simulator:
     event_camera_1: 20 # Hz - visualize every 5th accumulation
     color_camera_1: 20 # Hz
     depth_camera_1: 20 # Hz
+    optical_flow_1: 50 # Hz
     # navmesh_1: 10 # Hz
 
 # Visual Backend Settings
@@ -86,6 +88,16 @@ visual_backend:
       height: 480
       hfov: 90
       zfar: 1000.0
+
+    optical_flow_1:
+      type: "optical_flow"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 1000.0
+      flow_duration_ms: 20  # Flow represents motion over last 20ms (matches 50Hz rate)
 
     # navmesh_1:
     #   type: "navmesh"

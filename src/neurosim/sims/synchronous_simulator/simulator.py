@@ -168,6 +168,15 @@ class SynchronousSimulator:
             def executor():
                 return measurement(state_provider(), statedot_provider())
 
+        elif sensor_type == "optical_flow":
+            backend = kwargs["backend"]
+            uuid = kwargs["uuid"]
+            # Pre-bind method
+            render_optical_flow = backend.render_optical_flow
+
+            def executor():
+                return render_optical_flow(uuid)
+
         elif sensor_type == "navmesh":
             backend = kwargs["backend"]
             meters_per_pixel = kwargs.get("meters_per_pixel", 0.1)
@@ -197,7 +206,7 @@ class SynchronousSimulator:
             }
 
             # Add type-specific parameters
-            if sensor_type in ["event", "color", "depth"]:
+            if sensor_type in ["event", "color", "depth", "optical_flow"]:
                 executor_kwargs["time_provider"] = lambda: self.time  # Lazy evaluation
 
             elif sensor_type == "navmesh":

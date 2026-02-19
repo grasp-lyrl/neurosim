@@ -1,3 +1,4 @@
+import cv2
 import torch
 import logging
 import numpy as np
@@ -12,6 +13,40 @@ except ImportError:
     HAS_RERUN = False
 
 logger = logging.getLogger(__name__)
+
+
+def flow_to_color(flow: np.ndarray, max_flow: float | None = None) -> np.ndarray:
+    """Convert optical flow (H, W, 2) to an RGB visualization (H, W, 3).
+
+    Uses the HSV color wheel convention:
+        - Hue encodes flow direction (angle of the flow vector)
+        - Value (brightness) encodes flow magnitude
+
+    Args:
+        flow: (H, W, 2) numpy array of optical flow [du, dv].
+        max_flow: Maximum flow magnitude for normalization. If None, uses
+                  the maximum magnitude in the current flow field.
+
+    Returns:
+        (H, W, 3) uint8 RGB image.
+    """
+    u = flow[:, :, 0]
+    v = flow[:, :, 1]
+
+    mag = np.sqrt(u**2 + v**2)
+    angle = np.arctan2(v, u)
+
+    if max_flow is None:
+        max_flow = max(mag.max(), 1e-6)
+
+    # HSV representation (OpenCV uses H: 0-179, S: 0-255, V: 0-255)
+    hsv = np.zeros((*flow.shape[:2], 3), dtype=np.uint8)
+    hsv[:, :, 0] = ((angle + np.pi) / (2 * np.pi) * 179).astype(np.uint8)  # Hue
+    hsv[:, :, 1] = 255  # Full saturation
+    hsv[:, :, 2] = np.clip(mag / max_flow * 255, 0, 255).astype(np.uint8)  # Value
+
+    rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+    return rgb
 
 
 @dataclass
@@ -308,6 +343,13 @@ class RerunVisualizer:
             elif sensor_type == "navmesh":
                 # Navmesh is already a numpy array on CPU
                 rr.log(f"sensors/{uuid}/navmesh", rr.Image(measurement))
+
+            elif sensor_type == "optical_flow":
+                # Transfer from GPU and convert to color visualization
+                if hasattr(measurement, "cpu"):
+                    measurement = measurement.cpu().numpy()
+                flow_rgb = flow_to_color(measurement)
+                rr.log(f"sensors/{uuid}/optical_flow", rr.Image(flow_rgb))
 
     def log_state(self, state: dict) -> None:
         """Log vehicle state to Rerun."""

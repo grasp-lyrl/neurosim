@@ -64,6 +64,17 @@ class VisualBackendProtocol(Protocol):
         """
         ...
 
+    def render_optical_flow(self, uuid: str) -> torch.Tensor | np.ndarray:
+        """Render ground-truth optical flow from depth + ego-motion.
+
+        Args:
+            uuid: Unique identifier for the optical flow sensor.
+
+        Returns:
+            Flow tensor of shape (H, W, 2) with [du, dv] displacements.
+        """
+        ...
+
     def close(self) -> None:
         """Clean up and close the backend."""
         ...
