@@ -74,7 +74,7 @@ class TestOpticalFlowComputer:
         assert torch.allclose(flow, torch.zeros_like(flow), atol=1e-4)
 
     def test_pure_translation_forward(self, flow_computer):
-        """Test pure forward translation produces outward radial flow."""
+        """Test pure forward translation produces inward radial backward flow."""
         device = flow_computer.device
         depth = torch.ones((480, 640), device=device) * 5.0  # 5m depth
 
@@ -90,23 +90,23 @@ class TestOpticalFlowComputer:
         agent_pos_new = np.array([0.0, 0.0, -0.1], dtype=np.float32)
         flow = flow_computer.compute_flow(depth, agent_pos_new, agent_rot)
 
-        # For forward motion, flow should be outward from center
+        # For forward motion, backward flow should be inward toward center
         # Center pixel should have near-zero flow
         center_flow = flow[240, 320]
         assert torch.allclose(center_flow, torch.zeros(2, device=device), atol=1e-3)
 
-        # Top-left corner should have negative flow (moving away from center)
+        # Top-left corner should move right/down (toward center)
         top_left_flow = flow[10, 10]
-        assert top_left_flow[0] < -0.5  # u direction
-        assert top_left_flow[1] < -0.5  # v direction
+        assert top_left_flow[0] > 0.5  # u direction
+        assert top_left_flow[1] > 0.5  # v direction
 
-        # Bottom-right corner should have positive flow
+        # Bottom-right corner should move left/up (toward center)
         bottom_right_flow = flow[470, 630]
-        assert bottom_right_flow[0] > 0.5  # u direction
-        assert bottom_right_flow[1] > 0.5  # v direction
+        assert bottom_right_flow[0] < -0.5  # u direction
+        assert bottom_right_flow[1] < -0.5  # v direction
 
     def test_pure_translation_sideways(self, flow_computer):
-        """Test pure sideways translation produces uniform horizontal flow."""
+        """Test pure sideways translation produces uniform horizontal backward flow."""
         device = flow_computer.device
         depth = torch.ones((480, 640), device=device) * 5.0
 
@@ -122,9 +122,9 @@ class TestOpticalFlowComputer:
         # For sideways motion, flow should be entirely horizontal (zero vertical component)
         assert flow[..., 1].abs().max() < 1e-3  # Vertical flow should be zero
 
-        # Horizontal flow should be significant and negative everywhere (leftward)
-        assert flow[..., 0].mean() < -1.0  # Mean horizontal flow is negative
-        assert (flow[..., 0] < 0).all()  # All pixels have negative horizontal flow
+        # Backward flow should be significant and positive everywhere (rightward)
+        assert flow[..., 0].mean() > 1.0  # Mean horizontal flow is positive
+        assert (flow[..., 0] > 0).all()  # All pixels have positive horizontal flow
 
     def test_pure_rotation_yaw(self, flow_computer):
         """Test pure yaw rotation produces flow independent of depth."""
@@ -257,9 +257,9 @@ class TestOpticalFlowComputer:
 
         Simplified case: flat plane at z=-5, camera moves right by 0.1m.
         Center pixel (u=320, v=240) should map to 3D point (0, 0, -5).
-        After right translation, point is at (-0.1, 0, -5) in new camera frame.
-        Re-projection: u' = fx * (-0.1) / 5 + cx ≈ 320 - 12.8 = 307.2
-        Flow at center: du ≈ -12.8 pixels
+        For backward flow (current -> previous), center maps to the right.
+        Re-projection: u' = fx * (0.1) / 5 + cx ≈ 320 + 6.4 = 326.4
+        Flow at center: du ≈ +6.4 pixels
         """
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         width, height = 640, 480
@@ -283,7 +283,7 @@ class TestOpticalFlowComputer:
 
         # Expected flow at center
         fx = width / (2.0 * np.tan(np.deg2rad(hfov) / 2.0))
-        expected_du = -fx * 0.1 / 5.0  # ≈ -12.8 pixels
+        expected_du = fx * 0.1 / 5.0  # ≈ +6.4 pixels
         expected_dv = 0.0
 
         center_flow = flow[240, 320].cpu().numpy()

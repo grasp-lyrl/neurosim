@@ -70,10 +70,14 @@ class OpticalFlowComputer:
         self._y_norm = ((self.cy - v_coords) / self.fy).reshape(-1)  # (N,)
         self._u_flat = u_coords.reshape(-1)  # (N,)
         self._v_flat = v_coords.reshape(-1)  # (N,)
+        self._rays = torch.stack(
+            [self._x_norm, self._y_norm, -torch.ones_like(self._x_norm)], dim=0
+        )  # (3, N)
 
         # State: sensor local pose and previous camera world pose
         if sensor_local_pose is not None:
-            self._p_local, self._R_local = sensor_local_pose
+            self._p_local = np.asarray(sensor_local_pose[0], dtype=np.float32)
+            self._R_local = np.asarray(sensor_local_pose[1], dtype=np.float32)
         else:
             self._p_local = np.zeros(3, dtype=np.float32)
             self._R_local = np.eye(3, dtype=np.float32)
@@ -118,17 +122,11 @@ class OpticalFlowComputer:
         """
         depth_flat = depth.reshape(-1)  # (N,)
 
-        # Back-project to 3D in current camera frame
-        # OpenGL: camera looks along -Z, so Z = -depth
-        X = self._x_norm * depth_flat  # (N,)
-        Y = self._y_norm * depth_flat  # (N,)
-        Z = -depth_flat  # (N,)
-
-        # Stack to [3, N]
-        points = torch.stack([X, Y, Z], dim=0)  # (3, N)
+        # Back-project to 3D in current camera frame (cached unit rays)
+        points = self._rays * depth_flat.unsqueeze(0)  # (3, N)
 
         # Transform to previous camera frame: P_prev = R_rel @ P + t_rel
-        points_prev = R_rel @ points + t_rel.unsqueeze(1)  # (3, N)
+        points_prev = torch.addmm(t_rel[:, None], R_rel, points)  # (3, N)
 
         # Depth in previous camera frame (positive = in front of camera)
         d_prev = -points_prev[2]  # (N,)
@@ -204,7 +202,7 @@ class OpticalFlowComputer:
         # Substituting: R_prev.T @ (P_world - t_prev) = R_rel @ R_cam.T @ (P_world - t_cam) + t_rel
         # Solving: R_rel = R_prev.T @ R_cam, t_rel = R_prev.T @ (t_cam - t_prev)
         R_rel = self._prev_R_cam.T @ R_cam
-        t_rel = self._prev_R_cam.T @ (self._prev_t_cam - t_cam)
+        t_rel = self._prev_R_cam.T @ (t_cam - self._prev_t_cam)
 
         R_rel_gpu = torch.from_numpy(R_rel.astype(np.float32)).to(self.device)
         t_rel_gpu = torch.from_numpy(t_rel.astype(np.float32)).to(self.device)
