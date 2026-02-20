@@ -34,6 +34,7 @@ class H5Logger:
         "depth": 50,
         "semantic": 50,
         "navmesh": 50,
+        "optical_flow": 50,
         "imu": 100,
         "state": 100,
     }
@@ -45,6 +46,7 @@ class H5Logger:
         "depth": 100,
         "semantic": 100,
         "navmesh": 100,
+        "optical_flow": 100,
         "imu": 1000,  # Small chunks for IMU data
         "state": 1000,  # Small chunks for state data
         "metadata": 1000,  # Small chunks for metadata (sim_time, sim_step)
@@ -143,7 +145,7 @@ class H5Logger:
                     H5Logger.CHUNK_SIZES["event"],
                     compression,
                 )
-            elif stype in ["color", "depth", "semantic", "navmesh"]:
+            elif stype in ["color", "depth", "semantic", "navmesh", "optical_flow"]:
                 H5Logger._write_images(
                     grp,
                     buf["data"],
