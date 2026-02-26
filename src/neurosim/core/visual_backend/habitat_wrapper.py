@@ -19,6 +19,11 @@ from neurosim.core.utils import color2intensity, RECOLOR_MAP, outline_border
 from neurosim.core.event_sim import create_event_simulator, EventSimulatorProtocol
 from neurosim.core.visual_backend.base import VisualBackendProtocol
 from neurosim.core.visual_backend.optical_flow import OpticalFlowComputer
+from neurosim.core.visual_backend.corner_detector import (
+    CornerDetector,
+    FeatureDetectionResult,
+)
+from neurosim.core.visual_backend.edge_detector import EdgeDetector
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,12 @@ class HabitatWrapper(VisualBackendProtocol):
 
         # Initialize optical flow computers
         self._flow_computers: dict[str, OpticalFlowComputer] = {}
+
+        # Initialize corner detectors
+        self._corner_detectors: dict[str, CornerDetector] = {}
+
+        # Initialize edge detectors
+        self._edge_detectors: dict[str, EdgeDetector] = {}
 
         # Create Habitat configuration and fill in event simulators if any
         self._cfg = self._make_cfg()
@@ -303,6 +314,117 @@ class HabitatWrapper(VisualBackendProtocol):
 
         return depth_sensor_spec
 
+    def _create_corner_sensor(
+        self, sensor_name: str, sensor_cfg: dict[str, Any]
+    ) -> hsim.CameraSensorSpec:
+        """Create an internal color sensor for corner/feature detection.
+
+        Similar to how event cameras create an internal color sensor, corner
+        detection sensors create an internal color sensor and a CornerDetector.
+
+        Args:
+            sensor_name: UUID for the sensor.
+            sensor_cfg: Configuration dictionary for the corner sensor.
+
+        Returns:
+            CameraSensorSpec for the internal color sensor.
+        """
+        # Create internal color sensor spec
+        color_sensor_spec = self._create_camera_spec(
+            uuid=sensor_name,
+            sensor_type="color",
+            sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
+            resolution=(sensor_cfg["height"], sensor_cfg["width"]),
+            hfov=sensor_cfg["hfov"],
+            far=sensor_cfg["zfar"],
+            position=sensor_cfg["position"],
+            orientation=sensor_cfg["orientation"],
+            anti_aliasing=sensor_cfg.get("anti_aliasing", 8),
+        )
+
+        # Extract corner detector parameters
+        detector_name = sensor_cfg.get("detector", "orb")
+        descriptor_name = sensor_cfg.get("descriptor", None)
+        max_features = sensor_cfg.get("max_features", 1000)
+
+        # All extra detector/descriptor parameters are nested under
+        # the "extra_params" key in the sensor config dict.
+        extra_params = sensor_cfg.get("extra_params", {})
+
+        self._corner_detectors[sensor_name] = CornerDetector(
+            width=sensor_cfg["width"],
+            height=sensor_cfg["height"],
+            detector=detector_name,
+            descriptor=descriptor_name,
+            max_features=max_features,
+            **extra_params,
+        )
+
+        logger.info(
+            f"Corner detector sensor '{sensor_name}' created: "
+            f"{sensor_cfg['width']}x{sensor_cfg['height']}, "
+            f"detector={detector_name}, descriptor={descriptor_name}, "
+            f"max_features={max_features}"
+        )
+
+        return color_sensor_spec
+
+    def _create_edge_sensor(
+        self, sensor_name: str, sensor_cfg: dict[str, Any]
+    ) -> hsim.CameraSensorSpec:
+        """Create an internal color sensor for edge detection.
+
+        Similar to how event cameras create an internal color sensor, edge
+        detection sensors create an internal color sensor and an EdgeDetector.
+
+        Args:
+            sensor_name: UUID for the sensor.
+            sensor_cfg: Configuration dictionary for the edge sensor.
+
+        Returns:
+            CameraSensorSpec for the internal color sensor.
+        """
+        # Create internal color sensor spec
+        color_sensor_spec = self._create_camera_spec(
+            uuid=sensor_name,
+            sensor_type="color",
+            sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
+            resolution=(sensor_cfg["height"], sensor_cfg["width"]),
+            hfov=sensor_cfg["hfov"],
+            far=sensor_cfg["zfar"],
+            position=sensor_cfg["position"],
+            orientation=sensor_cfg["orientation"],
+            anti_aliasing=sensor_cfg.get("anti_aliasing", 8),
+        )
+
+        # Extract edge detector parameters
+        algorithm = sensor_cfg.get("algorithm", "canny")
+        low_threshold = sensor_cfg.get("low_threshold", 0.1)
+        high_threshold = sensor_cfg.get("high_threshold", 0.2)
+        kernel_size = sensor_cfg.get("kernel_size", 5)
+        sigma = sensor_cfg.get("sigma", 1.0)
+        return_magnitude = sensor_cfg.get("return_magnitude", False)
+
+        self._edge_detectors[sensor_name] = EdgeDetector(
+            width=sensor_cfg["width"],
+            height=sensor_cfg["height"],
+            algorithm=algorithm,
+            low_threshold=low_threshold,
+            high_threshold=high_threshold,
+            kernel_size=kernel_size,
+            sigma=sigma,
+            return_magnitude=return_magnitude,
+        )
+
+        logger.info(
+            f"Edge detector sensor '{sensor_name}' created: "
+            f"{sensor_cfg['width']}x{sensor_cfg['height']}, "
+            f"algorithm={algorithm}, "
+            f"thresholds=({low_threshold}, {high_threshold})"
+        )
+
+        return color_sensor_spec
+
     def _make_cfg(self) -> hsim.Configuration:
         """Create a Habitat configuration from a settings dictionary.
 
@@ -349,6 +471,14 @@ class HabitatWrapper(VisualBackendProtocol):
                 )
             elif sensor_cfg["type"] == "optical_flow":
                 sensor_spec = self._create_flow_sensor(
+                    sensor_name=sensor_name, sensor_cfg=sensor_cfg
+                )
+            elif sensor_cfg["type"] == "corner":
+                sensor_spec = self._create_corner_sensor(
+                    sensor_name=sensor_name, sensor_cfg=sensor_cfg
+                )
+            elif sensor_cfg["type"] == "edge":
+                sensor_spec = self._create_edge_sensor(
                     sensor_name=sensor_name, sensor_cfg=sensor_cfg
                 )
             else:
@@ -469,6 +599,48 @@ class HabitatWrapper(VisualBackendProtocol):
         sensor = self._sim._sensors[uuid]
         sensor.draw_observation()
         return sensor.get_observation()
+
+    def render_corners(self, uuid: str) -> FeatureDetectionResult:
+        """Render corner/feature detections for the given sensor.
+
+        Renders the internal color sensor, transfers to CPU, and runs
+        the configured OpenCV feature detector.
+
+        Args:
+            uuid: Sensor UUID (maps to internal color sensor and corner detector).
+
+        Returns:
+            FeatureDetectionResult with keypoints, scores, descriptors, etc.
+        """
+        corner_detector = self._corner_detectors[uuid]
+
+        # Render color from internal color sensor (stays on GPU)
+        color_sensor = self._sim._sensors[uuid]
+        color_sensor.draw_observation()
+        color_image = color_sensor.get_observation()[..., :3]  # RGB (H, W, 3)
+
+        return corner_detector.detect(color_image)
+
+    def render_edges(self, uuid: str) -> torch.Tensor:
+        """Render edge map for the given sensor.
+
+        Renders the internal color sensor and runs the configured edge
+        detector entirely on GPU.
+
+        Args:
+            uuid: Sensor UUID (maps to internal color sensor and edge detector).
+
+        Returns:
+            (H, W) edge map tensor on GPU.
+        """
+        edge_detector = self._edge_detectors[uuid]
+
+        # Render color from internal color sensor (stays on GPU)
+        color_sensor = self._sim._sensors[uuid]
+        color_sensor.draw_observation()
+        color_image = color_sensor.get_observation()[..., :3]  # RGB (H, W, 3)
+
+        return edge_detector.detect(color_image)
 
     def render_navmesh(
         self,

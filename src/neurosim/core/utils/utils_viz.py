@@ -351,6 +351,49 @@ class RerunVisualizer:
                 flow_rgb = flow_to_color(measurement)
                 rr.log(f"sensors/{uuid}/optical_flow", rr.Image(flow_rgb))
 
+            elif sensor_type == "corner":
+                # Corner detections: Draws circles scaled to keypoint size,
+                # with orientation arrows; overlays response, angle, and octave for top-N kps.
+                import cv2 as _cv2
+
+                sensor_cfg_data = sensor_cfg.config
+                h = sensor_cfg_data.get("height", 480)
+                w = sensor_cfg_data.get("width", 640)
+                corner_img = np.zeros((h, w, 3), dtype=np.uint8)
+
+                if measurement.num_keypoints > 0:
+                    # Rebuild cv2.KeyPoint list so we can use drawKeypoints
+                    cv_kps = [
+                        _cv2.KeyPoint(
+                            x=float(measurement.keypoints[i, 0]),
+                            y=float(measurement.keypoints[i, 1]),
+                            size=float(measurement.sizes[i]),
+                            angle=float(measurement.angles[i]),
+                            response=float(measurement.scores[i]),
+                            octave=int(measurement.octaves[i]),
+                        )
+                        for i in range(measurement.num_keypoints)
+                    ]
+
+                    # Rich drawing: scaled circles + orientation lines
+                    corner_img = _cv2.drawKeypoints(
+                        corner_img,
+                        cv_kps,
+                        None,
+                        color=(0, 255, 0),
+                        flags=_cv2.DRAW_MATCHES_FLAGS_NOT_DRAW_SINGLE_POINTS,
+                    )
+
+                rr.log(f"sensors/{uuid}/corners", rr.Image(corner_img))
+
+            elif sensor_type == "edge":
+                # Edge map: (H, W) float tensor on GPU
+                if hasattr(measurement, "cpu"):
+                    measurement = measurement.cpu().numpy()
+                # Convert to uint8 for display
+                edge_img = (measurement * 255).clip(0, 255).astype(np.uint8)
+                rr.log(f"sensors/{uuid}/edges", rr.Image(edge_img))
+
     def log_state(self, state: dict) -> None:
         """Log vehicle state to Rerun."""
         if not self.enabled:

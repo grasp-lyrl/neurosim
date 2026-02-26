@@ -10,6 +10,8 @@ from typing import Any, Protocol
 import torch
 import numpy as np
 
+from neurosim.core.visual_backend.corner_detector import FeatureDetectionResult
+
 
 class VisualBackendProtocol(Protocol):
     """Protocol defining the interface for visual rendering backends.
@@ -72,6 +74,28 @@ class VisualBackendProtocol(Protocol):
 
         Returns:
             Flow tensor of shape (H, W, 2) with [du, dv] displacements.
+        """
+        ...
+
+    def render_corners(self, uuid: str) -> FeatureDetectionResult:
+        """Render corner/feature detections from a color sensor.
+
+        Args:
+            uuid: Unique identifier for the corner detection sensor.
+
+        Returns:
+            FeatureDetectionResult with keypoints, scores, descriptors, etc.
+        """
+        ...
+
+    def render_edges(self, uuid: str) -> torch.Tensor | np.ndarray:
+        """Render edge map from a color sensor.
+
+        Args:
+            uuid: Unique identifier for the edge detection sensor.
+
+        Returns:
+            Edge map tensor of shape (H, W) with edge strengths.
         """
         ...
 
