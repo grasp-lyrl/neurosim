@@ -240,7 +240,6 @@ class HabitatWrapper(VisualBackendProtocol):
             backend=backend,
             width=sensor_cfg["width"],
             height=sensor_cfg["height"],
-            start_time=0,
             contrast_threshold_neg=contrast_threshold_neg,
             contrast_threshold_pos=contrast_threshold_pos,
         )
@@ -399,16 +398,14 @@ class HabitatWrapper(VisualBackendProtocol):
 
         intensity_image = color2intensity(color_observation / 255.0)
 
-        events = self._event_simulators[uuid].image_callback(
-            intensity_image, time
-        )  # in us
+        events = self._event_simulators[uuid](intensity_image, timestamp_us=time)
 
-        if to_numpy and events is not None and isinstance(events[0], torch.Tensor):
+        if to_numpy and events is not None:
             events = [
-                events[0].cpu().numpy().astype(np.uint16),
-                events[1].cpu().numpy().astype(np.uint16),
-                events[2].cpu().numpy().astype(np.uint64),
-                events[3].cpu().numpy().astype(np.uint8),
+                events.x.cpu().numpy().astype(np.uint16),
+                events.y.cpu().numpy().astype(np.uint16),
+                events.t.cpu().numpy().astype(np.uint64),
+                events.p.cpu().numpy().astype(np.uint8),
             ]
             # else we assume they are already numpy arrays
         return events
