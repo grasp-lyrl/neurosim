@@ -6,6 +6,31 @@ from setuptools.command.install import install
 from setuptools.command.develop import develop
 
 
+def get_env_python():
+    """
+    Return the Python executable for the *currently activated* environment.
+
+    sys.executable is unreliable inside a nested pip invocation: it may
+    point to the build-isolation venv or the base-conda python rather than
+    the user's active conda/virtual-env python.  CONDA_PREFIX and
+    VIRTUAL_ENV are set by the shell activation script and are the most
+    reliable indicators of where the user actually wants packages installed.
+    """
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        candidate = os.path.join(conda_prefix, "bin", "python")
+        if os.path.isfile(candidate):
+            return candidate
+
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env:
+        candidate = os.path.join(virtual_env, "bin", "python")
+        if os.path.isfile(candidate):
+            return candidate
+
+    return sys.executable
+
+
 class CustomInstallCommand(install):
     """Custom installation command that handles dependencies."""
 
@@ -28,7 +53,7 @@ class CustomInstallCommand(install):
 
         self.install_habitat_sim()
         self.install_pip_requirements()
-        self.install_cu_evsim()
+        self.install_neurosim_cu_esim()
 
         print("✓ Neurosim installation completed!")
 
@@ -38,9 +63,10 @@ class CustomInstallCommand(install):
 
         if os.path.exists(requirements_file):
             print("📋 Installing main requirements...")
+            python_exe = get_env_python()
             try:
                 subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-r", requirements_file],
+                    [python_exe, "-m", "pip", "install", "-r", requirements_file],
                     check=True,
                 )
                 print("   ✓ pip requirements installed successfully!\n")
@@ -50,26 +76,49 @@ class CustomInstallCommand(install):
         else:
             print("   ⚠️  No requirements.txt found in current directory, skipping...\n")
 
-    def install_cu_evsim(self):
-        """Install cu_evsim."""
-        print("🚀 Installing cu_evsim, for CUDA event simulator support...")
-        cu_evsim_dir = os.path.join(
-            os.getcwd(), "src", "neurosim", "core", "event_sim", "cu_evsim"
-        )
-        if os.path.exists(cu_evsim_dir):
-            try:
-                print("   - Installing cu_evsim...")
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", cu_evsim_dir, "-v"],
-                    check=True,
-                )
-                print("   ✓ cu_evsim installation completed successfully!\n")
-            except subprocess.CalledProcessError as e:
-                print(f"   ❌ Error installing cu_evsim: {e}")
-                raise
+    def install_neurosim_cu_esim(self):
+        """Install neurosim_cu_esim from GitHub."""
+        print("🚀 Installing neurosim_cu_esim, for CUDA event simulator support...")
+        deps_dir = os.path.join(os.getcwd(), "deps")
+        esim_dir = os.path.join(deps_dir, "neurosim_cu_esim")
+
+        if not os.path.exists(esim_dir):
+            print("   - Cloning neurosim_cu_esim repository...")
+            os.makedirs(deps_dir, exist_ok=True)
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "https://github.com/grasp-lyrl/neurosim_cu_esim.git",
+                    esim_dir,
+                ],
+                check=True,
+            )
+            print("   ✓ Repository cloned successfully")
         else:
-            print("   ⚠️  cu_evsim directory not found at src/neurosim/utils/cu_evsim")
-            print("   Please ensure the cu_evsim directory exists\n")
+            print("   ✓ neurosim_cu_esim repository already exists")
+
+        try:
+            print("   - Installing neurosim_cu_esim...")
+            python_exe = get_env_python()
+            # --no-build-isolation: use the torch already installed by requirements.txt
+            # instead of letting pip spin up a throwaway build-venv and download a
+            # potentially different torch version.
+            subprocess.run(
+                [
+                    python_exe,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-build-isolation",
+                    esim_dir,
+                ],
+                check=True,
+            )
+            print("   ✓ neurosim_cu_esim installation completed successfully!\n")
+        except subprocess.CalledProcessError as e:
+            print(f"   ❌ Error installing neurosim_cu_esim: {e}")
+            raise
 
     def install_habitat_sim(self):
         """Install Habitat-Sim with required configuration."""
@@ -87,7 +136,7 @@ class CustomInstallCommand(install):
                     "git",
                     "clone",
                     "--branch",
-                    "v0.3,3",  # Not a typo
+                    "v0.3.3",
                     "https://github.com/facebookresearch/habitat-sim.git",
                     habitat_dir,
                 ],
@@ -113,10 +162,11 @@ class CustomInstallCommand(install):
         original_dir = os.getcwd()
         try:
             os.chdir(habitat_dir)
+            python_exe = get_env_python()
 
             print("   - Installing Habitat-Sim Python requirements...")
             subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                [python_exe, "-m", "pip", "install", "-r", "requirements.txt"],
                 check=True,
             )
             print("   ✓ Requirements installed")
@@ -126,7 +176,7 @@ class CustomInstallCommand(install):
 
             process = subprocess.Popen(
                 [
-                    sys.executable,
+                    python_exe,
                     "setup.py",
                     "install",
                     "--with-cuda",
