@@ -6,8 +6,10 @@ the common interface used by other event simulators in neurosim.
 """
 
 import torch
-from typing import Optional, Tuple
+from typing import Optional
+
 from .src.esim_torch import EventSimulator_torch
+from neurosim.core.event_sim.types import Events
 
 
 class EventSimulatorVID2E_ESIM:
@@ -45,6 +47,7 @@ class EventSimulatorVID2E_ESIM:
         self.H = H
         self.device = device
         self.last_time = int(start_time)
+        self._is_initialized = False
 
         # Create the underlying VID2E simulator
         self._sim = EventSimulator_torch(
@@ -55,7 +58,15 @@ class EventSimulatorVID2E_ESIM:
 
         # Initialize with first image if provided
         if first_image is not None:
-            self._init_with_image(first_image, start_time)
+            self.init(first_image)
+
+    def init(self, first_image: torch.Tensor) -> None:
+        """Initialize internal state with the first image.
+
+        Args:
+            first_image: First grayscale frame (H, W), positive values
+        """
+        self._init_with_image(first_image, self.last_time)
 
     def _init_with_image(self, image: torch.Tensor, time: int) -> None:
         """Initialize the simulator with the first image."""
@@ -69,51 +80,55 @@ class EventSimulatorVID2E_ESIM:
         # Call forward to initialize
         self._sim.forward(log_image, timestamp)
         self.last_time = time
+        self._is_initialized = True
 
         print(
             f"[evsim-vid2e] Initialized event camera sim with sensor size: {image.shape}"
         )
 
-    def image_callback(
-        self, new_image: torch.Tensor, new_time: int
-    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    def __call__(self, image: torch.Tensor, timestamp_us: int) -> Optional[Events]:
         """Process a new image and generate events.
 
         Args:
-            new_image: The new image to process (H, W), values in [0, 1]
-            new_time: Timestamp in microseconds
+            image: The new image to process (H, W), values in [0, 1]
+            timestamp_us: Timestamp in microseconds
 
         Returns:
-            Tuple of (x, y, t, p) event tensors or None if no events
+            Events(x, y, t, p) named tuple or None if no events
         """
-        if not new_image.is_cuda:
-            new_image = new_image.to(self.device)
+        if not self._is_initialized:
+            self._init_with_image(image, timestamp_us)
+            return None
+
+        if not image.is_cuda:
+            image = image.to(self.device)
 
         # VID2E expects log images and int64 timestamps
-        log_image = torch.log(new_image.float() + 1e-6)
-        timestamp = torch.tensor([new_time], dtype=torch.int64, device=self.device)
+        log_image = torch.log(image.float() + 1e-6)
+        timestamp = torch.tensor([timestamp_us], dtype=torch.int64, device=self.device)
 
         # Call the underlying simulator
         result = self._sim.forward(log_image, timestamp)
 
-        self.last_time = new_time
+        self.last_time = timestamp_us
 
         if result is None:
             return None
 
-        # Convert from dict format to tuple format (x, y, t, p)
-        x = result["x"].to(torch.uint16)
-        y = result["y"].to(torch.uint16)
-        t = result["t"].to(torch.uint64)
-        p = result["p"].to(torch.uint8)
-
-        return (x, y, t, p)
+        # Convert from dict format to Events namedtuple
+        return Events(
+            x=result["x"].to(torch.uint16),
+            y=result["y"].to(torch.uint16),
+            t=result["t"].to(torch.uint64),
+            p=result["p"].to(torch.uint8),
+        )
 
     def reset(self, first_image: Optional[torch.Tensor] = None) -> None:
         """Reset the simulator state."""
         self._sim.reset()
+        self._is_initialized = False
         if first_image is not None:
-            self._init_with_image(first_image, self.last_time)
+            self.init(first_image)
 
     def get_performance_info(self) -> dict:
         """Get performance-related information."""

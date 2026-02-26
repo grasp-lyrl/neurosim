@@ -177,6 +177,24 @@ class SynchronousSimulator:
             def executor():
                 return render_optical_flow(uuid)
 
+        elif sensor_type == "corner":
+            backend = kwargs["backend"]
+            uuid = kwargs["uuid"]
+            # Pre-bind method
+            render_corners = backend.render_corners
+
+            def executor():
+                return render_corners(uuid)
+
+        elif sensor_type == "edge":
+            backend = kwargs["backend"]
+            uuid = kwargs["uuid"]
+            # Pre-bind method
+            render_edges = backend.render_edges
+
+            def executor():
+                return render_edges(uuid)
+
         elif sensor_type == "navmesh":
             backend = kwargs["backend"]
             meters_per_pixel = kwargs.get("meters_per_pixel", 0.1)
@@ -206,7 +224,14 @@ class SynchronousSimulator:
             }
 
             # Add type-specific parameters
-            if sensor_type in ["event", "color", "depth", "optical_flow"]:
+            if sensor_type in [
+                "event",
+                "color",
+                "depth",
+                "optical_flow",
+                "corner",
+                "edge",
+            ]:
                 executor_kwargs["time_provider"] = lambda: self.time  # Lazy evaluation
 
             elif sensor_type == "navmesh":

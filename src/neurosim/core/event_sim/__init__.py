@@ -31,6 +31,8 @@ Usage:
 from enum import Enum
 from typing import Union, Optional, Protocol, Any
 
+from .types import Events
+
 
 class EventSimulatorType(Enum):
     """Supported event simulator backends."""
@@ -45,17 +47,23 @@ class EventSimulatorType(Enum):
 class EventSimulatorProtocol(Protocol):
     """Protocol defining the interface for event simulators."""
 
-    def image_callback(
-        self, new_image: Any, new_time: int
-    ) -> Optional[tuple[Any, ...]]:
+    def __call__(self, image: Any, timestamp_us: int) -> Optional[Events]:
         """Process a new image and generate events.
 
         Args:
-            new_image: The new image to process (H, W)
-            new_time: Timestamp in microseconds
+            image: The new image to process (H, W), positive values
+            timestamp_us: Timestamp in microseconds
 
         Returns:
-            Tuple of event data (x, y, t, p) or None if no events
+            Named tuple Events(x, y, t, p) or None if no events
+        """
+        ...
+
+    def init(self, first_image: Any) -> None:
+        """Initialize internal state with the first image.
+
+        Args:
+            first_image: First grayscale frame (H, W), positive values
         """
         ...
 
@@ -65,15 +73,16 @@ class EventSimulatorProtocol(Protocol):
 
 
 def _import_cuda_simulator():
-    """Lazily import CUDA simulator."""
+    """Lazily import CUDA simulator from neurosim_cu_esim package."""
     try:
-        from .cu_evsim import EventSimulatorCUDA
+        from neurosim_cu_esim import EventSimulator
 
-        return EventSimulatorCUDA
+        return EventSimulator
     except ImportError as e:
         raise ImportError(
             f"CUDA event simulator not available. "
-            f"Please install cu_evsim with: cd src/neurosim/utils/cu_evsim && pip install -e . "
+            f"Please install neurosim_cu_esim with: "
+            f"pip install git+https://github.com/grasp-lyrl/neurosim_cu_esim.git "
             f"Original error: {e}"
         )
 
@@ -165,7 +174,7 @@ def get_best_available_backend() -> EventSimulatorType:
     if not available:
         raise RuntimeError(
             "No event simulator backends available. "
-            "Please install at least one: cu_evsim (CUDA), torch, or numba (AirSim)."
+            "Please install at least one: neurosim_cu_esim (CUDA), torch, or numba (AirSim)."
         )
 
     # Priority order
@@ -224,16 +233,25 @@ def create_event_simulator(
         backend = get_best_available_backend()
 
     if backend == EventSimulatorType.CUDA:
-        SimClass = _import_cuda_simulator()
-        return SimClass(
-            W=width,
-            H=height,
-            start_time=start_time,
-            first_image=first_image,
-            contrast_threshold_neg=contrast_threshold_neg,
-            contrast_threshold_pos=contrast_threshold_pos,
-            **kwargs,
-        )
+        try:
+            SimClass = _import_cuda_simulator()
+            sim = SimClass(
+                width=width,
+                height=height,
+                contrast_threshold_neg=contrast_threshold_neg,
+                contrast_threshold_pos=contrast_threshold_pos,
+                **kwargs,
+            )
+            if first_image is not None:
+                sim.init(first_image)
+            return sim
+        except ImportError as cuda_error:
+            raise ImportError(
+                "CUDA event simulator import failed."
+                "To restore CUDA, reinstall neurosim_cu_esim against your current PyTorch/CUDA "
+                "environment (e.g. `pip uninstall -y neurosim_cu_esim && pip install --no-build-isolation --force-reinstall ./deps/neurosim_cu_esim`). "
+                f"Original CUDA import error: {cuda_error}",
+            )
 
     elif backend == EventSimulatorType.TORCH:
         SimClass = _import_torch_simulator()
@@ -258,6 +276,10 @@ def create_event_simulator(
     elif backend == EventSimulatorType.VID2E:
         SimClass = _import_vid2e_simulator()
         return SimClass(
+            W=width,
+            H=height,
+            start_time=start_time,
+            first_image=first_image,
             contrast_threshold_neg=contrast_threshold_neg,
             contrast_threshold_pos=contrast_threshold_pos,
             **kwargs,

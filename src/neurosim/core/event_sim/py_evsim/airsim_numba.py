@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from numba import njit, prange
 import torch
 
+from neurosim.core.event_sim.types import Events
+
 EVENT_TYPE = np.dtype(
     [("timestamp", "f8"), ("x", "u2"), ("y", "u2"), ("polarity", "b")], align=True
 )
@@ -82,18 +84,18 @@ def esim(
 
 
 class EventSimulator:
-    def __init__(self, W, H, first_image=None, first_time=None, config=CONFIG):
+    def __init__(self, W, H, first_image=None, first_time=0, config=CONFIG):
         self.H = H
         self.W = W
         self.config = config
         self.last_image = None
         self.npix = H * W  # Must be set before init() is called
+        self.last_time = int(first_time)
 
         if first_image is not None:
-            assert first_time is not None
-            self.init(first_image, first_time)
+            self.init(first_image)
 
-    def init(self, first_image, first_time):
+    def init(self, first_image, first_time=None):
         print("Initialized event camera simulator with sensor size:", first_image.shape)
 
         self.resolution = first_image.shape  # The resolution of the image
@@ -109,7 +111,8 @@ class EventSimulator:
         self.last_image = first_image.copy()
         self.current_image = first_image.copy()
 
-        self.last_time = first_time
+        if first_time is not None:
+            self.last_time = first_time
 
         self.output_events = np.zeros(
             (self.config.max_events_per_frame), dtype=EVENT_TYPE
@@ -117,26 +120,36 @@ class EventSimulator:
         self.event_count = 0
         self.spikes = np.zeros((self.npix))
 
-    def image_callback(self, new_image, new_time):
-        """
-        new_image: The new image to process (H, W)
-        new_time: The time of the new image in microseconds
-        """
+    def reset(self, first_image=None):
+        """Reset simulator state."""
+        self.last_image = None
+        if first_image is not None:
+            self.init(first_image)
 
+    def __call__(self, image, timestamp_us):
+        """Process a new image and generate events.
+
+        Args:
+            image: Raw grayscale image (H, W), positive values
+            timestamp_us: Timestamp in microseconds
+
+        Returns:
+            Events(x, y, t, p) named tuple or None if no events
+        """
         if self.last_image is None:
-            self.init(new_image, new_time)
+            self.init(image, timestamp_us)
             return None
 
-        if isinstance(new_image, torch.Tensor):
-            new_image = new_image.cpu().numpy()
+        if isinstance(image, torch.Tensor):
+            image = image.cpu().numpy()
 
-        assert new_time > 0
-        assert new_image.shape == self.resolution
-        new_image = new_image.reshape(-1)  # Free operation
+        assert timestamp_us > 0
+        assert image.shape == self.resolution
+        image = image.reshape(-1)  # Free operation
 
-        np.copyto(self.current_image, new_image)
+        np.copyto(self.current_image, image)
 
-        delta_time = new_time - self.last_time
+        delta_time = timestamp_us - self.last_time
 
         config = self.config
         self.output_events = np.zeros(
@@ -160,9 +173,16 @@ class EventSimulator:
         )
 
         np.copyto(self.last_image, self.current_image)
-        self.last_time = new_time
+        self.last_time = timestamp_us
+
+        if self.event_count == 0:
+            return None
 
         result = self.output_events[: self.event_count]
         result.sort(order=["timestamp"], axis=0)
-
-        return result["x"], result["y"], result["timestamp"], result["polarity"]
+        return Events(
+            x=result["x"],
+            y=result["y"],
+            t=result["timestamp"],
+            p=result["polarity"],
+        )

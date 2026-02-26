@@ -21,6 +21,8 @@ from typing import Any
 import multiprocessing as mp
 from copy import deepcopy as dcopy
 
+from neurosim.core.visual_backend.corner_detector import FeatureDetectionResult
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,6 +37,8 @@ class H5Logger:
         "semantic": 50,
         "navmesh": 50,
         "optical_flow": 50,
+        "corner": 50,
+        "edge": 50,
         "imu": 100,
         "state": 100,
     }
@@ -47,6 +51,9 @@ class H5Logger:
         "semantic": 100,
         "navmesh": 100,
         "optical_flow": 100,
+        "corner": 100,  # Per-frame metadata (num_keypoints, sim_time, sim_step)
+        "corner_features": 10000,  # Flat-concat feature arrays (keypoints, descriptors, …)
+        "edge": 100,
         "imu": 1000,  # Small chunks for IMU data
         "state": 1000,  # Small chunks for state data
         "metadata": 1000,  # Small chunks for metadata (sim_time, sim_step)
@@ -123,6 +130,18 @@ class H5Logger:
             return {k: H5Logger._torch_to_numpy(v) for k, v in data.items()}
         elif isinstance(data, (list, tuple)):
             return type(data)(H5Logger._torch_to_numpy(x) for x in data)
+        # FeatureDetectionResult → plain dict (serialisable across the
+        # process boundary without pickling the dataclass definition).
+        elif isinstance(data, FeatureDetectionResult):
+            return {
+                "keypoints": data.keypoints,  # (N, 2) float32
+                "scores": data.scores,  # (N,) float32
+                "sizes": data.sizes,  # (N,) float32
+                "angles": data.angles,  # (N,) float32
+                "octaves": data.octaves,  # (N,) int32
+                "descriptors": data.descriptors,  # (N, D) or None
+                "num_keypoints": np.array([data.num_keypoints], dtype=np.int32),
+            }
         return data
 
     @staticmethod
@@ -145,7 +164,24 @@ class H5Logger:
                     H5Logger.CHUNK_SIZES["event"],
                     compression,
                 )
-            elif stype in ["color", "depth", "semantic", "navmesh", "optical_flow"]:
+            elif stype == "corner":
+                H5Logger._write_corners(
+                    grp,
+                    buf["data"],
+                    times,
+                    steps,
+                    H5Logger.CHUNK_SIZES["corner"],
+                    H5Logger.CHUNK_SIZES["corner_features"],
+                    compression,
+                )
+            elif stype in [
+                "color",
+                "depth",
+                "semantic",
+                "navmesh",
+                "optical_flow",
+                "edge",
+            ]:
                 H5Logger._write_images(
                     grp,
                     buf["data"],
@@ -222,6 +258,119 @@ class H5Logger:
                 )
 
         # Metadata uses stacking (fixed-size per sample)
+        H5Logger._append_stack(
+            grp, "sim_time", times, H5Logger.CHUNK_SIZES["metadata"], None
+        )
+        H5Logger._append_stack(
+            grp, "sim_step", steps, H5Logger.CHUNK_SIZES["metadata"], None
+        )
+
+    @staticmethod
+    def _write_corners(
+        grp, data_list, times, steps, meta_chunk_size, feature_chunk_size, compression
+    ):
+        """Write batched corner/feature detection data.
+
+        Layout (flat-concatenated, exact same idea as event streams):
+
+        Feature arrays  — flat along the keypoint axis:
+          keypoints     (Total_N, 2)  float32  — (x, y) pixel coordinates
+          scores        (Total_N,)    float32  — detector response
+          sizes         (Total_N,)    float32  — keypoint diameter
+          angles        (Total_N,)    float32  — orientation in degrees
+          octaves       (Total_N,)    int32    — pyramid level
+          descriptors   (Total_N, D)  uint8/float32  — only written when present
+
+        Per-frame metadata  — one entry per logged timestep:
+          num_keypoints (T,)    int32    — N for that frame; lets readers slice
+          sim_time      (T,)    float64  — simulation time
+          sim_step      (T,)    int64    — simulation step
+
+        To recover frame k:   start = num_keypoints[:k].sum(),
+                               end   = start + num_keypoints[k]
+        """
+        if not data_list:
+            return
+
+        # Accumulate per-frame counts and flat feature lists
+        kp_chunks, score_chunks, size_chunks, angle_chunks, octave_chunks = (
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        desc_chunks = []
+        has_descriptors = False
+        num_kps = []
+
+        for d in data_list:
+            n = int(d["num_keypoints"][0])
+            num_kps.append(n)
+            if n > 0:
+                kp_chunks.append(d["keypoints"])
+                score_chunks.append(d["scores"])
+                size_chunks.append(d["sizes"])
+                angle_chunks.append(d["angles"])
+                octave_chunks.append(d["octaves"])
+                if d["descriptors"] is not None:
+                    has_descriptors = True
+                    desc_chunks.append(d["descriptors"])
+
+        # --- Write flat feature arrays (only if any keypoints exist) ---
+        if kp_chunks:
+            H5Logger._append_concat(
+                grp,
+                "keypoints",
+                np.concatenate(kp_chunks, axis=0),
+                feature_chunk_size,
+                compression,
+            )
+            H5Logger._append_concat(
+                grp,
+                "scores",
+                np.concatenate(score_chunks),
+                feature_chunk_size,
+                compression,
+            )
+            H5Logger._append_concat(
+                grp,
+                "sizes",
+                np.concatenate(size_chunks),
+                feature_chunk_size,
+                compression,
+            )
+            H5Logger._append_concat(
+                grp,
+                "angles",
+                np.concatenate(angle_chunks),
+                feature_chunk_size,
+                compression,
+            )
+            H5Logger._append_concat(
+                grp,
+                "octaves",
+                np.concatenate(octave_chunks),
+                feature_chunk_size,
+                compression,
+            )
+            if has_descriptors and desc_chunks:
+                H5Logger._append_concat(
+                    grp,
+                    "descriptors",
+                    np.concatenate(desc_chunks, axis=0),
+                    feature_chunk_size,
+                    compression,
+                )
+
+        # --- Per-frame metadata ----------------------------------------
+        H5Logger._append_stack(
+            grp,
+            "num_keypoints",
+            np.array(num_kps, dtype=np.int32),
+            meta_chunk_size,
+            None,
+        )
         H5Logger._append_stack(
             grp, "sim_time", times, H5Logger.CHUNK_SIZES["metadata"], None
         )
@@ -330,12 +479,15 @@ class H5Logger:
     @staticmethod
     def _append_concat(grp, name, data, chunk_size, compression):
         """
-        Append variable-length data by concatenation (e.g., event streams).
-        Data is concatenated along axis 0, typically 1D arrays.
+        Append variable-length data by concatenation along axis 0.
+
+        Supports both 1D and multi-dimensional arrays.  The first axis is
+        always the variable-length dimension; remaining axes are fixed.
 
         Examples:
-        - Event x: (N_events,) -> dataset shape (Total_events,)
-        - Event y: (N_events,) -> dataset shape (Total_events,)
+        - Event x:     (N_events,)   -> dataset shape (Total_events,)
+        - Keypoints:   (N, 2)        -> dataset shape (Total_N, 2)
+        - Descriptors: (N, D)        -> dataset shape (Total_N, D)
         """
         if not isinstance(data, np.ndarray):
             data = np.array(data)
@@ -343,16 +495,19 @@ class H5Logger:
             data = data.reshape(1)
 
         if name not in grp:
-            # Create 1D dataset for concatenation
-            shape = (0,)
-            maxshape = (None,)
+            if data.ndim == 1:
+                shape, maxshape, chunks = (0,), (None,), (chunk_size,)
+            else:
+                shape = (0,) + data.shape[1:]
+                maxshape = (None,) + data.shape[1:]
+                chunks = (chunk_size,) + data.shape[1:]
 
             grp.create_dataset(
                 name,
                 shape=shape,
                 maxshape=maxshape,
                 dtype=data.dtype,
-                chunks=(chunk_size,),
+                chunks=chunks,
                 compression=compression,
             )
 
