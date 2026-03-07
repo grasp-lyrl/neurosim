@@ -39,6 +39,7 @@ class H5Logger:
         "optical_flow": 50,
         "corner": 50,
         "edge": 50,
+        "grayscale": 50,
         "imu": 100,
         "state": 100,
     }
@@ -54,6 +55,7 @@ class H5Logger:
         "corner": 100,  # Per-frame metadata (num_keypoints, sim_time, sim_step)
         "corner_features": 10000,  # Flat-concat feature arrays (keypoints, descriptors, …)
         "edge": 100,
+        "grayscale": 100,
         "imu": 1000,  # Small chunks for IMU data
         "state": 1000,  # Small chunks for state data
         "metadata": 1000,  # Small chunks for metadata (sim_time, sim_step)
@@ -181,6 +183,7 @@ class H5Logger:
                 "navmesh",
                 "optical_flow",
                 "edge",
+                "grayscale",
             ]:
                 H5Logger._write_images(
                     grp,

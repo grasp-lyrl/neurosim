@@ -394,6 +394,13 @@ class RerunVisualizer:
                 edge_img = (measurement * 255).clip(0, 255).astype(np.uint8)
                 rr.log(f"sensors/{uuid}/edges", rr.Image(edge_img))
 
+            elif sensor_type == "grayscale":
+                # Grayscale intensity: (H, W) float tensor in [0, 1]
+                if hasattr(measurement, "cpu"):
+                    measurement = measurement.cpu().numpy()
+                gray_img = (measurement * 255).clip(0, 255).astype(np.uint8)
+                rr.log(f"sensors/{uuid}/grayscale", rr.Image(gray_img))
+
     def log_state(self, state: dict) -> None:
         """Log vehicle state to Rerun."""
         if not self.enabled:

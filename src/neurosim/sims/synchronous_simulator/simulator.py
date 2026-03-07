@@ -195,6 +195,15 @@ class SynchronousSimulator:
             def executor():
                 return render_edges(uuid)
 
+        elif sensor_type == "grayscale":
+            backend = kwargs["backend"]
+            uuid = kwargs["uuid"]
+            # Pre-bind method
+            render_grayscale = backend.render_grayscale
+
+            def executor():
+                return render_grayscale(uuid)
+
         elif sensor_type == "navmesh":
             backend = kwargs["backend"]
             meters_per_pixel = kwargs.get("meters_per_pixel", 0.1)
@@ -231,6 +240,7 @@ class SynchronousSimulator:
                 "optical_flow",
                 "corner",
                 "edge",
+                "grayscale",
             ]:
                 executor_kwargs["time_provider"] = lambda: self.time  # Lazy evaluation
 

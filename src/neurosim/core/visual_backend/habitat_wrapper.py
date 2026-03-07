@@ -481,6 +481,18 @@ class HabitatWrapper(VisualBackendProtocol):
                 sensor_spec = self._create_edge_sensor(
                     sensor_name=sensor_name, sensor_cfg=sensor_cfg
                 )
+            elif sensor_cfg["type"] == "grayscale":
+                sensor_spec = self._create_camera_spec(
+                    uuid=sensor_name,
+                    sensor_type="color",
+                    sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
+                    resolution=(sensor_cfg["height"], sensor_cfg["width"]),
+                    hfov=sensor_cfg["hfov"],
+                    far=sensor_cfg["zfar"],
+                    position=sensor_cfg["position"],
+                    orientation=sensor_cfg["orientation"],
+                    anti_aliasing=sensor_cfg.get("anti_aliasing", 0),
+                )
             else:
                 continue  # Skip sensors like navmesh, which dont need a spec
             sensor_specifications.append(sensor_spec)
@@ -641,6 +653,23 @@ class HabitatWrapper(VisualBackendProtocol):
         color_image = color_sensor.get_observation()[..., :3]  # RGB (H, W, 3)
 
         return edge_detector.detect(color_image)
+
+    def render_grayscale(self, uuid: str) -> torch.Tensor:
+        """Render a grayscale (luminance) intensity image.
+
+        Renders the internal color sensor and applies the same luminance-weighted
+        conversion used by the event camera simulator.
+
+        Args:
+            uuid: Sensor UUID.
+
+        Returns:
+            Intensity image tensor of shape (H, W) with values in [0, 1].
+        """
+        sensor = self._sim._sensors[uuid]
+        sensor.draw_observation()
+        color_image = sensor.get_observation()[..., :3]  # RGB (H, W, 3)
+        return color2intensity(color_image / 255.0)
 
     def render_navmesh(
         self,

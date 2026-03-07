@@ -99,6 +99,17 @@ class VisualBackendProtocol(Protocol):
         """
         ...
 
+    def render_grayscale(self, uuid: str) -> torch.Tensor | np.ndarray:
+        """Render grayscale intensity image from a color sensor.
+
+        Args:
+            uuid: Unique identifier for the grayscale sensor.
+
+        Returns:
+            Intensity image tensor of shape (H, W) with values in [0, 1].
+        """
+        ...
+
     def close(self) -> None:
         """Clean up and close the backend."""
         ...
