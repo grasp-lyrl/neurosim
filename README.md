@@ -37,28 +37,52 @@
 
 ### Option 1: Docker (Recommended)
 
-Docker provides a consistent environment with all dependencies pre-configured, including CUDA, ROS2 Humble, and ZMQ libraries.
+Docker provides a consistent environment with all dependencies pre-configured, including CUDA and ZMQ libraries. Two image variants are available:
+
+- `ros` (default): includes ROS2 Humble and ROS development tooling
+- `noros`: excludes ROS2 for a lighter image when ROS integration is not needed
 
 #### Prerequisites
 - Docker with NVIDIA GPU support ([nvidia-docker](https://github.com/NVIDIA/nvidia-docker))
 - NVIDIA drivers installed on host (nvcc 12.9+)
 
-#### Build the Docker Image (Dockerhub coming soon!)
+#### Pull Prebuilt Images (Recommended)
 
 ```bash
 # Clone the repository
 git clone https://github.com/grasp-lyrl/neurosim.git
 cd neurosim
 
-# Build the Docker image (takes ~15-20 minutes)
-bash docker/build.sh
+# Pull ROS-enabled image
+docker pull richeek01/neurosim:ros
+
+# OR Pull image without ROS2
+docker pull richeek01/neurosim:noros
+
+# Tag pulled images so existing run script works unchanged
+docker tag richeek01/neurosim:ros neurosim:ros
+docker tag richeek01/neurosim:noros neurosim:noros
+docker tag richeek01/neurosim:latest neurosim:latest
+```
+
+#### Build Locally (Optional)
+
+```bash
+# Build ROS-enabled image (default, takes ~15-20 minutes)
+bash docker/build.sh ros
+
+# Build image without ROS2
+bash docker/build.sh noros
 ```
 
 #### Run the Container
 
 ```bash
-# Launch the container with GPU and display support
-bash docker/run.sh
+# Launch ROS-enabled container (default)
+bash docker/run.sh ros
+
+# Launch container without ROS2
+bash docker/run.sh noros
 ```
 
 This will:
@@ -73,12 +97,8 @@ This will:
 # Navigate to the workspace
 cd neurosim
 
-# Create and activate conda environment
-conda create -n neurosim python=3.10 cmake=3.14.0 pip==25.1.1 -y
+# neurosim environment should be activated by default. If not, run:
 conda activate neurosim
-
-# Install neurosim
-pip install -e . -v
 
 # Download example scenes
 python -m habitat_sim.utils.datasets_download --uids habitat_test_scenes --data-path data/
