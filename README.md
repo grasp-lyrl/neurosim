@@ -6,6 +6,11 @@
 
 <div align="center">
 
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![CUDA 12.2+](https://img.shields.io/badge/CUDA-12.2+-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-orange.svg)](LICENSE)
+[![arXiv](https://img.shields.io/badge/arXiv-2602.15018-b31b1b.svg)](https://arxiv.org/abs/2602.15018)
+
 [Richeek Das](https://www.seas.upenn.edu/~richeek/), [Pratik Chaudhari](https://pratikac.github.io/)
 
 *GRASP Laboratory, University of Pennsylvania*
@@ -19,6 +24,16 @@
 <div align="center">
   <img src="assets/neurosim.gif" width="80%">
 </div>
+
+## 📰 News
+
+- [ ] Hardware-in-the-loop (HIL) support for real robot testing
+- [ ] Detailed documentation and tutorials
+- [ ] Independently moving objects in the scene
+- [ ] Reinforcement Learning (RL) support
+- `16/02/26`: Neurosim paper released on arXiv ([2602.15018](https://arxiv.org/abs/2602.15018))
+- `02/15/26`: [neurosim_cu_esim](https://github.com/grasp-lyrl/neurosim_cu_esim) now standalone for faster event simulation.
+- `02/06/26`: Initial release of Neurosim!
 
 **📚 Detailed documentation coming soon!**
 
