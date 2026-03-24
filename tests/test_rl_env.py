@@ -94,13 +94,10 @@ class TestNeurosimRLEnv:
         assert density >= 0.0
 
     def test_no_immediate_termination(self, env: NeurosimRLEnv):
-        """After reset + 1 step with a hover-like thrust, should not terminate."""
+        """After reset + 1 step with neutral normalized CTBR action, should not terminate."""
         env.reset(seed=3)
-        # Apply hover thrust (zero body rates, gravity-compensating thrust).
-        hover_thrust = float(
-            env.sim.dynamics._multirotor.mass * env.sim.dynamics._multirotor.g
-        )
-        action = np.array([hover_thrust, 0.0, 0.0, 0.0], dtype=np.float32)
+        # With min-max scaling, 0 maps to midpoint thrust and zero body rates.
+        action = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         _, _, terminated, _, info = env.step(action)
         assert not terminated, (
             f"Episode terminated on first step. "

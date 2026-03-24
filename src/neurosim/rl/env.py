@@ -27,7 +27,8 @@ class NeurosimRLEnv(gym.Env):
     """Single-drone RL environment with CTBR actions.
 
     Action space - 4-D continuous:
-        [collective_thrust, roll_rate, pitch_rate, yaw_rate]
+        Normalized policy action in [-1, 1]^4.
+        Internally rescaled to [collective_thrust, roll_rate, pitch_rate, yaw_rate].
 
     Observation modes:
         "events"   - event histogram only  (2, H, W)
@@ -44,9 +45,6 @@ class NeurosimRLEnv(gym.Env):
         obs_mode: str = "combined",
         # Episode length
         episode_seconds: float = 10.0,
-        # Action space
-        thrust_limits: tuple[float, float] | None = None,
-        body_rate_limit: float = 8.0,
         # Event sensor
         event_sensor_uuid: str | None = None,
         event_clip: float = 10.0,
@@ -104,6 +102,11 @@ class NeurosimRLEnv(gym.Env):
 
         self.init_speed_range = tuple(init_speed_range)
 
+        # Fixed CTBR body-rate limits aligned with RotorPy vectorized environments.
+        self.max_roll_br = 7.0
+        self.max_pitch_br = 7.0
+        self.max_yaw_br = 3.0
+
         self.w_velocity = float(w_velocity)
         self.w_events = float(w_events)
         self.w_angular = float(w_angular)
@@ -114,6 +117,7 @@ class NeurosimRLEnv(gym.Env):
         self.success_velocity_threshold = float(success_velocity_threshold)
         self.success_steps_required = int(success_steps_required)
         self._consecutive_success_steps = 0
+        self._prev_action: np.ndarray | None = None
 
         self.debug_save_events_png = bool(debug_save_events_png)
         self.debug_save_every_n_steps = max(int(debug_save_every_n_steps), 1)
@@ -166,22 +170,26 @@ class NeurosimRLEnv(gym.Env):
                 "event_downsample_factor is too large for event sensor resolution"
             )
 
-        # Action space - CTBR
+        # Action scaling - CTBR (policy uses normalized [-1, 1]^4 actions)
         mass = float(self.sim.dynamics._multirotor.mass)
         gravity = float(self.sim.dynamics._multirotor.g)
-        if thrust_limits is None:
-            thrust_limits = (0.0, 2.0 * mass * gravity)
+        self._hover_thrust = mass * gravity
 
-        action_low = np.array(
-            [thrust_limits[0], -body_rate_limit, -body_rate_limit, -body_rate_limit],
-            dtype=np.float32,
-        )
-        action_high = np.array(
-            [thrust_limits[1], body_rate_limit, body_rate_limit, body_rate_limit],
-            dtype=np.float32,
-        )
+        # Prefer rotor-speed-derived thrust limits from RotorPy params.
+        rotor_speed_min = np.asarray(self.sim.dynamics._multirotor.rotor_speed_min)
+        rotor_speed_max = np.asarray(self.sim.dynamics._multirotor.rotor_speed_max)
+        k_eta = np.asarray(self.sim.dynamics._multirotor.k_eta)
+
+        min_thrust_per_rotor = k_eta * np.square(rotor_speed_min)
+        max_thrust_per_rotor = k_eta * np.square(rotor_speed_max)
+        self.cmd_thrust_min = float(np.sum(min_thrust_per_rotor))
+        self.cmd_thrust_max = float(np.sum(max_thrust_per_rotor))
+
         self.action_space = spaces.Box(
-            low=action_low, high=action_high, dtype=np.float32
+            low=-1.0,
+            high=1.0,
+            shape=(4,),
+            dtype=np.float32,
         )
 
         # Observation spaces
@@ -421,12 +429,15 @@ class NeurosimRLEnv(gym.Env):
             event_activity = float(event_frame.sum())
             event_activity_density = event_activity / float(event_frame.size)
 
-        action_norm = float(np.linalg.norm(np.asarray(action, dtype=np.float32)))
+        if self._prev_action is None:
+            action_smoothness = 0.0
+        else:
+            action_smoothness = float(np.linalg.norm(action - self._prev_action))
 
         r_velocity = -self.w_velocity * vel_norm
         r_events = -self.w_events * event_activity_density
         r_angular = -self.w_angular * ang_rate_norm
-        r_action = -self.w_action * action_norm
+        r_action = -self.w_action * action_smoothness
         r_survival = self.w_survival
 
         reward = r_velocity + r_events + r_angular + r_action + r_survival
@@ -436,7 +447,7 @@ class NeurosimRLEnv(gym.Env):
             "ang_rate_norm": ang_rate_norm,
             "event_activity": event_activity,
             "event_activity_density": event_activity_density,
-            "action_norm": action_norm,
+            "action_smoothness": action_smoothness,
             "r_velocity": r_velocity,
             "r_events": r_events,
             "r_angular": r_angular,
@@ -460,6 +471,37 @@ class NeurosimRLEnv(gym.Env):
         if self.success_steps_required > 0:
             return self._consecutive_success_steps >= self.success_steps_required
         return False
+
+    @staticmethod
+    def _minmax_scale(
+        x: np.ndarray,
+        min_values: float | np.ndarray,
+        max_values: float | np.ndarray,
+    ) -> np.ndarray:
+        """Scale from [-1, 1] policy space to [min_values, max_values]."""
+        x_scaled = (x + 1.0) * 0.5 * (max_values - min_values) + min_values
+        return np.clip(x_scaled, min_values, max_values)
+
+    def _rescale_ctbr_action(self, action: np.ndarray) -> tuple[float, np.ndarray]:
+        """Convert normalized action in [-1, 1]^4 to physical CTBR commands."""
+        cmd_thrust = float(
+            self._minmax_scale(
+                action[0],
+                self.cmd_thrust_min,
+                self.cmd_thrust_max,
+            )
+        )
+        cmd_roll_br = float(
+            self._minmax_scale(action[1], -self.max_roll_br, self.max_roll_br)
+        )
+        cmd_pitch_br = float(
+            self._minmax_scale(action[2], -self.max_pitch_br, self.max_pitch_br)
+        )
+        cmd_yaw_br = float(
+            self._minmax_scale(action[3], -self.max_yaw_br, self.max_yaw_br)
+        )
+        cmd_w = np.asarray([cmd_roll_br, cmd_pitch_br, cmd_yaw_br], dtype=np.float64)
+        return cmd_thrust, cmd_w
 
     # ------------------------------------------------------------------
     # Visualisation
@@ -497,6 +539,7 @@ class NeurosimRLEnv(gym.Env):
         super().reset(seed=seed)
         self._ensure_visualizer()
         self._consecutive_success_steps = 0
+        self._prev_action = None
         self._debug_episode_idx += 1
         self._debug_step_idx = 0
         self._debug_accum_counter = 0
@@ -544,9 +587,11 @@ class NeurosimRLEnv(gym.Env):
         action = np.asarray(action, dtype=np.float32)
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
+        cmd_thrust, cmd_w = self._rescale_ctbr_action(action)
+
         control = {
-            "cmd_thrust": float(action[0]),
-            "cmd_w": np.asarray(action[1:], dtype=np.float64),
+            "cmd_thrust": cmd_thrust,
+            "cmd_w": cmd_w,
         }
 
         event_frame = np.zeros(
@@ -576,6 +621,7 @@ class NeurosimRLEnv(gym.Env):
         state = self.sim.dynamics.state
         self._maybe_dump_debug_images(event_frame, state)
         reward, reward_terms = self._compute_reward(state, event_frame, action)
+        self._prev_action = action.copy()
 
         terminated, term_reason = self._check_terminated(state)
         truncated = self.sim.time >= self.episode_seconds

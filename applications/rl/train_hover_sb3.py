@@ -5,9 +5,9 @@ Usage:
         --experiment-config applications/rl/configs/hover_sb3_experiment.yaml
 
 The script saves:
-    <output_dir>/best_model.zip     - best checkpoint (by eval reward)
-    <output_dir>/final_model.zip    - final checkpoint
-    <output_dir>/vecnormalize.pkl   - observation / reward normalizer state
+    outputs/rl/<run_name>/best_model.zip   - best checkpoint (by eval reward)
+    outputs/rl/<run_name>/final_model.zip  - final checkpoint
+    outputs/rl/<run_name>/vecnormalize.pkl - observation / reward normalizer state
     W&B run logs                    - training metrics and config
 
 Notes for vectorized training:
@@ -51,7 +51,6 @@ def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
         "eval_freq",
         "eval_episodes",
         "episode_seconds",
-        "body_rate_limit",
         "event_downsample_factor",
         "init_speed_min",
         "init_speed_max",
@@ -81,7 +80,6 @@ def make_env(
     settings: str,
     obs_mode: str = "combined",
     episode_seconds: float = 10.0,
-    body_rate_limit: float = 8.0,
     init_speed_range: tuple[float, float] = (0.5, 2.0),
     event_downsample_factor: int = 1,
     enable_navigable_check: bool = True,
@@ -101,7 +99,6 @@ def make_env(
             settings=settings,
             obs_mode=obs_mode,
             episode_seconds=episode_seconds,
-            body_rate_limit=body_rate_limit,
             init_speed_range=init_speed_range,
             event_downsample_factor=event_downsample_factor,
             enable_navigable_check=enable_navigable_check,
@@ -129,9 +126,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="YAML file containing experiment/training hyperparameters",
     )
-    p.add_argument("--output-dir", type=str, default="outputs/rl/hover_sb3")
     p.add_argument("--wandb-project", type=str, default="neurosim-rl")
-    p.add_argument("--wandb-run-name", type=str, default=None)
+    p.add_argument("--run-name", type=str, default=None)
     p.add_argument("--visualize", action="store_true")
     p.add_argument(
         "--debug-save-events-png",
@@ -215,13 +211,6 @@ def main():
     args = parse_args()
     exp = load_experiment_config(args.experiment_config)
 
-    output = Path(args.output_dir)
-    output.mkdir(parents=True, exist_ok=True)
-
-    debug_png_dir = args.debug_png_dir
-    if args.debug_save_events_png and debug_png_dir is None:
-        debug_png_dir = str(output / "debug_events")
-
     np.random.seed(int(exp["seed"]))
     num_envs = int(exp["num_envs"])
     n_steps = int(exp["n_steps"])
@@ -237,9 +226,16 @@ def main():
             "SB3 will use a truncated minibatch."
         )
 
-    run_name = args.wandb_run_name
+    run_name = args.run_name
     if run_name is None:
         run_name = f"neurosim_rl_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    output = Path("outputs/rl") / run_name
+    output.mkdir(parents=True, exist_ok=True)
+
+    debug_png_dir = args.debug_png_dir
+    if args.debug_save_events_png and debug_png_dir is None:
+        debug_png_dir = str(output / "debug_events")
 
     run = wandb.init(
         project=args.wandb_project,
@@ -261,7 +257,6 @@ def main():
             settings=str(exp["settings"]),
             obs_mode=str(exp["obs_mode"]),
             episode_seconds=float(exp["episode_seconds"]),
-            body_rate_limit=float(exp["body_rate_limit"]),
             init_speed_range=init_speed_range,
             event_downsample_factor=int(exp["event_downsample_factor"]),
             enable_navigable_check=bool(exp["enable_navigable_check"]),
@@ -308,7 +303,6 @@ def main():
                 settings=str(exp["settings"]),
                 obs_mode=str(exp["obs_mode"]),
                 episode_seconds=float(exp["episode_seconds"]),
-                body_rate_limit=float(exp["body_rate_limit"]),
                 init_speed_range=init_speed_range,
                 event_downsample_factor=int(exp["event_downsample_factor"]),
                 enable_navigable_check=bool(exp["enable_navigable_check"]),

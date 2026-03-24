@@ -3,7 +3,7 @@
 settings: configs/apartment_1-rl-settings.yaml
 obs_mode: combined
 seed: 42
-num_envs: 4
+num_envs: 8
 
 # Vec env backend for training rollouts: auto|dummy|subproc.
 # auto -> subproc when num_envs > 1, else dummy.
@@ -20,7 +20,6 @@ eval_episodes: 5
 eval_num_envs: 1
 
 episode_seconds: 15.0
-body_rate_limit: 8.0
 event_downsample_factor: 1
 init_speed_min: 0.5
 init_speed_max: 1.0

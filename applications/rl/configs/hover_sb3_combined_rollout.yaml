@@ -4,7 +4,6 @@ settings: configs/apartment_1-rl-settings.yaml
 obs_mode: combined
 
 episode_seconds: 15.0
-body_rate_limit: 8.0
 event_downsample_factor: 1
 init_speed_min: 0.5
 init_speed_max: 1.0
