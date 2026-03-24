@@ -1,26 +1,73 @@
 """Train a PPO policy for the neurosim hover-stop task using Stable-Baselines3.
 
 Usage:
-    python train_hover_sb3.py --settings configs/apartment_1-rl-settings.yaml
+    python train_hover_sb3.py \
+        --experiment-config applications/rl/configs/hover_sb3_experiment.yaml
 
 The script saves:
     <output_dir>/best_model.zip     - best checkpoint (by eval reward)
     <output_dir>/final_model.zip    - final checkpoint
     <output_dir>/vecnormalize.pkl   - observation / reward normalizer state
-    <output_dir>/tensorboard/       - TensorBoard logs
+    W&B run logs                    - training metrics and config
 """
 
+import yaml
 import argparse
-from pathlib import Path
-from typing import Any
-
 import numpy as np
+from typing import Any
+from pathlib import Path
+from datetime import datetime
+
+import wandb
+from wandb.integration.sb3 import WandbCallback
+
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from neurosim.rl import CombinedEventStateExtractor, EventCnnExtractor, NeurosimRLEnv
+
+
+def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if not isinstance(cfg, dict):
+        raise ValueError("Experiment config must be a YAML mapping")
+
+    required_keys = [
+        "settings",
+        "obs_mode",
+        "seed",
+        "total_timesteps",
+        "eval_freq",
+        "eval_episodes",
+        "episode_seconds",
+        "body_rate_limit",
+        "event_downsample_factor",
+        "init_speed_min",
+        "init_speed_max",
+        "enable_navigable_check",
+        "learning_rate",
+        "n_steps",
+        "batch_size",
+        "n_epochs",
+        "gamma",
+        "gae_lambda",
+        "clip_range",
+        "ent_coef",
+        "vf_coef",
+        "max_grad_norm",
+        "device",
+        "normalize_obs",
+        "normalize_reward",
+    ]
+    missing = [k for k in required_keys if k not in cfg]
+    if missing:
+        raise ValueError(f"Missing required experiment config keys: {missing}")
+
+    return cfg
 
 
 def make_env(
@@ -69,51 +116,15 @@ def make_env(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="SB3 PPO hover-stop training")
-    p.add_argument("--settings", type=str, required=True)
     p.add_argument(
-        "--obs-mode",
+        "--experiment-config",
         type=str,
-        default="combined",
-        choices=["events", "state", "combined"],
+        default=None,
+        help="YAML file containing experiment/training hyperparameters",
     )
-    p.add_argument(
-        "--demo-profile",
-        type=str,
-        default="none",
-        choices=["none", "state-baseline", "events-ablation"],
-        help="Optional fast-demo profile that overrides selected hyperparameters",
-    )
-    p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--total-timesteps", type=int, default=200_000)
-    p.add_argument("--episode-seconds", type=float, default=10.0)
-    p.add_argument("--body-rate-limit", type=float, default=8.0)
-    p.add_argument("--event-downsample-factor", type=int, default=1)
-    p.add_argument("--init-speed-min", type=float, default=0.5)
-    p.add_argument("--init-speed-max", type=float, default=1.0)
-    p.add_argument("--enable-navigable-check", action="store_true", default=True)
-    p.add_argument(
-        "--no-navigable-check", dest="enable_navigable_check", action="store_false"
-    )
-    p.add_argument("--learning-rate", type=float, default=3e-4)
-    p.add_argument("--n-steps", type=int, default=512)
-    p.add_argument("--batch-size", type=int, default=128)
-    p.add_argument("--n-epochs", type=int, default=4)
-    p.add_argument("--gamma", type=float, default=0.99)
-    p.add_argument("--gae-lambda", type=float, default=0.95)
-    p.add_argument("--clip-range", type=float, default=0.2)
-    p.add_argument("--ent-coef", type=float, default=0.005)
-    p.add_argument("--vf-coef", type=float, default=0.5)
-    p.add_argument("--max-grad-norm", type=float, default=0.5)
-    p.add_argument("--normalize-obs", action="store_true", default=True)
-    p.add_argument("--no-normalize-obs", dest="normalize_obs", action="store_false")
-    p.add_argument("--normalize-reward", action="store_true", default=True)
-    p.add_argument(
-        "--no-normalize-reward", dest="normalize_reward", action="store_false"
-    )
-    p.add_argument("--eval-freq", type=int, default=2048)
-    p.add_argument("--eval-episodes", type=int, default=5)
-    p.add_argument("--device", type=str, default="auto")
     p.add_argument("--output-dir", type=str, default="outputs/rl/hover_sb3")
+    p.add_argument("--wandb-project", type=str, default="neurosim-rl")
+    p.add_argument("--wandb-run-name", type=str, default=None)
     p.add_argument("--visualize", action="store_true")
     p.add_argument(
         "--debug-save-events-png",
@@ -128,46 +139,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--debug-save-every-n-steps", type=int, default=100)
     p.add_argument("--debug-accumulate-n-steps", type=int, default=20)
-    p.add_argument(
-        "--event-representation",
-        type=str,
-        default="histogram",
-        choices=["histogram", "event_frame"],
-        help="Event representation: 'histogram' accumulates counts, 'event_frame' marks events as 1",
-    )
-    p.add_argument(
-        "--event-log-compression",
-        type=float,
-        default=None,
-        help="Log compression factor (e.g., 10.0) for boosting low-intensity events; None for linear",
-    )
     return p.parse_args()
-
-
-def apply_demo_profile(args: argparse.Namespace) -> argparse.Namespace:
-    if args.demo_profile == "none":
-        return args
-
-    if args.demo_profile == "state-baseline":
-        args.obs_mode = "state"
-        args.total_timesteps = max(args.total_timesteps, 100_000)
-        args.n_steps = 512
-        args.batch_size = 128
-        args.n_epochs = 4
-        args.normalize_obs = True
-        args.normalize_reward = True
-
-    if args.demo_profile == "events-ablation":
-        args.obs_mode = "events"
-        args.event_downsample_factor = max(args.event_downsample_factor, 4)
-        args.total_timesteps = max(args.total_timesteps, 150_000)
-        args.n_steps = 1024
-        args.batch_size = 128
-        args.n_epochs = 4
-        args.normalize_obs = True
-        args.normalize_reward = True
-
-    return args
 
 
 def build_policy_config(obs_mode: str) -> tuple[str, dict[str, Any]]:
@@ -199,7 +171,7 @@ def build_vecnormalize_kwargs(
         "training": training,
     }
     if normalize_obs and obs_mode == "events":
-        # Event tensors are normalized inside the CNN extractor.
+        # Event tensors are normalized in the RL env.
         kwargs["norm_obs"] = False
     elif normalize_obs and obs_mode == "combined":
         # Normalize privileged state only, not event frames.
@@ -208,46 +180,62 @@ def build_vecnormalize_kwargs(
 
 
 def main():
-    args = apply_demo_profile(parse_args())
+    args = parse_args()
+    exp = load_experiment_config(args.experiment_config)
+
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
+
     debug_png_dir = args.debug_png_dir
     if args.debug_save_events_png and debug_png_dir is None:
         debug_png_dir = str(output / "debug_events")
 
-    np.random.seed(args.seed)
+    np.random.seed(int(exp["seed"]))
 
-    init_speed_range = (args.init_speed_min, args.init_speed_max)
+    run_name = args.wandb_run_name
+    if run_name is None:
+        run_name = f"neurosim_rl_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    run = wandb.init(
+        project=args.wandb_project,
+        name=run_name,
+        config={"cli": vars(args), "experiment": exp},
+        sync_tensorboard=True,
+        save_code=True,
+        dir=str(output),
+    )
+
+    init_speed_range = (float(exp["init_speed_min"]), float(exp["init_speed_max"]))
 
     # Training env
     train_vec = DummyVecEnv(
         [
             make_env(
-                settings=args.settings,
-                obs_mode=args.obs_mode,
-                episode_seconds=args.episode_seconds,
-                body_rate_limit=args.body_rate_limit,
+                settings=str(exp["settings"]),
+                obs_mode=str(exp["obs_mode"]),
+                episode_seconds=float(exp["episode_seconds"]),
+                body_rate_limit=float(exp["body_rate_limit"]),
                 init_speed_range=init_speed_range,
-                event_downsample_factor=args.event_downsample_factor,
-                enable_navigable_check=args.enable_navigable_check,
-                seed=args.seed,
+                event_downsample_factor=int(exp["event_downsample_factor"]),
+                enable_navigable_check=bool(exp["enable_navigable_check"]),
+                seed=int(exp["seed"]),
                 visualize=args.visualize,
                 debug_save_events_png=args.debug_save_events_png,
                 debug_png_dir=debug_png_dir,
                 debug_save_every_n_steps=args.debug_save_every_n_steps,
                 debug_accumulate_n_steps=args.debug_accumulate_n_steps,
-                event_representation=args.event_representation,
-                event_log_compression=args.event_log_compression,
+                event_representation=str(exp.get("event_representation", "histogram")),
+                event_log_compression=exp.get("event_log_compression"),
             )
         ]
     )
-    if args.normalize_obs or args.normalize_reward:
+    if bool(exp["normalize_obs"]) or bool(exp["normalize_reward"]):
         train_vec = VecNormalize(
             train_vec,
             **build_vecnormalize_kwargs(
-                obs_mode=args.obs_mode,
-                normalize_obs=args.normalize_obs,
-                normalize_reward=args.normalize_reward,
+                obs_mode=str(exp["obs_mode"]),
+                normalize_obs=bool(exp["normalize_obs"]),
+                normalize_reward=bool(exp["normalize_reward"]),
                 training=True,
             ),
         )
@@ -256,47 +244,47 @@ def main():
     eval_vec = DummyVecEnv(
         [
             make_env(
-                settings=args.settings,
-                obs_mode=args.obs_mode,
-                episode_seconds=args.episode_seconds,
-                body_rate_limit=args.body_rate_limit,
+                settings=str(exp["settings"]),
+                obs_mode=str(exp["obs_mode"]),
+                episode_seconds=float(exp["episode_seconds"]),
+                body_rate_limit=float(exp["body_rate_limit"]),
                 init_speed_range=init_speed_range,
-                event_downsample_factor=args.event_downsample_factor,
-                enable_navigable_check=args.enable_navigable_check,
-                seed=args.seed + 1000,
-                event_representation=args.event_representation,
-                event_log_compression=args.event_log_compression,
+                event_downsample_factor=int(exp["event_downsample_factor"]),
+                enable_navigable_check=bool(exp["enable_navigable_check"]),
+                seed=int(exp["seed"]) + 1000,
+                event_representation=str(exp.get("event_representation", "histogram")),
+                event_log_compression=exp.get("event_log_compression"),
             )
         ]
     )
-    if args.normalize_obs or args.normalize_reward:
+    if bool(exp["normalize_obs"]) or bool(exp["normalize_reward"]):
         eval_vec = VecNormalize(
             eval_vec,
             **build_vecnormalize_kwargs(
-                obs_mode=args.obs_mode,
-                normalize_obs=args.normalize_obs,
+                obs_mode=str(exp["obs_mode"]),
+                normalize_obs=bool(exp["normalize_obs"]),
                 normalize_reward=False,
                 training=False,
             ),
         )
 
-    policy, policy_kwargs = build_policy_config(args.obs_mode)
+    policy, policy_kwargs = build_policy_config(str(exp["obs_mode"]))
 
     model = PPO(
         policy,
         train_vec,
-        learning_rate=args.learning_rate,
-        n_steps=args.n_steps,
-        batch_size=args.batch_size,
-        n_epochs=args.n_epochs,
-        gamma=args.gamma,
-        gae_lambda=args.gae_lambda,
-        clip_range=args.clip_range,
-        ent_coef=args.ent_coef,
-        vf_coef=args.vf_coef,
-        max_grad_norm=args.max_grad_norm,
-        seed=args.seed,
-        device=args.device,
+        learning_rate=float(exp["learning_rate"]),
+        n_steps=int(exp["n_steps"]),
+        batch_size=int(exp["batch_size"]),
+        n_epochs=int(exp["n_epochs"]),
+        gamma=float(exp["gamma"]),
+        gae_lambda=float(exp["gae_lambda"]),
+        clip_range=float(exp["clip_range"]),
+        ent_coef=float(exp["ent_coef"]),
+        vf_coef=float(exp["vf_coef"]),
+        max_grad_norm=float(exp["max_grad_norm"]),
+        seed=int(exp["seed"]),
+        device=str(exp["device"]),
         verbose=1,
         tensorboard_log=str(output / "tensorboard"),
         policy_kwargs=policy_kwargs,
@@ -306,12 +294,22 @@ def main():
         eval_vec,
         best_model_save_path=str(output),
         log_path=str(output),
-        eval_freq=args.eval_freq,
-        n_eval_episodes=args.eval_episodes,
+        eval_freq=int(exp["eval_freq"]),
+        n_eval_episodes=int(exp["eval_episodes"]),
         deterministic=True,
     )
 
-    model.learn(total_timesteps=args.total_timesteps, callback=eval_callback)
+    wandb_callback = WandbCallback(
+        gradient_save_freq=int(exp.get("wandb_log_freq", 100)),
+        model_save_path=str(output / "wandb_models"),
+        model_save_freq=int(exp["eval_freq"]),
+        verbose=2,
+    )
+
+    model.learn(
+        total_timesteps=int(exp["total_timesteps"]),
+        callback=[eval_callback, wandb_callback],
+    )
 
     model.save(str(output / "final_model"))
     if isinstance(train_vec, VecNormalize):
@@ -320,6 +318,9 @@ def main():
     print(f"Training complete. Artifacts saved to {output}")
     train_vec.close()
     eval_vec.close()
+
+    if run is not None:
+        wandb.finish()
 
 
 if __name__ == "__main__":

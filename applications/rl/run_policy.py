@@ -2,7 +2,7 @@
 
 Usage:
     python run_policy.py --checkpoint outputs/rl/hover_sb3/best_model.zip \
-                         --settings configs/apartment_1-rl-settings.yaml
+                         --rollout-config applications/rl/configs/hover_sb3_rollout.yaml
 
 If the checkpoint was trained with VecNormalize, place ``vecnormalize.pkl``
 next to the model or pass ``--vecnormalize`` explicitly.
@@ -10,6 +10,9 @@ next to the model or pass ``--vecnormalize`` explicitly.
 
 import argparse
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
@@ -17,30 +20,46 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from neurosim.rl import NeurosimRLEnv
 
 
+def load_rollout_config(config_path: str | Path) -> dict[str, Any]:
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if not isinstance(cfg, dict):
+        raise ValueError("Rollout config must be a YAML mapping")
+
+    required_keys = [
+        "settings",
+        "obs_mode",
+        "episode_seconds",
+        "body_rate_limit",
+        "event_downsample_factor",
+        "init_speed_min",
+        "init_speed_max",
+        "enable_navigable_check",
+        "event_representation",
+        "event_log_compression",
+        "device",
+        "deterministic",
+    ]
+    missing = [k for k in required_keys if k not in cfg]
+    if missing:
+        raise ValueError(f"Missing required rollout config keys: {missing}")
+
+    return cfg
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run a trained SB3 PPO policy in neurosim")
     p.add_argument("--checkpoint", type=str, required=True, help="Path to .zip model")
-    p.add_argument("--settings", type=str, required=True)
     p.add_argument(
-        "--obs-mode",
+        "--rollout-config",
         type=str,
-        default="combined",
-        choices=["events", "state", "combined"],
+        default=None,
+        help="YAML file containing rollout/env parameters",
     )
     p.add_argument("--episodes", type=int, default=1)
-    p.add_argument("--episode-seconds", type=float, default=8.0)
-    p.add_argument("--body-rate-limit", type=float, default=8.0)
-    p.add_argument("--event-downsample-factor", type=int, default=1)
-    p.add_argument("--init-speed-min", type=float, default=0.5)
-    p.add_argument("--init-speed-max", type=float, default=2.0)
-    p.add_argument("--enable-navigable-check", action="store_true", default=True)
-    p.add_argument(
-        "--no-navigable-check", dest="enable_navigable_check", action="store_false"
-    )
-    p.add_argument("--device", type=str, default="auto")
     p.add_argument("--visualize", action="store_true")
     p.add_argument("--visualization-rrd-path", type=str, default=None)
-    p.add_argument("--deterministic", action="store_true")
     p.add_argument(
         "--debug-save-events-png",
         action="store_true",
@@ -54,19 +73,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--debug-save-every-n-steps", type=int, default=25)
     p.add_argument("--debug-accumulate-n-steps", type=int, default=10)
     p.add_argument(
-        "--event-representation",
-        type=str,
-        default="histogram",
-        choices=["histogram", "event_frame"],
-        help="Event representation: 'histogram' accumulates counts, 'event_frame' marks events as 1",
-    )
-    p.add_argument(
-        "--event-log-compression",
-        type=float,
-        default=None,
-        help="Log compression factor (e.g., 10.0) for boosting low-intensity events; None for linear",
-    )
-    p.add_argument(
         "--vecnormalize",
         type=str,
         default=None,
@@ -77,25 +83,26 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     args = parse_args()
-    init_speed_range = (args.init_speed_min, args.init_speed_max)
+    cfg = load_rollout_config(args.rollout_config)
+    init_speed_range = (float(cfg["init_speed_min"]), float(cfg["init_speed_max"]))
 
     def _make_env():
         return NeurosimRLEnv(
-            settings=args.settings,
-            obs_mode=args.obs_mode,
-            episode_seconds=args.episode_seconds,
-            body_rate_limit=args.body_rate_limit,
+            settings=str(cfg["settings"]),
+            obs_mode=str(cfg["obs_mode"]),
+            episode_seconds=float(cfg["episode_seconds"]),
+            body_rate_limit=float(cfg["body_rate_limit"]),
             init_speed_range=init_speed_range,
-            event_downsample_factor=args.event_downsample_factor,
-            enable_navigable_check=args.enable_navigable_check,
+            event_downsample_factor=int(cfg["event_downsample_factor"]),
+            enable_navigable_check=bool(cfg["enable_navigable_check"]),
             enable_visualization=args.visualize,
             visualization_rrd_path=args.visualization_rrd_path,
             debug_save_events_png=args.debug_save_events_png,
             debug_png_dir=args.debug_png_dir,
             debug_save_every_n_steps=args.debug_save_every_n_steps,
             debug_accumulate_n_steps=args.debug_accumulate_n_steps,
-            event_representation=args.event_representation,
-            event_log_compression=args.event_log_compression,
+            event_representation=str(cfg["event_representation"]),
+            event_log_compression=cfg["event_log_compression"],
         )
 
     vec_env = DummyVecEnv([_make_env])
@@ -113,7 +120,7 @@ def main():
         vec_env.norm_reward = False
         print(f"Loaded VecNormalize from {vecnorm_path}")
 
-    model = PPO.load(args.checkpoint, env=vec_env, device=args.device)
+    model = PPO.load(args.checkpoint, env=vec_env, device=str(cfg["device"]))
 
     for ep in range(1, args.episodes + 1):
         obs = vec_env.reset()
@@ -122,7 +129,7 @@ def main():
 
         while True:
             step += 1
-            action, _ = model.predict(obs, deterministic=args.deterministic)
+            action, _ = model.predict(obs, deterministic=bool(cfg["deterministic"]))
             obs, reward, done, infos = vec_env.step(action)
             total_reward += float(reward[0])
 
