@@ -1,14 +1,25 @@
 # Experimental/training hyperparameters for hover-stop PPO.
-# Keep frequently tuned settings here instead of argparse.
 
 settings: configs/apartment_1-rl-settings.yaml
 obs_mode: combined
-seed: 1
-total_timesteps: 1000000
+seed: 42
+num_envs: 4
+
+# Vec env backend for training rollouts: auto|dummy|subproc.
+# auto -> subproc when num_envs > 1, else dummy.
+# vec_env_type: auto
+# # Process start method for SubprocVecEnv: spawn|forkserver|fork.
+# # spawn is safest with CUDA/Habitat in most setups.
+# vec_env_start_method: spawn
+
+total_timesteps: 2000000
+
+# Desired eval cadence in total environment steps (auto-adjusted by num_envs).
 eval_freq: 2048
 eval_episodes: 5
+eval_num_envs: 1
 
-episode_seconds: 8.0
+episode_seconds: 15.0
 body_rate_limit: 8.0
 event_downsample_factor: 1
 init_speed_min: 0.5
@@ -21,7 +32,7 @@ event_log_compression: null
 learning_rate: 0.0003
 n_steps: 512
 batch_size: 128
-n_epochs: 10
+n_epochs: 8
 gamma: 0.99
 gae_lambda: 0.95
 clip_range: 0.2

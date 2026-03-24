@@ -9,6 +9,12 @@ The script saves:
     <output_dir>/final_model.zip    - final checkpoint
     <output_dir>/vecnormalize.pkl   - observation / reward normalizer state
     W&B run logs                    - training metrics and config
+
+Notes for vectorized training:
+    - `num_envs` controls PPO rollout collection parallelism.
+    - `eval_freq` in config is interpreted in environment steps;
+        converted to callback frequency so evaluation stays consistent
+    - training uses subprocess vectorization for heavy simulators (Habitat).
 """
 
 import yaml
@@ -24,7 +30,7 @@ from wandb.integration.sb3 import WandbCallback
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from neurosim.rl import CombinedEventStateExtractor, EventCnnExtractor, NeurosimRLEnv
 
@@ -40,6 +46,7 @@ def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
         "settings",
         "obs_mode",
         "seed",
+        "num_envs",
         "total_timesteps",
         "eval_freq",
         "eval_episodes",
@@ -179,6 +186,31 @@ def build_vecnormalize_kwargs(
     return kwargs
 
 
+def build_train_vec_env(
+    env_fns: list,
+    num_envs: int,
+    vec_env_type: str,
+    start_method: str,
+):
+    """Construct training VecEnv; use subprocess workers for heavy environments."""
+    resolved_type = vec_env_type.strip().lower()
+    if resolved_type not in {"auto", "dummy", "subproc"}:
+        raise ValueError("vec_env_type must be one of: auto, dummy, subproc")
+
+    if resolved_type == "dummy":
+        return DummyVecEnv(env_fns)
+
+    if resolved_type == "subproc" or (resolved_type == "auto" and num_envs > 1):
+        resolved_start = start_method.strip().lower()
+        if resolved_start not in {"fork", "forkserver", "spawn"}:
+            raise ValueError(
+                "vec_env_start_method must be one of: fork, forkserver, spawn"
+            )
+        return SubprocVecEnv(env_fns, start_method=resolved_start)
+
+    return DummyVecEnv(env_fns)
+
+
 def main():
     args = parse_args()
     exp = load_experiment_config(args.experiment_config)
@@ -191,6 +223,19 @@ def main():
         debug_png_dir = str(output / "debug_events")
 
     np.random.seed(int(exp["seed"]))
+    num_envs = int(exp["num_envs"])
+    n_steps = int(exp["n_steps"])
+    batch_size = int(exp["batch_size"])
+    rollout_batch = n_steps * num_envs
+    if batch_size > rollout_batch:
+        raise ValueError(
+            f"batch_size ({batch_size}) must be <= n_steps * num_envs ({rollout_batch})"
+        )
+    if rollout_batch % batch_size != 0:
+        print(
+            "Warning: n_steps * num_envs is not divisible by batch_size; "
+            "SB3 will use a truncated minibatch."
+        )
 
     run_name = args.wandb_run_name
     if run_name is None:
@@ -207,27 +252,39 @@ def main():
 
     init_speed_range = (float(exp["init_speed_min"]), float(exp["init_speed_max"]))
 
-    # Training env
-    train_vec = DummyVecEnv(
-        [
-            make_env(
-                settings=str(exp["settings"]),
-                obs_mode=str(exp["obs_mode"]),
-                episode_seconds=float(exp["episode_seconds"]),
-                body_rate_limit=float(exp["body_rate_limit"]),
-                init_speed_range=init_speed_range,
-                event_downsample_factor=int(exp["event_downsample_factor"]),
-                enable_navigable_check=bool(exp["enable_navigable_check"]),
-                seed=int(exp["seed"]),
-                visualize=args.visualize,
-                debug_save_events_png=args.debug_save_events_png,
-                debug_png_dir=debug_png_dir,
-                debug_save_every_n_steps=args.debug_save_every_n_steps,
-                debug_accumulate_n_steps=args.debug_accumulate_n_steps,
-                event_representation=str(exp.get("event_representation", "histogram")),
-                event_log_compression=exp.get("event_log_compression"),
-            )
-        ]
+    vec_env_type = str(exp.get("vec_env_type", "auto"))
+    vec_env_start_method = str(exp.get("vec_env_start_method", "spawn"))
+
+    # Training env (use multiprocessing for heavy simulators when num_envs > 1)
+    train_env_fns = [
+        make_env(
+            settings=str(exp["settings"]),
+            obs_mode=str(exp["obs_mode"]),
+            episode_seconds=float(exp["episode_seconds"]),
+            body_rate_limit=float(exp["body_rate_limit"]),
+            init_speed_range=init_speed_range,
+            event_downsample_factor=int(exp["event_downsample_factor"]),
+            enable_navigable_check=bool(exp["enable_navigable_check"]),
+            seed=int(exp["seed"]) + env_idx,
+            visualize=args.visualize,
+            debug_save_events_png=args.debug_save_events_png,
+            debug_png_dir=(
+                str(Path(debug_png_dir) / f"env_{env_idx}")
+                if debug_png_dir is not None
+                else None
+            ),
+            debug_save_every_n_steps=args.debug_save_every_n_steps,
+            debug_accumulate_n_steps=args.debug_accumulate_n_steps,
+            event_representation=str(exp.get("event_representation", "histogram")),
+            event_log_compression=exp.get("event_log_compression"),
+        )
+        for env_idx in range(num_envs)
+    ]
+    train_vec = build_train_vec_env(
+        train_env_fns,
+        num_envs=num_envs,
+        vec_env_type=vec_env_type,
+        start_method=vec_env_start_method,
     )
     if bool(exp["normalize_obs"]) or bool(exp["normalize_reward"]):
         train_vec = VecNormalize(
@@ -241,6 +298,10 @@ def main():
         )
 
     # Eval env (separate instance, shared normalization stats)
+    eval_num_envs = int(exp.get("eval_num_envs", 1))
+    if eval_num_envs <= 0:
+        raise ValueError("eval_num_envs must be >= 1")
+
     eval_vec = DummyVecEnv(
         [
             make_env(
@@ -251,10 +312,11 @@ def main():
                 init_speed_range=init_speed_range,
                 event_downsample_factor=int(exp["event_downsample_factor"]),
                 enable_navigable_check=bool(exp["enable_navigable_check"]),
-                seed=int(exp["seed"]) + 1000,
+                seed=int(exp["seed"]) + 1000 + env_idx,
                 event_representation=str(exp.get("event_representation", "histogram")),
                 event_log_compression=exp.get("event_log_compression"),
             )
+            for env_idx in range(eval_num_envs)
         ]
     )
     if bool(exp["normalize_obs"]) or bool(exp["normalize_reward"]):
@@ -294,7 +356,7 @@ def main():
         eval_vec,
         best_model_save_path=str(output),
         log_path=str(output),
-        eval_freq=int(exp["eval_freq"]),
+        eval_freq=max(int(exp["eval_freq"]) // num_envs, 1),
         n_eval_episodes=int(exp["eval_episodes"]),
         deterministic=True,
     )
@@ -302,7 +364,7 @@ def main():
     wandb_callback = WandbCallback(
         gradient_save_freq=int(exp.get("wandb_log_freq", 100)),
         model_save_path=str(output / "wandb_models"),
-        model_save_freq=int(exp["eval_freq"]),
+        model_save_freq=max(int(exp["eval_freq"]) // num_envs, 1),
         verbose=2,
     )
 

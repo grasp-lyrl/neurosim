@@ -1,10 +1,9 @@
 # Rollout/inference config for hover-stop PPO policy execution.
-# Keep this aligned with training env settings.
 
 settings: configs/apartment_1-rl-settings.yaml
 obs_mode: combined
 
-episode_seconds: 8.0
+episode_seconds: 15.0
 body_rate_limit: 8.0
 event_downsample_factor: 1
 init_speed_min: 0.5

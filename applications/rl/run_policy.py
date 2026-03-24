@@ -65,11 +65,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Save periodic event-frame PNGs for headless debugging",
     )
-    p.add_argument(
-        "--debug-png-dir",
-        type=str,
-        default="outputs/rl/hover_sb3/debug_events_rollout",
-    )
+    p.add_argument("--debug-png-dir", type=str, default=None)
     p.add_argument("--debug-save-every-n-steps", type=int, default=25)
     p.add_argument("--debug-accumulate-n-steps", type=int, default=10)
     p.add_argument(
@@ -86,6 +82,12 @@ def main():
     cfg = load_rollout_config(args.rollout_config)
     init_speed_range = (float(cfg["init_speed_min"]), float(cfg["init_speed_max"]))
 
+    parent = Path(args.checkpoint).parent
+    debug_png_dir = args.debug_png_dir
+    if args.debug_save_events_png and debug_png_dir is None:
+        debug_png_dir = parent / "debug_events_rollout"
+        print(f"Debug PNG directory not specified, using {debug_png_dir}")
+
     def _make_env():
         return NeurosimRLEnv(
             settings=str(cfg["settings"]),
@@ -98,7 +100,7 @@ def main():
             enable_visualization=args.visualize,
             visualization_rrd_path=args.visualization_rrd_path,
             debug_save_events_png=args.debug_save_events_png,
-            debug_png_dir=args.debug_png_dir,
+            debug_png_dir=debug_png_dir,
             debug_save_every_n_steps=args.debug_save_every_n_steps,
             debug_accumulate_n_steps=args.debug_accumulate_n_steps,
             event_representation=str(cfg["event_representation"]),
@@ -110,7 +112,7 @@ def main():
     # Restore observation / reward normalizer if available
     vecnorm_path = args.vecnormalize
     if vecnorm_path is None:
-        candidate = Path(args.checkpoint).parent / "vecnormalize.pkl"
+        candidate = parent / "vecnormalize.pkl"
         if candidate.exists():
             vecnorm_path = str(candidate)
 
