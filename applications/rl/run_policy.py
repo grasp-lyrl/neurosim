@@ -54,6 +54,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--debug-save-every-n-steps", type=int, default=25)
     p.add_argument("--debug-accumulate-n-steps", type=int, default=10)
     p.add_argument(
+        "--event-representation",
+        type=str,
+        default="histogram",
+        choices=["histogram", "event_frame"],
+        help="Event representation: 'histogram' accumulates counts, 'event_frame' marks events as 1",
+    )
+    p.add_argument(
+        "--event-log-compression",
+        type=float,
+        default=None,
+        help="Log compression factor (e.g., 10.0) for boosting low-intensity events; None for linear",
+    )
+    p.add_argument(
         "--vecnormalize",
         type=str,
         default=None,
@@ -81,6 +94,8 @@ def main():
             debug_png_dir=args.debug_png_dir,
             debug_save_every_n_steps=args.debug_save_every_n_steps,
             debug_accumulate_n_steps=args.debug_accumulate_n_steps,
+            event_representation=args.event_representation,
+            event_log_compression=args.event_log_compression,
         )
 
     vec_env = DummyVecEnv([_make_env])

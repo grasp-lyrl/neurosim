@@ -37,6 +37,8 @@ def make_env(
     debug_png_dir: str | None = None,
     debug_save_every_n_steps: int = 100,
     debug_accumulate_n_steps: int = 20,
+    event_representation: str = "histogram",
+    event_log_compression: float | None = None,
 ):
     """Factory callable for DummyVecEnv / SubprocVecEnv."""
 
@@ -54,6 +56,8 @@ def make_env(
             debug_png_dir=debug_png_dir,
             debug_save_every_n_steps=debug_save_every_n_steps,
             debug_accumulate_n_steps=debug_accumulate_n_steps,
+            event_representation=event_representation,
+            event_log_compression=event_log_compression,
         )
         env = Monitor(env)
         if seed is not None:
@@ -85,7 +89,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--body-rate-limit", type=float, default=8.0)
     p.add_argument("--event-downsample-factor", type=int, default=1)
     p.add_argument("--init-speed-min", type=float, default=0.5)
-    p.add_argument("--init-speed-max", type=float, default=2.0)
+    p.add_argument("--init-speed-max", type=float, default=1.0)
     p.add_argument("--enable-navigable-check", action="store_true", default=True)
     p.add_argument(
         "--no-navigable-check", dest="enable_navigable_check", action="store_false"
@@ -124,6 +128,19 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--debug-save-every-n-steps", type=int, default=100)
     p.add_argument("--debug-accumulate-n-steps", type=int, default=20)
+    p.add_argument(
+        "--event-representation",
+        type=str,
+        default="histogram",
+        choices=["histogram", "event_frame"],
+        help="Event representation: 'histogram' accumulates counts, 'event_frame' marks events as 1",
+    )
+    p.add_argument(
+        "--event-log-compression",
+        type=float,
+        default=None,
+        help="Log compression factor (e.g., 10.0) for boosting low-intensity events; None for linear",
+    )
     return p.parse_args()
 
 
@@ -219,6 +236,8 @@ def main():
                 debug_png_dir=debug_png_dir,
                 debug_save_every_n_steps=args.debug_save_every_n_steps,
                 debug_accumulate_n_steps=args.debug_accumulate_n_steps,
+                event_representation=args.event_representation,
+                event_log_compression=args.event_log_compression,
             )
         ]
     )
@@ -245,6 +264,8 @@ def main():
                 event_downsample_factor=args.event_downsample_factor,
                 enable_navigable_check=args.enable_navigable_check,
                 seed=args.seed + 1000,
+                event_representation=args.event_representation,
+                event_log_compression=args.event_log_compression,
             )
         ]
     )

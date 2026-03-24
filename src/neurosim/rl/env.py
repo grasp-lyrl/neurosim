@@ -52,7 +52,10 @@ class NeurosimRLEnv(gym.Env):
         event_clip: float = 10.0,
         event_downsample_factor: int = 1,
         # Initial-velocity randomisation
-        init_speed_range: tuple[float, float] = (0.5, 2.0),
+        init_speed_range: tuple[float, float] = (0.5, 1.0),
+        # Event representation and normalization
+        event_representation: str = "histogram",
+        event_log_compression: float | None = None,
         # Safety / termination
         enable_navigable_check: bool = True,
         # Reward weights
@@ -83,6 +86,14 @@ class NeurosimRLEnv(gym.Env):
         self.episode_seconds = float(episode_seconds)
         self.event_clip = float(event_clip)
         self.event_downsample_factor = max(int(event_downsample_factor), 1)
+        self.event_representation = event_representation
+        if event_representation not in {"histogram", "event_frame"}:
+            raise ValueError(
+                "event_representation must be 'histogram' or 'event_frame'"
+            )
+        self.event_log_compression = (
+            float(event_log_compression) if event_log_compression is not None else None
+        )
         self.enable_visualization = bool(enable_visualization)
         self.visualization_rrd_path = visualization_rrd_path
         self.visualization_log_every_n_steps = max(
@@ -245,8 +256,15 @@ class NeurosimRLEnv(gym.Env):
 
     def _normalize_event_frame(self, event_frame: np.ndarray) -> np.ndarray:
         """Scale clipped event counts to [0, 1] before policy/CNN consumption."""
-        scale = max(self.event_clip, 1e-6)
-        event_frame /= scale
+        if self.event_log_compression is not None:
+            # Apply log compression to boost low-intensity events while compressing peaks.
+            # Formula: log(1 + k*x) / log(1 + k*clip) where k controls compression strength.
+            k = self.event_log_compression
+            event_frame = np.log1p(k * event_frame) / np.log1p(k * self.event_clip)
+        else:
+            # Linear normalization.
+            scale = max(self.event_clip, 1e-6)
+            event_frame /= scale
         np.clip(event_frame, 0.0, 1.0, out=event_frame)
         return event_frame
 
@@ -270,7 +288,11 @@ class NeurosimRLEnv(gym.Env):
         y = y.astype(np.int64, copy=False)
         p = p.astype(np.int64, copy=False)
 
-        np.add.at(event_frame, (p, y, x), 1.0)
+        if self.event_representation == "histogram":
+            np.add.at(event_frame, (p, y, x), 1.0)
+        elif self.event_representation == "event_frame":
+            # Mark pixels with events as 1 (binary representation, not accumulated).
+            event_frame[p, y, x] = 1.0
 
     @staticmethod
     def _write_png(path: Path, image: np.ndarray) -> None:
@@ -528,7 +550,10 @@ class NeurosimRLEnv(gym.Env):
             )
 
         event_frame = np.clip(event_frame, 0.0, self.event_clip, out=event_frame)
-        event_frame = self._normalize_event_frame(event_frame)
+        # Normalize event frame to [0, 1] range for policy consumption if using histogram representation.
+        # Event frames are binary by design and don't require normalization.
+        if self.event_representation == "histogram":
+            event_frame = self._normalize_event_frame(event_frame)
         event_frame = self._downsample_event_frame(event_frame)
 
         state = self.sim.dynamics.state
