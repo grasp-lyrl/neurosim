@@ -62,6 +62,7 @@ class NeurosimRLEnv(gym.Env):
         w_velocity: float = 1.0,
         w_events: float = 0.001,
         w_angular: float = 0.05,
+        w_action: float = 1e-5,
         w_survival: float = 0.2,
         crash_penalty: float = 10.0,
         # Success detection
@@ -106,6 +107,7 @@ class NeurosimRLEnv(gym.Env):
         self.w_velocity = float(w_velocity)
         self.w_events = float(w_events)
         self.w_angular = float(w_angular)
+        self.w_action = float(w_action)
         self.w_survival = float(w_survival)
         self.crash_penalty = float(crash_penalty)
 
@@ -404,31 +406,41 @@ class NeurosimRLEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def _compute_reward(
-        self, state: dict[str, np.ndarray], event_frame: np.ndarray
+        self, state: dict[str, np.ndarray], event_frame: np.ndarray, action: np.ndarray
     ) -> tuple[float, dict[str, float]]:
         v = np.asarray(state["v"], dtype=np.float32)
         w = np.asarray(state["w"], dtype=np.float32)
 
         vel_norm = float(np.linalg.norm(v))
         ang_rate_norm = float(np.linalg.norm(w))
-        event_activity = float(event_frame.sum())
-        event_activity_density = event_activity / float(event_frame.size)
+        if self.obs_mode == "state":
+            # State-only baseline should not pay event penalties.
+            event_activity = 0.0
+            event_activity_density = 0.0
+        else:
+            event_activity = float(event_frame.sum())
+            event_activity_density = event_activity / float(event_frame.size)
+
+        action_norm = float(np.linalg.norm(np.asarray(action, dtype=np.float32)))
 
         r_velocity = -self.w_velocity * vel_norm
         r_events = -self.w_events * event_activity_density
         r_angular = -self.w_angular * ang_rate_norm
+        r_action = -self.w_action * action_norm
         r_survival = self.w_survival
 
-        reward = r_velocity + r_events + r_angular + r_survival
+        reward = r_velocity + r_events + r_angular + r_action + r_survival
 
         return reward, {
             "vel_norm": vel_norm,
             "ang_rate_norm": ang_rate_norm,
             "event_activity": event_activity,
             "event_activity_density": event_activity_density,
+            "action_norm": action_norm,
             "r_velocity": r_velocity,
             "r_events": r_events,
             "r_angular": r_angular,
+            "r_action": r_action,
             "r_survival": r_survival,
         }
 
@@ -543,6 +555,11 @@ class NeurosimRLEnv(gym.Env):
 
         for _ in range(self.steps_per_action):
             self.sim.step(control)
+
+            if self.obs_mode == "state":
+                # Skip event rendering/accumulation for state-only baseline.
+                continue
+
             measurements = self.sim._render_sensors()
             self._maybe_visualize(measurements)
             self._accumulate_events_into_frame(
@@ -558,7 +575,7 @@ class NeurosimRLEnv(gym.Env):
 
         state = self.sim.dynamics.state
         self._maybe_dump_debug_images(event_frame, state)
-        reward, reward_terms = self._compute_reward(state, event_frame)
+        reward, reward_terms = self._compute_reward(state, event_frame, action)
 
         terminated, term_reason = self._check_terminated(state)
         truncated = self.sim.time >= self.episode_seconds
