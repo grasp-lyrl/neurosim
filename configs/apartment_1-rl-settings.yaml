@@ -1,0 +1,69 @@
+# Barebones apartment_1 configuration for RL hover-stop.
+# This file intentionally omits `trajectory` because the RL environment applies
+# CTBR actions directly and randomizes initial conditions on reset.
+
+simulator:
+  world_rate: 1000 # Hz
+  control_rate: 100 # Hz
+  sim_time: 30 # seconds (upper bound; RL env enforces episode_seconds)
+  coord_transform: "rotorpy_to_hm3d"
+
+  # Keep only the extra sensor needed for state estimation in dynamics/control.
+  additional_sensors:
+    imu_1:
+      type: "imu"
+      model: "rotorpy"
+      sampling_rate: 50 # Hz
+
+  # Minimal sensor set for RL: event stream + IMU/state-related sensor.
+  sensor_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 1000 # Hz
+
+  # Optional visualization throttling when --visualize is enabled.
+  viz_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 20 # Hz
+
+visual_backend:
+  gpu_id: 0
+  scene: "data/scene_datasets/habitat-test-scenes/apartment_1.glb"
+  scene_dataset_config_file: "default"
+  clear_color: [0.0, 0.0, 0.0, 1.0]
+  default_agent: 0
+
+  # Needed for Habitat navmesh and RL safety checks.
+  agent_height: 1.0
+  agent_radius: 0.3
+  agent_max_climb: 1.0
+  agent_max_slope: 90.0
+
+  enable_hbao: false
+  frustum_culling: true
+
+  seed: 324
+  physics_config_file: "data/default.physics_config.json"
+  enable_physics: true
+
+  # Minimal visual sensor set for RL observation.
+  sensors:
+    event_camera_1:
+      type: "event"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 20.0
+      backend: "cuda"
+      contrast_threshold_neg: 0.15
+      contrast_threshold_pos: 0.15
+      anti_aliasing: 8
+
+controller:
+  model: "rotorpy_se3"
+  vehicle: "crazyflie"
+
+dynamics:
+  model: "rotorpy_multirotor_euler"
+  vehicle: "crazyflie"
