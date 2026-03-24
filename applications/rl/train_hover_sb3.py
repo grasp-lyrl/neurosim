@@ -63,6 +63,7 @@ def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
         "gae_lambda",
         "clip_range",
         "ent_coef",
+        "log_std_init",
         "vf_coef",
         "max_grad_norm",
         "device",
@@ -145,19 +146,28 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_policy_config(obs_mode: str) -> tuple[str, dict[str, Any]]:
+def build_policy_config(
+    obs_mode: str,
+    log_std_init: float,
+) -> tuple[str, dict[str, Any]]:
+    # Normalized action space [-1, 1] requires lower initial policy std
+    # to prevent excessive early exploration.
+    base_policy_kwargs = {"log_std_init": float(log_std_init)}
+
     if obs_mode == "state":
-        return "MlpPolicy", {}
+        return "MlpPolicy", base_policy_kwargs
     if obs_mode == "events":
         return "CnnPolicy", {
             "features_extractor_class": EventCnnExtractor,
             "features_extractor_kwargs": {"features_dim": 128},
             "normalize_images": False,
+            **base_policy_kwargs,
         }
     return "MultiInputPolicy", {
         "features_extractor_class": CombinedEventStateExtractor,
         "features_extractor_kwargs": {"features_dim": 192},
         "normalize_images": False,
+        **base_policy_kwargs,
     }
 
 
@@ -324,7 +334,10 @@ def main():
             ),
         )
 
-    policy, policy_kwargs = build_policy_config(str(exp["obs_mode"]))
+    policy, policy_kwargs = build_policy_config(
+        str(exp["obs_mode"]),
+        float(exp["log_std_init"]),
+    )
 
     model = PPO(
         policy,
