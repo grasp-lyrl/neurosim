@@ -23,16 +23,25 @@ def get_vehicle_params(vehicle_name: str = "crazyflie") -> dict[str, Any]:
 
 
 def get_multirotor_model(
-    dynamics_type: DynamicsType, vehicle_params: dict[str, Any]
+    dynamics_type: DynamicsType,
+    vehicle_params: dict[str, Any],
+    control_abstraction: str = "cmd_motor_speeds",
 ) -> Multirotor:
     if dynamics_type == DynamicsType.ROTORPY_MULTIROTOR:
         quadsim = Multirotor(
-            vehicle_params, aero=False, integrator_kwargs={"method": "RK45"}
+            vehicle_params,
+            control_abstraction=control_abstraction,
+            aero=False,
+            integrator_kwargs={"method": "RK45"},
         )
     elif dynamics_type == DynamicsType.ROTORPY_MULTIROTOR_EULER:
         from .multirotor_euler import MultirotorEuler
 
-        quadsim = MultirotorEuler(vehicle_params, aero=False)
+        quadsim = MultirotorEuler(
+            vehicle_params,
+            control_abstraction=control_abstraction,
+            aero=False,
+        )
     else:
         raise ValueError(f"Unsupported multirotor model: {dynamics_type}")
 
@@ -44,17 +53,59 @@ class RotorpyDynamics(DynamicsProtocol):
         self,
         vehicle: str = "crazyflie",
         dynamics_type: DynamicsType = DynamicsType.ROTORPY_MULTIROTOR,
+        control_abstraction: str = "cmd_motor_speeds",
         initial_state: dict[str, np.ndarray] = {},
     ):
         vehicle_params = get_vehicle_params(vehicle)
-        self._multirotor = get_multirotor_model(dynamics_type, vehicle_params)
+        self._multirotor = get_multirotor_model(
+            dynamics_type,
+            vehicle_params,
+            control_abstraction=control_abstraction,
+        )
 
         if initial_state:
             # Update keys, keeping rest of the initial state intact
             for k, v in initial_state.items():
                 self._multirotor.initial_state[k] = v
-        self._last_control = {}
+        self._last_control = self._default_control()
         self._state = self._multirotor.initial_state
+
+    def _default_control(self) -> dict[str, np.ndarray | float]:
+        abstraction = getattr(
+            self._multirotor, "control_abstraction", "cmd_motor_speeds"
+        )
+        if abstraction == "cmd_ctbr":
+            return {
+                "cmd_thrust": float(self._multirotor.mass * self._multirotor.g),
+                "cmd_w": np.zeros(3, dtype=np.float64),
+            }
+        if abstraction == "cmd_ctbm":
+            return {
+                "cmd_thrust": float(self._multirotor.mass * self._multirotor.g),
+                "cmd_moment": np.zeros(3, dtype=np.float64),
+            }
+        if abstraction == "cmd_motor_thrusts":
+            return {
+                "cmd_motor_thrusts": np.zeros(
+                    self._multirotor.num_rotors, dtype=np.float64
+                )
+            }
+        if abstraction == "cmd_vel":
+            return {"cmd_v": np.zeros(3, dtype=np.float64)}
+        if abstraction == "cmd_ctatt":
+            return {
+                "cmd_thrust": float(self._multirotor.mass * self._multirotor.g),
+                "cmd_q": np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64),
+            }
+        if abstraction == "cmd_acc":
+            return {
+                "cmd_acc": np.array([0.0, 0.0, self._multirotor.g], dtype=np.float64)
+            }
+        return {
+            "cmd_motor_speeds": np.asarray(
+                self._multirotor.initial_state["rotor_speeds"], dtype=np.float64
+            )
+        }
 
     @property
     def state(self) -> dict[str, np.ndarray]:

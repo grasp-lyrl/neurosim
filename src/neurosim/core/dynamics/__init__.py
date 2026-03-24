@@ -38,6 +38,7 @@ def create_dynamics(
             vehicle=kwargs["vehicle"],
             dynamics_type=dynamics_type,
             initial_state=kwargs.get("initial_state", {}),
+            control_abstraction=kwargs.get("control_abstraction", "cmd_motor_speeds"),
         )
     else:
         raise ValueError(f"Unsupported dynamics type: {dynamics_type}")

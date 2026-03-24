@@ -264,11 +264,13 @@ class SynchronousSimulator:
         # TODO: This is fine for HabitatWrapper, but may need to be more general later
         # TODO: Ideally, we want to move on from habitat pathfinder to a more general navmesh handler
         # TODO: and path planner, say GCOPTER with Recast/Detour or similar.
-        traj_kwargs = self.settings.get("trajectory", {}).copy()
-        if hasattr(self.visual_backend, "_sim"):
-            traj_kwargs["pathfinder"] = self.visual_backend._sim.pathfinder
-        traj_kwargs["coord_transform"] = self.coord_trans.inverse_transform_batch
-        self.trajectory = create_trajectory(**traj_kwargs)
+        traj_settings = self.settings.get("trajectory")
+        if traj_settings:
+            traj_kwargs = traj_settings.copy()
+            if hasattr(self.visual_backend, "_sim"):
+                traj_kwargs["pathfinder"] = self.visual_backend._sim.pathfinder
+            traj_kwargs["coord_transform"] = self.coord_trans.inverse_transform_batch
+            self.trajectory = create_trajectory(**traj_kwargs)
 
     def _init_additional_sensors(self) -> None:
         """Initialize additional sensors like IMU."""
