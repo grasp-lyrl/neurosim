@@ -12,7 +12,7 @@ num_envs: 8
 # # spawn is safest with CUDA/Habitat in most setups.
 # vec_env_start_method: spawn
 
-total_timesteps: 2000000
+total_timesteps: 3000000
 
 # Desired eval cadence in total environment steps (auto-adjusted by num_envs).
 eval_freq: 2048
@@ -22,7 +22,7 @@ eval_num_envs: 1
 episode_seconds: 15.0
 event_downsample_factor: 1
 init_speed_min: 0.5
-init_speed_max: 1.0
+init_speed_max: 2.0
 enable_navigable_check: true
 
 event_representation: event_frame
@@ -35,8 +35,8 @@ n_epochs: 8
 gamma: 0.99
 gae_lambda: 0.95
 clip_range: 0.2
-ent_coef: 0.001
-log_std_init: -1.95
+ent_coef: 0.002
+log_std_init: -1.0
 vf_coef: 0.5
 max_grad_norm: 0.5
 

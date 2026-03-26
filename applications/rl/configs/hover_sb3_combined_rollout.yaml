@@ -6,7 +6,7 @@ obs_mode: combined
 episode_seconds: 15.0
 event_downsample_factor: 1
 init_speed_min: 0.5
-init_speed_max: 1.0
+init_speed_max: 2.0
 enable_navigable_check: true
 
 event_representation: event_frame
