@@ -218,6 +218,10 @@ class RerunVisualizer:
         self.enabled = False
         self.use_gpu = use_gpu
         self.device = device
+        self._display = True
+        self._memory_limit = "10%"
+        self._episode_streams: dict[int, object] = {}
+        self._active_episode: int | None = None
 
         if use_gpu:
             assert self.device.startswith("cuda"), "Device must be a CUDA device string"
@@ -263,6 +267,9 @@ class RerunVisualizer:
         if not HAS_RERUN:
             raise ImportError("Rerun package is not installed.")
 
+        self._display = display
+        self._memory_limit = memory_limit
+
         rr.init("neurosim")
         if display:
             rr.spawn(memory_limit=memory_limit)
@@ -277,6 +284,24 @@ class RerunVisualizer:
             logger.info("═══════════════════════════════════════════════════════════")
             logger.info("🎬 RerunVisualizer started")
             logger.info("═══════════════════════════════════════════════════════════")
+
+    def set_episode_index(self, episode_index: int) -> None:
+        """Switch to a per-episode recording stream for RL rollouts."""
+        if not self.enabled:
+            return
+
+        episode_index = int(episode_index)
+        stream = self._episode_streams.get(episode_index)
+        if stream is None:
+            stream = rr.RecordingStream(
+                application_id=f"neurosim_rl_ep{episode_index:04d}"
+            )
+            if self._display:
+                stream.connect_grpc()
+            self._episode_streams[episode_index] = stream
+
+        rr.set_global_data_recording(stream)
+        self._active_episode = episode_index
 
     def log_measurements(self, measurements: dict, time: float, simsteps: int) -> None:
         """

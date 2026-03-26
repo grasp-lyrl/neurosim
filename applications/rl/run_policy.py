@@ -57,8 +57,13 @@ def parse_args() -> argparse.Namespace:
         help="YAML file containing rollout/env parameters",
     )
     p.add_argument("--episodes", type=int, default=1)
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help=("Base rollout seed. If set, episode i uses seed + (i-1)"),
+    )
     p.add_argument("--visualize", action="store_true")
-    p.add_argument("--visualization-rrd-path", type=str, default=None)
     p.add_argument(
         "--debug-save-events-png",
         action="store_true",
@@ -96,7 +101,6 @@ def main():
             event_downsample_factor=int(cfg["event_downsample_factor"]),
             enable_navigable_check=bool(cfg["enable_navigable_check"]),
             enable_visualization=args.visualize,
-            visualization_rrd_path=args.visualization_rrd_path,
             debug_save_events_png=args.debug_save_events_png,
             debug_png_dir=debug_png_dir,
             debug_save_every_n_steps=args.debug_save_every_n_steps,
@@ -123,6 +127,10 @@ def main():
     model = PPO.load(args.checkpoint, env=vec_env, device=str(cfg["device"]))
 
     for ep in range(1, args.episodes + 1):
+        episode_seed = int(args.seed) + (ep - 1)
+        vec_env.seed(episode_seed)
+        print(f"episode={ep} seed={episode_seed}")
+
         obs = vec_env.reset()
         total_reward = 0.0
         step = 0

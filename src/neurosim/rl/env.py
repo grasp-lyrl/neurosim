@@ -60,15 +60,14 @@ class NeurosimRLEnv(gym.Env):
         w_velocity: float = 1.0,
         w_events: float = 0.001,
         w_angular: float = 0.05,
-        w_action: float = 1e-5,
-        w_survival: float = 0.2,
-        crash_penalty: float = 10.0,
+        w_action: float = 1e-3,
+        w_survival: float = 0.5,
+        crash_penalty: float = 100.0,
         # Success detection
         success_velocity_threshold: float = 0.15,
         success_steps_required: int = 10,
         # Visualisation
         enable_visualization: bool = False,
-        visualization_rrd_path: str | None = None,
         visualization_log_every_n_steps: int = 1,
         # Headless debug dumps
         debug_save_events_png: bool = False,
@@ -94,18 +93,19 @@ class NeurosimRLEnv(gym.Env):
             float(event_log_compression) if event_log_compression is not None else None
         )
         self.enable_visualization = bool(enable_visualization)
-        self.visualization_rrd_path = visualization_rrd_path
         self.visualization_log_every_n_steps = max(
             int(visualization_log_every_n_steps), 1
         )
         self._visualizer_initialized = False
+        self._rr_rollout_episode_idx = 0
+        self._rr_needs_episode_stream_switch = False
 
         self.init_speed_range = tuple(init_speed_range)
 
         # Fixed CTBR body-rate limits aligned with RotorPy vectorized environments.
         self.max_roll_br = 7.0
         self.max_pitch_br = 7.0
-        self.max_yaw_br = 3.0
+        self.max_yaw_br = 5.0
 
         self.w_velocity = float(w_velocity)
         self.w_events = float(w_events)
@@ -176,14 +176,17 @@ class NeurosimRLEnv(gym.Env):
         self._hover_thrust = mass * gravity
 
         # Prefer rotor-speed-derived thrust limits from RotorPy params.
-        rotor_speed_min = np.asarray(self.sim.dynamics._multirotor.rotor_speed_min)
-        rotor_speed_max = np.asarray(self.sim.dynamics._multirotor.rotor_speed_max)
-        k_eta = np.asarray(self.sim.dynamics._multirotor.k_eta)
+        multirotor = self.sim.dynamics._multirotor
+        self.cmd_thrust_min = (
+            multirotor.num_rotors * multirotor.k_eta * multirotor.rotor_speed_min**2
+        )
+        self.cmd_thrust_max = (
+            multirotor.num_rotors * multirotor.k_eta * multirotor.rotor_speed_max**2
+        )
 
-        min_thrust_per_rotor = k_eta * np.square(rotor_speed_min)
-        max_thrust_per_rotor = k_eta * np.square(rotor_speed_max)
-        self.cmd_thrust_min = float(np.sum(min_thrust_per_rotor))
-        self.cmd_thrust_max = float(np.sum(max_thrust_per_rotor))
+        assert self.cmd_thrust_min < self._hover_thrust < self.cmd_thrust_max, (
+            "Hover thrust must be between min and max thrust for stable control"
+        )
 
         self.action_space = spaces.Box(
             low=-1.0,
@@ -516,9 +519,7 @@ class NeurosimRLEnv(gym.Env):
             raise RuntimeError(
                 "Visualization requested but simulator visualizer is unavailable"
             )
-        self.sim.visualizer.initialize(
-            display=True, rrd_path=self.visualization_rrd_path
-        )
+        self.sim.visualizer.initialize(display=True)
         self._visualizer_initialized = True
 
     def _maybe_visualize(self, measurements: dict[str, Any]) -> None:
@@ -526,6 +527,10 @@ class NeurosimRLEnv(gym.Env):
             return
         if self.sim.simsteps % self.visualization_log_every_n_steps != 0:
             return
+        if self._rr_needs_episode_stream_switch:
+            self._rr_rollout_episode_idx += 1
+            self.sim.visualizer.set_episode_index(self._rr_rollout_episode_idx)
+            self._rr_needs_episode_stream_switch = False
         self.sim.visualizer.log_measurements(
             measurements, self.sim.time, self.sim.simsteps
         )
@@ -541,6 +546,8 @@ class NeurosimRLEnv(gym.Env):
         self._consecutive_success_steps = 0
         self._prev_action = None
         self._debug_episode_idx += 1
+        if self.enable_visualization:
+            self._rr_needs_episode_stream_switch = True
         self._debug_step_idx = 0
         self._debug_accum_counter = 0
 
@@ -594,29 +601,35 @@ class NeurosimRLEnv(gym.Env):
             "cmd_w": cmd_w,
         }
 
-        event_frame = np.zeros(
-            (2, self.event_height, self.event_width), dtype=np.float32
-        )
+        # Take multiple simulator steps per environment step to match control rate. ###
+        if self.obs_mode == "state":
+            event_frame = None
 
-        for _ in range(self.steps_per_action):
-            self.sim.step(control)
-
-            if self.obs_mode == "state":
-                # Skip event rendering/accumulation for state-only baseline.
-                continue
-
-            measurements = self.sim._render_sensors()
-            self._maybe_visualize(measurements)
-            self._accumulate_events_into_frame(
-                event_frame, measurements.get(self.event_sensor_uuid)
+            for _ in range(self.steps_per_action):
+                self.sim.step(control)
+                if self.enable_visualization:
+                    measurements = self.sim._render_sensors()
+                    self._maybe_visualize(measurements)
+        else:
+            event_frame = np.zeros(
+                (2, self.event_height, self.event_width), dtype=np.float32
             )
 
-        event_frame = np.clip(event_frame, 0.0, self.event_clip, out=event_frame)
-        # Normalize event frame to [0, 1] range for policy consumption if using histogram representation.
-        # Event frames are binary by design and don't require normalization.
-        if self.event_representation == "histogram":
-            event_frame = self._normalize_event_frame(event_frame)
-        event_frame = self._downsample_event_frame(event_frame)
+            for _ in range(self.steps_per_action):
+                self.sim.step(control)
+                measurements = self.sim._render_sensors()
+                self._maybe_visualize(measurements)
+                self._accumulate_events_into_frame(
+                    event_frame, measurements.get(self.event_sensor_uuid)
+                )
+
+            event_frame = np.clip(event_frame, 0.0, self.event_clip, out=event_frame)
+            # Normalize event frame to [0, 1] range for policy consumption if using histogram representation.
+            # Event frames are binary by design and don't require normalization.
+            if self.event_representation == "histogram":
+                event_frame = self._normalize_event_frame(event_frame)
+            event_frame = self._downsample_event_frame(event_frame)
+        ###############################################################################
 
         state = self.sim.dynamics.state
         self._maybe_dump_debug_images(event_frame, state)
