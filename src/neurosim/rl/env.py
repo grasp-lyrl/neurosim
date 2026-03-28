@@ -23,6 +23,117 @@ from neurosim.sims.synchronous_simulator import SynchronousSimulator
 logger = logging.getLogger(__name__)
 
 
+class EventRepresentationManager:
+    """Owns event representation state and update logic for RL observations."""
+
+    def __init__(
+        self,
+        representation: str,
+        raw_height: int,
+        raw_width: int,
+        downsample_factor: int,
+        event_clip: float,
+        event_log_compression: float | None,
+        ts_tau_seconds: float,
+    ):
+        self.representation = representation
+        self.raw_height = int(raw_height)
+        self.raw_width = int(raw_width)
+        self.downsample_factor = max(int(downsample_factor), 1)
+        self.event_clip = float(event_clip)
+        self.event_log_compression = event_log_compression
+        self.ts_tau_seconds = float(ts_tau_seconds)
+
+        self.raw = np.zeros((2, self.raw_height, self.raw_width), dtype=np.float32)
+        self.step_event_count = 0
+        self._last_update_time_s: float | None = None
+
+    def reset_episode(self) -> None:
+        self.raw.fill(0.0)
+        self.step_event_count = 0
+        self._last_update_time_s = None
+
+    def begin_step(self) -> None:
+        self.step_event_count = 0
+        if self.representation != "time_surface":
+            self.raw.fill(0.0)
+
+    def _downsample(self, event_rep: np.ndarray) -> np.ndarray:
+        if self.downsample_factor == 1:
+            return event_rep
+
+        factor = self.downsample_factor
+        h = (event_rep.shape[1] // factor) * factor
+        w = (event_rep.shape[2] // factor) * factor
+        cropped = event_rep[:, :h, :w]
+        reshaped = cropped.reshape(2, h // factor, factor, w // factor, factor)
+        return reshaped.mean(axis=(2, 4), dtype=np.float32)
+
+    def _normalize(self, event_rep: np.ndarray) -> np.ndarray:
+        if self.event_log_compression is not None:
+            k = self.event_log_compression
+            event_rep = np.log1p(k * event_rep) / np.log1p(k * self.event_clip)
+        else:
+            scale = max(self.event_clip, 1e-6)
+            event_rep /= scale
+        np.clip(event_rep, 0.0, 1.0, out=event_rep)
+        return event_rep
+
+    def accumulate(self, events: Any | None) -> None:
+        if events is None:
+            return
+
+        x, y, t, p = events.x, events.y, events.t, events.p
+
+        if hasattr(x, "detach"):
+            x = x.detach().cpu().numpy()
+            y = y.detach().cpu().numpy()
+            t = t.detach().cpu().numpy()
+            p = p.detach().cpu().numpy()
+
+        if x.size == 0:
+            return
+
+        self.step_event_count += int(x.size)
+
+        x = x.astype(np.int64, copy=False)
+        y = y.astype(np.int64, copy=False)
+        t = (t * 1e-6).astype(np.float64, copy=False)
+        p = p.astype(np.int64, copy=False)
+
+        if self.representation == "histogram":
+            flat_idx = p * (self.raw_height * self.raw_width) + y * self.raw_width + x
+            counts = np.bincount(
+                flat_idx, minlength=2 * self.raw_height * self.raw_width
+            ).astype(np.float32)
+            self.raw += counts.reshape(2, self.raw_height, self.raw_width)
+            return
+
+        if self.representation == "event_frame":
+            self.raw[p, y, x] = 1.0
+            return
+
+        if self.representation == "time_surface":
+            latest_time_s = float(t[-1])
+            if self._last_update_time_s is not None:
+                dt_seconds = latest_time_s - self._last_update_time_s
+                if dt_seconds > 0.0:
+                    decay = np.float32(np.exp(-dt_seconds / self.ts_tau_seconds))
+                    self.raw *= decay
+            self._last_update_time_s = latest_time_s
+            self.raw[p, y, x] += 1.0
+            return
+
+        raise ValueError(f"Unsupported event_representation: {self.representation}")
+
+    def observation(self) -> np.ndarray:
+        if self.representation == "histogram":
+            np.clip(self.raw, 0.0, self.event_clip, out=self.raw)
+            self._normalize(self.raw)
+        obs = self._downsample(self.raw)
+        return obs.astype(np.float32, copy=True)
+
+
 class NeurosimRLEnv(gym.Env):
     """Single-drone RL environment with CTBR actions.
 
@@ -52,8 +163,9 @@ class NeurosimRLEnv(gym.Env):
         # Initial-velocity randomisation
         init_speed_range: tuple[float, float] = (0.5, 1.0),
         # Event representation and normalization
-        event_representation: str = "histogram",
+        event_representation: str = "time_surface",
         event_log_compression: float | None = None,
+        event_ts_decay_ms: float = 10.0,
         # Safety / termination
         enable_navigable_check: bool = True,
         # Reward weights
@@ -85,13 +197,14 @@ class NeurosimRLEnv(gym.Env):
         self.event_clip = float(event_clip)
         self.event_downsample_factor = max(int(event_downsample_factor), 1)
         self.event_representation = event_representation
-        if event_representation not in {"histogram", "event_frame"}:
+        if event_representation not in {"histogram", "event_frame", "time_surface"}:
             raise ValueError(
-                "event_representation must be 'histogram' or 'event_frame'"
+                "event_representation must be 'histogram', 'event_frame', or 'time_surface'"
             )
         self.event_log_compression = (
             float(event_log_compression) if event_log_compression is not None else None
         )
+        self._event_ts_tau_seconds = float(event_ts_decay_ms) * 1e-3
         self.enable_visualization = bool(enable_visualization)
         self.visualization_log_every_n_steps = max(
             int(visualization_log_every_n_steps), 1
@@ -169,6 +282,15 @@ class NeurosimRLEnv(gym.Env):
             raise ValueError(
                 "event_downsample_factor is too large for event sensor resolution"
             )
+        self._event_manager = EventRepresentationManager(
+            representation=self.event_representation,
+            raw_height=self._raw_event_height,
+            raw_width=self._raw_event_width,
+            downsample_factor=self.event_downsample_factor,
+            event_clip=self.event_clip,
+            event_log_compression=self.event_log_compression,
+            ts_tau_seconds=self._event_ts_tau_seconds,
+        )
 
         # Action scaling - CTBR (policy uses normalized [-1, 1]^4 actions)
         mass = float(self.sim.dynamics._multirotor.mass)
@@ -247,65 +369,20 @@ class NeurosimRLEnv(gym.Env):
         )
 
     def _compose_observation(
-        self, event_frame: np.ndarray, state: dict[str, np.ndarray]
+        self,
+        event_rep: np.ndarray | None,
+        state: dict[str, np.ndarray],
     ) -> np.ndarray | dict[str, np.ndarray]:
         state_vec = self._state_vector(state)
         if self.obs_mode == "events":
-            return event_frame
+            if event_rep is None:
+                raise ValueError("event representation is required for events obs_mode")
+            return event_rep
         if self.obs_mode == "state":
             return state_vec
-        return {"events": event_frame, "state": state_vec}
-
-    def _downsample_event_frame(self, event_frame: np.ndarray) -> np.ndarray:
-        if self.event_downsample_factor == 1:
-            return event_frame
-
-        factor = self.event_downsample_factor
-        h = (event_frame.shape[1] // factor) * factor
-        w = (event_frame.shape[2] // factor) * factor
-        cropped = event_frame[:, :h, :w]
-        reshaped = cropped.reshape(2, h // factor, factor, w // factor, factor)
-        return reshaped.mean(axis=(2, 4), dtype=np.float32)
-
-    def _normalize_event_frame(self, event_frame: np.ndarray) -> np.ndarray:
-        """Scale clipped event counts to [0, 1] before policy/CNN consumption."""
-        if self.event_log_compression is not None:
-            # Apply log compression to boost low-intensity events while compressing peaks.
-            # Formula: log(1 + k*x) / log(1 + k*clip) where k controls compression strength.
-            k = self.event_log_compression
-            event_frame = np.log1p(k * event_frame) / np.log1p(k * self.event_clip)
-        else:
-            # Linear normalization.
-            scale = max(self.event_clip, 1e-6)
-            event_frame /= scale
-        np.clip(event_frame, 0.0, 1.0, out=event_frame)
-        return event_frame
-
-    def _accumulate_events_into_frame(
-        self, event_frame: np.ndarray, events: Any | None
-    ) -> None:
-        if events is None:
-            return
-
-        x, y, p = events.x, events.y, events.p
-
-        if hasattr(x, "detach"):
-            x = x.detach().cpu().numpy()
-            y = y.detach().cpu().numpy()
-            p = p.detach().cpu().numpy()
-
-        if x.size == 0:
-            return
-
-        x = x.astype(np.int64, copy=False)
-        y = y.astype(np.int64, copy=False)
-        p = p.astype(np.int64, copy=False)
-
-        if self.event_representation == "histogram":
-            np.add.at(event_frame, (p, y, x), 1.0)
-        elif self.event_representation == "event_frame":
-            # Mark pixels with events as 1 (binary representation, not accumulated).
-            event_frame[p, y, x] = 1.0
+        if event_rep is None:
+            raise ValueError("event representation is required for combined obs_mode")
+        return {"events": event_rep, "state": state_vec}
 
     @staticmethod
     def _write_png(path: Path, image: np.ndarray) -> None:
@@ -328,13 +405,16 @@ class NeurosimRLEnv(gym.Env):
 
         logger.warning("Failed to save debug PNG at %s", path)
 
-    def _event_frame_to_rgb(self, event_frame: np.ndarray, clip: float) -> np.ndarray:
+    def _event_rep_to_rgb(self, event_rep: np.ndarray, clip: float) -> np.ndarray:
         """Map negative/positive event channels to RGB for quick visual debugging."""
         scale = max(float(clip), 1e-6)
-        neg = np.clip(event_frame[0] / scale, 0.0, 1.0)
-        pos = np.clip(event_frame[1] / scale, 0.0, 1.0)
+        neg = np.clip(event_rep[0] / scale, 0.0, 1.0)
+        pos = np.clip(event_rep[1] / scale, 0.0, 1.0)
 
-        rgb = np.zeros((event_frame.shape[1], event_frame.shape[2], 3), dtype=np.uint8)
+        rgb = np.zeros(
+            (event_rep.shape[1], event_rep.shape[2], 3),
+            dtype=np.uint8,
+        )
         rgb[..., 0] = np.round(255.0 * neg).astype(np.uint8)
         rgb[..., 2] = np.round(255.0 * pos).astype(np.uint8)
         return rgb
@@ -376,15 +456,17 @@ class NeurosimRLEnv(gym.Env):
         return panel
 
     def _maybe_dump_debug_images(
-        self, event_frame: np.ndarray, state: dict[str, np.ndarray]
+        self,
+        event_rep: np.ndarray | None,
+        state: dict[str, np.ndarray],
     ) -> None:
-        if not self.debug_save_events_png:
+        if not self.debug_save_events_png or event_rep is None:
             return
 
         self._debug_step_idx += 1
 
         if self._debug_step_idx % self.debug_save_every_n_steps == 0:
-            rgb = self._event_frame_to_rgb(event_frame, clip=1.0)
+            rgb = self._event_rep_to_rgb(event_rep, clip=1.0)
             panel = self._state_panel(state, width=rgb.shape[1])
             frame = np.vstack([rgb, panel])
             path = (
@@ -394,14 +476,14 @@ class NeurosimRLEnv(gym.Env):
             self._write_png(path, frame)
 
         if self._debug_accum_frame is None:
-            self._debug_accum_frame = np.zeros_like(event_frame, dtype=np.float32)
+            self._debug_accum_frame = np.zeros_like(event_rep, dtype=np.float32)
 
-        self._debug_accum_frame += event_frame
+        self._debug_accum_frame += event_rep
         self._debug_accum_counter += 1
 
         if self._debug_accum_counter >= self.debug_accumulate_n_steps:
             clip = float(self.debug_accumulate_n_steps)
-            rgb_acc = self._event_frame_to_rgb(self._debug_accum_frame, clip=clip)
+            rgb_acc = self._event_rep_to_rgb(self._debug_accum_frame, clip=clip)
             panel = self._state_panel(state, width=rgb_acc.shape[1])
             frame = np.vstack([rgb_acc, panel])
             path = self._debug_png_dir / (
@@ -417,7 +499,9 @@ class NeurosimRLEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def _compute_reward(
-        self, state: dict[str, np.ndarray], event_frame: np.ndarray, action: np.ndarray
+        self,
+        state: dict[str, np.ndarray],
+        action: np.ndarray,
     ) -> tuple[float, dict[str, float]]:
         v = np.asarray(state["v"], dtype=np.float32)
         w = np.asarray(state["w"], dtype=np.float32)
@@ -429,8 +513,10 @@ class NeurosimRLEnv(gym.Env):
             event_activity = 0.0
             event_activity_density = 0.0
         else:
-            event_activity = float(event_frame.sum())
-            event_activity_density = event_activity / float(event_frame.size)
+            event_activity = float(self._event_manager.step_event_count)
+            event_activity_density = event_activity / (
+                self._raw_event_height * self._raw_event_width
+            )
 
         if self._prev_action is None:
             action_smoothness = 0.0
@@ -522,7 +608,11 @@ class NeurosimRLEnv(gym.Env):
         self.sim.visualizer.initialize(display=True)
         self._visualizer_initialized = True
 
-    def _maybe_visualize(self, measurements: dict[str, Any]) -> None:
+    def _maybe_visualize(
+        self,
+        measurements: dict[str, Any],
+        event_rep: np.ndarray | None = None,
+    ) -> None:
         if not self.enable_visualization or self.sim.visualizer is None:
             return
         if self.sim.simsteps % self.visualization_log_every_n_steps != 0:
@@ -534,6 +624,11 @@ class NeurosimRLEnv(gym.Env):
         self.sim.visualizer.log_measurements(
             measurements, self.sim.time, self.sim.simsteps
         )
+        if event_rep is not None:
+            self.sim.visualizer.log_image(
+                f"sensors/{self.event_sensor_uuid}/event_representation",
+                self._event_rep_to_rgb(event_rep, clip=1.0),
+            )
         self.sim.visualizer.log_state(self.sim.dynamics.state)
 
     # ------------------------------------------------------------------
@@ -579,11 +674,10 @@ class NeurosimRLEnv(gym.Env):
         )
         self.sim.visual_backend.update_agent_state(position, quaternion)
 
-        event_frame = np.zeros(
-            (2, self.event_height, self.event_width), dtype=np.float32
-        )
+        self._event_manager.reset_episode()
+        event_rep = self._event_manager.observation()
 
-        observation = self._compose_observation(event_frame, self.sim.dynamics.state)
+        observation = self._compose_observation(event_rep, self.sim.dynamics.state)
         info: dict[str, Any] = {
             "time": self.sim.time,
             "simsteps": self.sim.simsteps,
@@ -603,7 +697,8 @@ class NeurosimRLEnv(gym.Env):
 
         # Take multiple simulator steps per environment step to match control rate. ###
         if self.obs_mode == "state":
-            event_frame = None
+            event_rep = None
+            self._event_manager.begin_step()
 
             for _ in range(self.steps_per_action):
                 self.sim.step(control)
@@ -611,29 +706,21 @@ class NeurosimRLEnv(gym.Env):
                     measurements = self.sim._render_sensors()
                     self._maybe_visualize(measurements)
         else:
-            event_frame = np.zeros(
-                (2, self.event_height, self.event_width), dtype=np.float32
-            )
+            self._event_manager.begin_step()
+            event_rep = self._event_manager.raw
 
             for _ in range(self.steps_per_action):
                 self.sim.step(control)
                 measurements = self.sim._render_sensors()
-                self._maybe_visualize(measurements)
-                self._accumulate_events_into_frame(
-                    event_frame, measurements.get(self.event_sensor_uuid)
-                )
+                self._event_manager.accumulate(measurements.get(self.event_sensor_uuid))
+                self._maybe_visualize(measurements, event_rep)
 
-            event_frame = np.clip(event_frame, 0.0, self.event_clip, out=event_frame)
-            # Normalize event frame to [0, 1] range for policy consumption if using histogram representation.
-            # Event frames are binary by design and don't require normalization.
-            if self.event_representation == "histogram":
-                event_frame = self._normalize_event_frame(event_frame)
-            event_frame = self._downsample_event_frame(event_frame)
+            event_rep = self._event_manager.observation()
         ###############################################################################
 
         state = self.sim.dynamics.state
-        self._maybe_dump_debug_images(event_frame, state)
-        reward, reward_terms = self._compute_reward(state, event_frame, action)
+        self._maybe_dump_debug_images(event_rep, state)
+        reward, reward_terms = self._compute_reward(state, action)
         self._prev_action = action.copy()
 
         terminated, term_reason = self._check_terminated(state)
@@ -644,7 +731,7 @@ class NeurosimRLEnv(gym.Env):
         if terminated:
             reward -= self.crash_penalty
 
-        observation = self._compose_observation(event_frame, state)
+        observation = self._compose_observation(event_rep, state)
         info: dict[str, Any] = {
             "time": self.sim.time,
             "simsteps": self.sim.simsteps,

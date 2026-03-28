@@ -443,3 +443,13 @@ class RerunVisualizer:
             ),  # Separate archetype for axis visualization in 0.28.1+
         )
         rr.log("navigation/trajectory", rr.Points3D(positions=state["x"][None, :]))
+
+    def log_image(self, path: str, image: np.ndarray) -> None:
+        """Generic image logger wrapper for Rerun."""
+        if not self.enabled:
+            return
+
+        if hasattr(image, "detach"):
+            image = image.detach().cpu().numpy()
+
+        rr.log(path, rr.Image(image))
