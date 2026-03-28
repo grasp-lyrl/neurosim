@@ -90,8 +90,9 @@ def make_env(
     debug_png_dir: str | None = None,
     debug_save_every_n_steps: int = 100,
     debug_accumulate_n_steps: int = 20,
-    event_representation: str = "histogram",
+    event_representation: str = "time_surface",
     event_log_compression: float | None = None,
+    event_ts_decay_ms: float = 10.0,
 ):
     """Factory callable for DummyVecEnv / SubprocVecEnv."""
 
@@ -110,6 +111,7 @@ def make_env(
             debug_accumulate_n_steps=debug_accumulate_n_steps,
             event_representation=event_representation,
             event_log_compression=event_log_compression,
+            event_ts_decay_ms=event_ts_decay_ms,
         )
         env = Monitor(env)
         if seed is not None:
@@ -280,8 +282,9 @@ def main():
             ),
             debug_save_every_n_steps=args.debug_save_every_n_steps,
             debug_accumulate_n_steps=args.debug_accumulate_n_steps,
-            event_representation=str(exp.get("event_representation", "histogram")),
+            event_representation=str(exp.get("event_representation", "time_surface")),
             event_log_compression=exp.get("event_log_compression"),
+            event_ts_decay_ms=float(exp.get("event_ts_decay_ms", 10.0)),
         )
         for env_idx in range(num_envs)
     ]
@@ -317,8 +320,11 @@ def main():
                 event_downsample_factor=int(exp["event_downsample_factor"]),
                 enable_navigable_check=bool(exp["enable_navigable_check"]),
                 seed=int(exp["seed"]) + 1000 + env_idx,
-                event_representation=str(exp.get("event_representation", "histogram")),
+                event_representation=str(
+                    exp.get("event_representation", "time_surface")
+                ),
                 event_log_compression=exp.get("event_log_compression"),
+                event_ts_decay_ms=float(exp.get("event_ts_decay_ms", 10.0)),
             )
             for env_idx in range(eval_num_envs)
         ]

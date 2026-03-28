@@ -107,6 +107,7 @@ def main():
             debug_accumulate_n_steps=args.debug_accumulate_n_steps,
             event_representation=str(cfg["event_representation"]),
             event_log_compression=cfg["event_log_compression"],
+            event_ts_decay_ms=float(cfg.get("event_ts_decay_ms", 10.0)),
         )
 
     vec_env = DummyVecEnv([_make_env])

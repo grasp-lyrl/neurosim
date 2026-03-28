@@ -9,7 +9,8 @@ init_speed_min: 0.5
 init_speed_max: 2.0
 enable_navigable_check: true
 
-event_representation: event_frame
+event_representation: time_surface
+event_ts_decay_ms: 10.0
 event_log_compression: null
 
 device: auto
