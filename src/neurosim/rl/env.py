@@ -7,6 +7,7 @@ collisions, using event-camera observations.
 Safety checks are delegated to Habitat pathfinder bounds and navigability.
 """
 
+import cv2
 import copy
 import logging
 from pathlib import Path
@@ -387,23 +388,7 @@ class NeurosimRLEnv(gym.Env):
     @staticmethod
     def _write_png(path: Path, image: np.ndarray) -> None:
         """Write PNG without GUI/display requirements."""
-        try:
-            import cv2
-
-            cv2.imwrite(str(path), image)
-            return
-        except Exception:
-            pass
-
-        try:
-            from PIL import Image
-
-            Image.fromarray(image).save(path)
-            return
-        except Exception:
-            pass
-
-        logger.warning("Failed to save debug PNG at %s", path)
+        cv2.imwrite(str(path), image)
 
     def _event_rep_to_rgb(self, event_rep: np.ndarray, clip: float) -> np.ndarray:
         """Map negative/positive event channels to RGB for quick visual debugging."""
@@ -434,24 +419,19 @@ class NeurosimRLEnv(gym.Env):
             f"|v|={np.linalg.norm(v):.3f}  |w|={np.linalg.norm(w):.3f}",
         ]
 
-        try:
-            import cv2
-
-            y = 24
-            for text in lines:
-                cv2.putText(
-                    panel,
-                    text,
-                    (8, y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (220, 220, 220),
-                    1,
-                    cv2.LINE_AA,
-                )
-                y += 26
-        except Exception:
-            pass
+        y = 24
+        for text in lines:
+            cv2.putText(
+                panel,
+                text,
+                (8, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (220, 220, 220),
+                1,
+                cv2.LINE_AA,
+            )
+            y += 26
 
         return panel
 
@@ -545,8 +525,7 @@ class NeurosimRLEnv(gym.Env):
         }
 
     def _check_terminated(self, state: dict[str, np.ndarray]) -> tuple[bool, str]:
-        x = np.asarray(state["x"])
-        safe, reason = self._safety.check(x)
+        safe, reason = self._safety.check(np.asarray(state["x"]))
         if not safe:
             return True, reason
         return False, ""
@@ -624,7 +603,9 @@ class NeurosimRLEnv(gym.Env):
         self.sim.visualizer.log_measurements(
             measurements, self.sim.time, self.sim.simsteps
         )
-        if event_rep is not None:
+        if event_rep is not None and self.sim.config.sensor_manager.should_visualize(
+            self.event_sensor_uuid, self.sim.simsteps
+        ):
             self.sim.visualizer.log_image(
                 f"sensors/{self.event_sensor_uuid}/event_representation",
                 self._event_rep_to_rgb(event_rep, clip=1.0),

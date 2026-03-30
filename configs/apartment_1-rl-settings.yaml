@@ -53,7 +53,7 @@ visual_backend:
       orientation: [0.0, 0.0, 0.0]
       width: 640
       height: 480
-      hfov: 90
+      hfov: 120
       zfar: 20.0
       backend: "cuda"
       contrast_threshold_neg: 0.15
