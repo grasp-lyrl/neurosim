@@ -25,12 +25,66 @@ def _test_settings() -> dict:
     return cfg
 
 
+def _test_env_config(
+    *,
+    obs_mode: str,
+    episode_seconds: float,
+    event_downsample_factor: int = 1,
+) -> dict:
+    return {
+        "settings": _test_settings(),
+        "obs_mode": obs_mode,
+        "episode_seconds": episode_seconds,
+        "event_sensor_uuid": None,
+        "event_clip": 10.0,
+        "event_downsample_factor": event_downsample_factor,
+        "init_speed_range": [0.5, 1.0],
+        "event_representation": "time_surface",
+        "event_log_compression": None,
+        "event_ts_decay_ms": 10.0,
+        "enable_navigable_check": True,
+        "enable_visualization": False,
+        "visualization_log_every_n_steps": 1,
+        "task": {
+            "name": "hover_stop",
+            "config": {
+                "w_velocity": 2.0,
+                "w_events": 0.0,
+                "w_angular": 0.05,
+                "w_action": 1e-2,
+                "w_survival": 0.5,
+                "crash_penalty": 100.0,
+                "success_velocity_threshold": 0.15,
+                "success_steps_required": 20,
+            },
+        },
+        "vehicle": {
+            "dynamics_model": "rotorpy_multirotor_euler",
+            "vehicle_name": "crazyflie",
+            "control_mode": "ctbr",
+            "ctbr_rate_limits": {
+                "roll": 7.0,
+                "pitch": 7.0,
+                "yaw": 5.0,
+            },
+            "domain_randomization": {
+                "enabled": False,
+                "scales": {
+                    "mass": [1.0, 1.0],
+                    "k_eta": [1.0, 1.0],
+                    "k_m": [1.0, 1.0],
+                    "rotor_speed_min": [1.0, 1.0],
+                    "rotor_speed_max": [1.0, 1.0],
+                },
+            },
+        },
+    }
+
+
 @pytest.fixture(scope="module")
 def env():
     e = NeurosimRLEnv(
-        settings=_test_settings(),
-        obs_mode="combined",
-        episode_seconds=0.05,
+        env_config=_test_env_config(obs_mode="combined", episode_seconds=0.05),
     )
     yield e
     e.close()
@@ -107,10 +161,11 @@ class TestNeurosimRLEnv:
 
     def test_downsampled_event_observation_shape(self):
         env = NeurosimRLEnv(
-            settings=_test_settings(),
-            obs_mode="events",
-            episode_seconds=0.05,
-            event_downsample_factor=4,
+            env_config=_test_env_config(
+                obs_mode="events",
+                episode_seconds=0.05,
+                event_downsample_factor=4,
+            ),
         )
         try:
             obs, _ = env.reset(seed=5)
@@ -127,9 +182,7 @@ class TestHabitatSafetyCheckerWithRealScene:
     @pytest.fixture(scope="class")
     def checker(self) -> HabitatSafetyChecker:
         env = NeurosimRLEnv(
-            settings=_test_settings(),
-            obs_mode="state",
-            episode_seconds=1.0,
+            env_config=_test_env_config(obs_mode="state", episode_seconds=1.0),
         )
         c = env._safety
         env.close()
