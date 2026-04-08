@@ -1,7 +1,7 @@
 # Rollout/inference config for hover-stop PPO policy execution.
 
 settings: configs/apartment_1-rl-settings.yaml
-obs_mode: combined
+obs_mode: events
 
 episode_seconds: 15.0
 event_downsample_factor: 1

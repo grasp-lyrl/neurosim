@@ -170,15 +170,15 @@ class NeurosimRLEnv(gym.Env):
         # Safety / termination
         enable_navigable_check: bool = True,
         # Reward weights
-        w_velocity: float = 1.0,
-        w_events: float = 0.001,
+        w_velocity: float = 2.0,
+        w_events: float = 0.0,
         w_angular: float = 0.05,
-        w_action: float = 1e-3,
+        w_action: float = 1e-2,
         w_survival: float = 0.5,
         crash_penalty: float = 100.0,
         # Success detection
         success_velocity_threshold: float = 0.15,
-        success_steps_required: int = 10,
+        success_steps_required: int = 20,
         # Visualisation
         enable_visualization: bool = False,
         visualization_log_every_n_steps: int = 1,

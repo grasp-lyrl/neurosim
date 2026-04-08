@@ -1,7 +1,7 @@
 # Experimental/training hyperparameters for hover-stop PPO.
 
 settings: configs/apartment_1-rl-settings.yaml
-obs_mode: combined
+obs_mode: events
 seed: 42
 num_envs: 8
 

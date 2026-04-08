@@ -25,27 +25,37 @@
   <img src="assets/neurosim.gif" width="80%">
 </div>
 
+
 ## 📰 News
 
 - [ ] Hardware-in-the-loop (HIL) support for real robot testing
-- [ ] Detailed documentation and tutorials
+- [ ] 📚 Detailed documentation and tutorials
 - [ ] Independently moving objects in the scene
-- [ ] Reinforcement Learning (RL) support
-- `16/02/26`: Neurosim paper released on arXiv ([2602.15018](https://arxiv.org/abs/2602.15018))
+- `03/30/26`: Reinforcement Learning (RL) support
+- `02/16/26`: Neurosim paper released on arXiv ([2602.15018](https://arxiv.org/abs/2602.15018))
 - `02/15/26`: [neurosim_cu_esim](https://github.com/grasp-lyrl/neurosim_cu_esim) now standalone for faster event simulation.
 - `02/06/26`: Initial release of Neurosim!
 
-**📚 Detailed documentation coming soon!**
 
 ## 📋 Table of Contents
 
+- [Applications](#applications)
 - [Installation](#installation)
   - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
   - [Option 2: Conda](#option-2-conda)
-- [Usage](#usage)
-- [Troubleshooting](#-troubleshooting)
+- [Basic Usage](#basic-usage)
+- [Citation](#citation)
+- [Issues](#issues)
 
----
+
+## Applications
+
+Neurosim enables **real-time closed-loop control** (`src/neurosim/sims/asynchronous_simulator`, `src/neurosim/cortex/`), **online training of multi-modal perception models** (`applications/f3_training/`), and **event-based reinforcement learning with NeurosimRL** (`applications/rl/`). Detailed docs to run each of them are coming soon!
+
+<div align="center">
+  <img src="assets/neurosim_rl.gif" width="70%">
+  <p><em>Rollout with a trained policy to stabilize a "thrown" quad (without crashing into things)</em></p>
+</div>
 
 
 ## Installation
@@ -156,7 +166,7 @@ pip install -e . -v
 
 ---
 
-## Usage
+## Basic Usage
 
 ### Download Example Data
 
@@ -169,13 +179,6 @@ python -m habitat_sim.utils.datasets_download --uids habitat_test_scenes --data-
 ```bash
 python test_sim.py --settings configs/skokloster-castle-settings.yaml --display --world_rate 750
 ```
-
-## Compilation Issues
-
-- If compilation crashes due to high memory usage or CPU load, manually set `self.parallel=4` inside `setup.py` to limit parallel jobs.
-
-- `pip==25.3` breaks installation due to changes in the build isolation process. Use `pip==25.1.1` as specified.
-
 
 ## Citation
 
@@ -197,15 +200,19 @@ If you use this code in your research, please cite:
 
 Please report any bugs or feature requests on GitHub issues. Pull requests are very welcome!
 
+### Compilation Issues
+
+- If compilation crashes due to high memory usage or CPU load, manually set `self.parallel=4` inside `setup.py` of habitat-sim to limit parallel jobs.
+
+- `pip==25.3` breaks installation due to changes in the build isolation process. Use `pip==25.1.1` as specified.
+
+
 ## License
 
 Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgements
 
-This project is enabled by the following amazing open-source projects:
-- [Habitat-Sim](https://github.com/facebookresearch/habitat-sim)
-- [ZeroMQ](https://zeromq.org)
-- [RotorPy](https://github.com/spencerfolk/rotorpy)
+This project is enabled by the following amazing open-source projects: [Habitat-Sim](https://github.com/facebookresearch/habitat-sim), [ZeroMQ](https://zeromq.org), [RotorPy](https://github.com/spencerfolk/rotorpy)
 
-Picture credits: [@ongdexter](https://dexterong.com/), Gemini 3
+Banner credits: [@ongdexter](https://dexterong.com/), Gemini 3
