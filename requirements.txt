@@ -9,3 +9,9 @@ cvxopt==1.3.2
 rotorpy==2.1.0
 opencv-python>=4.10.0
 kornia>=0.7.0
+
+# RL dependencies. Can comment out if not training RL.
+gymnasium>=1.0.0
+stable-baselines3>=2.5.0
+tensorboard>=2.12.0
+wandb>=0.22.0
