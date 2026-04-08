@@ -1,8 +1,8 @@
-"""Train a PPO policy for the neurosim hover-stop task using Stable-Baselines3.
+"""Train a PPO policy for neurosim tasks using Stable-Baselines3.
 
 Usage:
-    python train_hover_sb3.py \
-        --experiment-config applications/rl/configs/hover_sb3_experiment.yaml
+    python train_sb3.py \
+        --experiment-config applications/rl/configs/hover_sb3_state_experiment.yaml
 
 The script saves:
     outputs/rl/<run_name>/best_model.zip   - best checkpoint (by eval reward)
@@ -43,32 +43,15 @@ def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
         raise ValueError("Experiment config must be a YAML mapping")
 
     required_keys = [
-        "settings",
-        "obs_mode",
         "seed",
         "num_envs",
         "total_timesteps",
-        "eval_freq",
-        "eval_episodes",
-        "episode_seconds",
-        "event_downsample_factor",
-        "init_speed_min",
-        "init_speed_max",
-        "enable_navigable_check",
-        "learning_rate",
-        "n_steps",
-        "batch_size",
-        "n_epochs",
-        "gamma",
-        "gae_lambda",
-        "clip_range",
-        "ent_coef",
-        "log_std_init",
-        "vf_coef",
-        "max_grad_norm",
-        "device",
-        "normalize_obs",
-        "normalize_reward",
+        "eval",
+        "env",
+        "ppo",
+        "vecnormalize",
+        "vec_env",
+        "wandb",
     ]
     missing = [k for k in required_keys if k not in cfg]
     if missing:
@@ -78,41 +61,13 @@ def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
 
 
 def make_env(
-    settings: str,
-    obs_mode: str = "combined",
-    episode_seconds: float = 10.0,
-    init_speed_range: tuple[float, float] = (0.5, 2.0),
-    event_downsample_factor: int = 1,
-    enable_navigable_check: bool = True,
+    env_config: dict[str, Any],
     seed: int | None = None,
-    visualize: bool = False,
-    debug_save_events_png: bool = False,
-    debug_png_dir: str | None = None,
-    debug_save_every_n_steps: int = 100,
-    debug_accumulate_n_steps: int = 20,
-    event_representation: str = "time_surface",
-    event_log_compression: float | None = None,
-    event_ts_decay_ms: float = 10.0,
 ):
     """Factory callable for DummyVecEnv / SubprocVecEnv."""
 
     def _init():
-        env = NeurosimRLEnv(
-            settings=settings,
-            obs_mode=obs_mode,
-            episode_seconds=episode_seconds,
-            init_speed_range=init_speed_range,
-            event_downsample_factor=event_downsample_factor,
-            enable_navigable_check=enable_navigable_check,
-            enable_visualization=visualize,
-            debug_save_events_png=debug_save_events_png,
-            debug_png_dir=debug_png_dir,
-            debug_save_every_n_steps=debug_save_every_n_steps,
-            debug_accumulate_n_steps=debug_accumulate_n_steps,
-            event_representation=event_representation,
-            event_log_compression=event_log_compression,
-            event_ts_decay_ms=event_ts_decay_ms,
-        )
+        env = NeurosimRLEnv(env_config=env_config)
         env = Monitor(env)
         if seed is not None:
             env.reset(seed=seed)
@@ -122,7 +77,7 @@ def make_env(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="SB3 PPO hover-stop training")
+    p = argparse.ArgumentParser(description="SB3 PPO training for neurosim tasks")
     p.add_argument(
         "--experiment-config",
         type=str,
@@ -131,20 +86,6 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--wandb-project", type=str, default="neurosim-rl")
     p.add_argument("--run-name", type=str, default=None)
-    p.add_argument("--visualize", action="store_true")
-    p.add_argument(
-        "--debug-save-events-png",
-        action="store_true",
-        help="Save periodic event-frame PNGs for headless debugging",
-    )
-    p.add_argument(
-        "--debug-png-dir",
-        type=str,
-        default=None,
-        help="Directory for debug PNGs (defaults to <output-dir>/debug_events)",
-    )
-    p.add_argument("--debug-save-every-n-steps", type=int, default=100)
-    p.add_argument("--debug-accumulate-n-steps", type=int, default=20)
     return p.parse_args()
 
 
@@ -225,8 +166,8 @@ def main():
 
     np.random.seed(int(exp["seed"]))
     num_envs = int(exp["num_envs"])
-    n_steps = int(exp["n_steps"])
-    batch_size = int(exp["batch_size"])
+    n_steps = int(exp["ppo"]["n_steps"])
+    batch_size = int(exp["ppo"]["batch_size"])
     rollout_batch = n_steps * num_envs
     if batch_size > rollout_batch:
         raise ValueError(
@@ -245,10 +186,6 @@ def main():
     output = Path("outputs/rl") / run_name
     output.mkdir(parents=True, exist_ok=True)
 
-    debug_png_dir = args.debug_png_dir
-    if args.debug_save_events_png and debug_png_dir is None:
-        debug_png_dir = str(output / "debug_events")
-
     run = wandb.init(
         project=args.wandb_project,
         name=run_name,
@@ -258,34 +195,15 @@ def main():
         dir=str(output),
     )
 
-    init_speed_range = (float(exp["init_speed_min"]), float(exp["init_speed_max"]))
+    vec_env_type = str(exp["vec_env"]["type"])
+    vec_env_start_method = str(exp["vec_env"]["start_method"])
 
-    vec_env_type = str(exp.get("vec_env_type", "auto"))
-    vec_env_start_method = str(exp.get("vec_env_start_method", "spawn"))
+    # Training should never stream visualization.
+    env_config = {**exp["env"], "enable_visualization": False}
 
     # Training env (use multiprocessing for heavy simulators when num_envs > 1)
     train_env_fns = [
-        make_env(
-            settings=str(exp["settings"]),
-            obs_mode=str(exp["obs_mode"]),
-            episode_seconds=float(exp["episode_seconds"]),
-            init_speed_range=init_speed_range,
-            event_downsample_factor=int(exp["event_downsample_factor"]),
-            enable_navigable_check=bool(exp["enable_navigable_check"]),
-            seed=int(exp["seed"]) + env_idx,
-            visualize=args.visualize,
-            debug_save_events_png=args.debug_save_events_png,
-            debug_png_dir=(
-                str(Path(debug_png_dir) / f"env_{env_idx}")
-                if debug_png_dir is not None
-                else None
-            ),
-            debug_save_every_n_steps=args.debug_save_every_n_steps,
-            debug_accumulate_n_steps=args.debug_accumulate_n_steps,
-            event_representation=str(exp.get("event_representation", "time_surface")),
-            event_log_compression=exp.get("event_log_compression"),
-            event_ts_decay_ms=float(exp.get("event_ts_decay_ms", 10.0)),
-        )
+        make_env(env_config, seed=int(exp["seed"]) + env_idx)
         for env_idx in range(num_envs)
     ]
     train_vec = build_train_vec_env(
@@ -294,72 +212,63 @@ def main():
         vec_env_type=vec_env_type,
         start_method=vec_env_start_method,
     )
-    if bool(exp["normalize_obs"]) or bool(exp["normalize_reward"]):
+    if bool(exp["vecnormalize"]["normalize_obs"]) or bool(
+        exp["vecnormalize"]["normalize_reward"]
+    ):
         train_vec = VecNormalize(
             train_vec,
             **build_vecnormalize_kwargs(
-                obs_mode=str(exp["obs_mode"]),
-                normalize_obs=bool(exp["normalize_obs"]),
-                normalize_reward=bool(exp["normalize_reward"]),
+                obs_mode=str(exp["env"]["obs_mode"]),
+                normalize_obs=bool(exp["vecnormalize"]["normalize_obs"]),
+                normalize_reward=bool(exp["vecnormalize"]["normalize_reward"]),
                 training=True,
             ),
         )
 
     # Eval env (separate instance, shared normalization stats)
-    eval_num_envs = int(exp.get("eval_num_envs", 1))
+    eval_num_envs = int(exp["eval"]["num_envs"])
     if eval_num_envs <= 0:
         raise ValueError("eval_num_envs must be >= 1")
 
     eval_vec = DummyVecEnv(
         [
-            make_env(
-                settings=str(exp["settings"]),
-                obs_mode=str(exp["obs_mode"]),
-                episode_seconds=float(exp["episode_seconds"]),
-                init_speed_range=init_speed_range,
-                event_downsample_factor=int(exp["event_downsample_factor"]),
-                enable_navigable_check=bool(exp["enable_navigable_check"]),
-                seed=int(exp["seed"]) + 1000 + env_idx,
-                event_representation=str(
-                    exp.get("event_representation", "time_surface")
-                ),
-                event_log_compression=exp.get("event_log_compression"),
-                event_ts_decay_ms=float(exp.get("event_ts_decay_ms", 10.0)),
-            )
+            make_env(env_config, seed=int(exp["seed"]) + 1000 + env_idx)
             for env_idx in range(eval_num_envs)
         ]
     )
-    if bool(exp["normalize_obs"]) or bool(exp["normalize_reward"]):
+    if bool(exp["vecnormalize"]["normalize_obs"]) or bool(
+        exp["vecnormalize"]["normalize_reward"]
+    ):
         eval_vec = VecNormalize(
             eval_vec,
             **build_vecnormalize_kwargs(
-                obs_mode=str(exp["obs_mode"]),
-                normalize_obs=bool(exp["normalize_obs"]),
+                obs_mode=str(exp["env"]["obs_mode"]),
+                normalize_obs=bool(exp["vecnormalize"]["normalize_obs"]),
                 normalize_reward=False,
                 training=False,
             ),
         )
 
     policy, policy_kwargs = build_policy_config(
-        str(exp["obs_mode"]),
-        float(exp["log_std_init"]),
+        str(exp["env"]["obs_mode"]),
+        float(exp["ppo"]["log_std_init"]),
     )
 
     model = PPO(
         policy,
         train_vec,
-        learning_rate=float(exp["learning_rate"]),
-        n_steps=int(exp["n_steps"]),
-        batch_size=int(exp["batch_size"]),
-        n_epochs=int(exp["n_epochs"]),
-        gamma=float(exp["gamma"]),
-        gae_lambda=float(exp["gae_lambda"]),
-        clip_range=float(exp["clip_range"]),
-        ent_coef=float(exp["ent_coef"]),
-        vf_coef=float(exp["vf_coef"]),
-        max_grad_norm=float(exp["max_grad_norm"]),
+        learning_rate=float(exp["ppo"]["learning_rate"]),
+        n_steps=int(exp["ppo"]["n_steps"]),
+        batch_size=int(exp["ppo"]["batch_size"]),
+        n_epochs=int(exp["ppo"]["n_epochs"]),
+        gamma=float(exp["ppo"]["gamma"]),
+        gae_lambda=float(exp["ppo"]["gae_lambda"]),
+        clip_range=float(exp["ppo"]["clip_range"]),
+        ent_coef=float(exp["ppo"]["ent_coef"]),
+        vf_coef=float(exp["ppo"]["vf_coef"]),
+        max_grad_norm=float(exp["ppo"]["max_grad_norm"]),
         seed=int(exp["seed"]),
-        device=str(exp["device"]),
+        device=str(exp["ppo"]["device"]),
         verbose=1,
         tensorboard_log=str(output / "tensorboard"),
         policy_kwargs=policy_kwargs,
@@ -369,15 +278,15 @@ def main():
         eval_vec,
         best_model_save_path=str(output),
         log_path=str(output),
-        eval_freq=max(int(exp["eval_freq"]) // num_envs, 1),
-        n_eval_episodes=int(exp["eval_episodes"]),
+        eval_freq=max(int(exp["eval"]["freq"]) // num_envs, 1),
+        n_eval_episodes=int(exp["eval"]["episodes"]),
         deterministic=True,
     )
 
     wandb_callback = WandbCallback(
-        gradient_save_freq=int(exp.get("wandb_log_freq", 100)),
+        gradient_save_freq=int(exp["wandb"]["log_freq"]),
         model_save_path=str(output / "wandb_models"),
-        model_save_freq=max(int(exp["eval_freq"]) // num_envs, 1),
+        model_save_freq=max(int(exp["eval"]["freq"]) // num_envs, 1),
         verbose=2,
     )
 

@@ -63,7 +63,3 @@ visual_backend:
 controller:
   model: "rotorpy_se3"
   vehicle: "crazyflie"
-
-dynamics:
-  model: "rotorpy_multirotor_euler"
-  vehicle: "crazyflie"

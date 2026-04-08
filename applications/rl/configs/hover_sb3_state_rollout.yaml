@@ -1,17 +1,47 @@
 # Rollout/inference config for hover-stop PPO policy execution.
 
-settings: configs/apartment_1-rl-settings.yaml
-obs_mode: state
+env:
+  settings: configs/apartment_1-rl-settings.yaml
+  obs_mode: state
+  episode_seconds: 15.0
+  event_sensor_uuid: null
+  event_clip: 10.0
+  event_downsample_factor: 1
+  init_speed_range: [0.5, 2.0]
+  event_representation: time_surface
+  event_log_compression: null
+  event_ts_decay_ms: 10.0
+  enable_navigable_check: true
+  enable_visualization: false
+  visualization_log_every_n_steps: 1
+  task:
+    name: hover_stop
+    config:
+      w_velocity: 2.0
+      w_events: 0.0
+      w_angular: 0.05
+      w_action: 0.01
+      w_survival: 0.5
+      crash_penalty: 100.0
+      success_velocity_threshold: 0.15
+      success_steps_required: 20
+  vehicle:
+    dynamics_model: rotorpy_multirotor_euler
+    vehicle_name: crazyflie
+    control_mode: ctbr
+    ctbr_rate_limits:
+      roll: 7.0
+      pitch: 7.0
+      yaw: 5.0
+    domain_randomization:
+      enabled: false
+      scales:
+        mass: [1.0, 1.0]
+        k_eta: [1.0, 1.0]
+        k_m: [1.0, 1.0]
+        rotor_speed_min: [1.0, 1.0]
+        rotor_speed_max: [1.0, 1.0]
 
-episode_seconds: 15.0
-event_downsample_factor: 1
-init_speed_min: 0.5
-init_speed_max: 2.0
-enable_navigable_check: true
-
-event_representation: time_surface
-event_ts_decay_ms: 10.0
-event_log_compression: null
-
-device: auto
-deterministic: true
+policy:
+  device: auto
+  deterministic: true

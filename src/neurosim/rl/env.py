@@ -7,7 +7,6 @@ collisions, using event-camera observations.
 Safety checks are delegated to Habitat pathfinder bounds and navigability.
 """
 
-import cv2
 import copy
 import logging
 from pathlib import Path
@@ -19,6 +18,8 @@ import yaml
 from gymnasium import spaces
 
 from neurosim.rl.safety import HabitatSafetyChecker, build_safety_checker
+from neurosim.rl.tasks import RLTask, build_task
+from neurosim.rl.vehicles import RLVehicle, build_vehicle
 from neurosim.sims.synchronous_simulator import SynchronousSimulator
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,7 @@ class EventRepresentationManager:
 
 
 class NeurosimRLEnv(gym.Env):
-    """Single-drone RL environment with CTBR actions.
+    """Single-drone RL environment with CTBR actions and pluggable tasks.
 
     Action space - 4-D continuous:
         Normalized policy action in [-1, 1]^4.
@@ -151,44 +152,31 @@ class NeurosimRLEnv(gym.Env):
     navigability queries.
     """
 
-    def __init__(
-        self,
-        settings: str | Path | dict[str, Any],
-        obs_mode: str = "combined",
-        # Episode length
-        episode_seconds: float = 10.0,
-        # Event sensor
-        event_sensor_uuid: str | None = None,
-        event_clip: float = 10.0,
-        event_downsample_factor: int = 1,
-        # Initial-velocity randomisation
-        init_speed_range: tuple[float, float] = (0.5, 1.0),
-        # Event representation and normalization
-        event_representation: str = "time_surface",
-        event_log_compression: float | None = None,
-        event_ts_decay_ms: float = 10.0,
-        # Safety / termination
-        enable_navigable_check: bool = True,
-        # Reward weights
-        w_velocity: float = 2.0,
-        w_events: float = 0.0,
-        w_angular: float = 0.05,
-        w_action: float = 1e-2,
-        w_survival: float = 0.5,
-        crash_penalty: float = 100.0,
-        # Success detection
-        success_velocity_threshold: float = 0.15,
-        success_steps_required: int = 20,
-        # Visualisation
-        enable_visualization: bool = False,
-        visualization_log_every_n_steps: int = 1,
-        # Headless debug dumps
-        debug_save_events_png: bool = False,
-        debug_png_dir: str | Path | None = None,
-        debug_save_every_n_steps: int = 100,
-        debug_accumulate_n_steps: int = 20,
-    ):
+    def __init__(self, env_config: dict[str, Any]):
         super().__init__()
+
+        settings = env_config["settings"]
+        obs_mode = env_config["obs_mode"]
+        episode_seconds = env_config["episode_seconds"]
+
+        event_sensor_uuid = env_config["event_sensor_uuid"]
+        event_clip = env_config["event_clip"]
+        event_downsample_factor = env_config["event_downsample_factor"]
+
+        init_speed_range = env_config["init_speed_range"]
+
+        event_representation = env_config["event_representation"]
+        event_log_compression = env_config["event_log_compression"]
+        event_ts_decay_ms = env_config["event_ts_decay_ms"]
+
+        enable_navigable_check = env_config["enable_navigable_check"]
+
+        enable_visualization = env_config["enable_visualization"]
+        visualization_log_every_n_steps = env_config["visualization_log_every_n_steps"]
+
+        task_name = env_config["task"]["name"]
+        task_kwargs = dict(env_config["task"]["config"])
+        vehicle_config = env_config["vehicle"]
 
         if obs_mode not in {"events", "state", "combined"}:
             raise ValueError("obs_mode must be one of: events, state, combined")
@@ -216,43 +204,21 @@ class NeurosimRLEnv(gym.Env):
 
         self.init_speed_range = tuple(init_speed_range)
 
-        # Fixed CTBR body-rate limits aligned with RotorPy vectorized environments.
-        self.max_roll_br = 7.0
-        self.max_pitch_br = 7.0
-        self.max_yaw_br = 5.0
+        self._task: RLTask = build_task(task_name=task_name, **task_kwargs)
 
-        self.w_velocity = float(w_velocity)
-        self.w_events = float(w_events)
-        self.w_angular = float(w_angular)
-        self.w_action = float(w_action)
-        self.w_survival = float(w_survival)
-        self.crash_penalty = float(crash_penalty)
-
-        self.success_velocity_threshold = float(success_velocity_threshold)
-        self.success_steps_required = int(success_steps_required)
-        self._consecutive_success_steps = 0
+        # Legacy attribute kept for compatibility with downstream scripts.
+        self.crash_penalty = float(self._task.crash_penalty)
         self._prev_action: np.ndarray | None = None
-
-        self.debug_save_events_png = bool(debug_save_events_png)
-        self.debug_save_every_n_steps = max(int(debug_save_every_n_steps), 1)
-        self.debug_accumulate_n_steps = max(int(debug_accumulate_n_steps), 1)
-        self._debug_episode_idx = 0
-        self._debug_step_idx = 0
-        self._debug_accum_counter = 0
-        self._debug_accum_frame: np.ndarray | None = None
-        self._debug_png_dir = (
-            Path(debug_png_dir)
-            if debug_png_dir is not None
-            else Path("outputs/rl/debug_events")
-        )
-        if self.debug_save_events_png:
-            self._debug_png_dir.mkdir(parents=True, exist_ok=True)
 
         # Build simulator — strip trajectory config since RL drives the drone
         # directly via CTBR; trajectory planning is unused and expensive.
         settings_dict = self._load_settings_dict(settings)
         settings_dict.pop("trajectory", None)
-        settings_dict.setdefault("dynamics", {})["control_abstraction"] = "cmd_ctbr"
+        settings_dict["dynamics"] = {
+            "model": vehicle_config["dynamics_model"],
+            "vehicle": vehicle_config["vehicle_name"],
+            "control_abstraction": "cmd_ctbr",
+        }
 
         self.sim = SynchronousSimulator(
             settings_dict,
@@ -293,30 +259,11 @@ class NeurosimRLEnv(gym.Env):
             ts_tau_seconds=self._event_ts_tau_seconds,
         )
 
-        # Action scaling - CTBR (policy uses normalized [-1, 1]^4 actions)
-        mass = float(self.sim.dynamics._multirotor.mass)
-        gravity = float(self.sim.dynamics._multirotor.g)
-        self._hover_thrust = mass * gravity
-
-        # Prefer rotor-speed-derived thrust limits from RotorPy params.
-        multirotor = self.sim.dynamics._multirotor
-        self.cmd_thrust_min = (
-            multirotor.num_rotors * multirotor.k_eta * multirotor.rotor_speed_min**2
+        self._vehicle: RLVehicle = build_vehicle(
+            sim=self.sim,
+            vehicle_config=vehicle_config,
         )
-        self.cmd_thrust_max = (
-            multirotor.num_rotors * multirotor.k_eta * multirotor.rotor_speed_max**2
-        )
-
-        assert self.cmd_thrust_min < self._hover_thrust < self.cmd_thrust_max, (
-            "Hover thrust must be between min and max thrust for stable control"
-        )
-
-        self.action_space = spaces.Box(
-            low=-1.0,
-            high=1.0,
-            shape=(4,),
-            dtype=np.float32,
-        )
+        self.action_space = self._vehicle.action_space
 
         # Observation spaces
         event_space = spaces.Box(
@@ -385,11 +332,6 @@ class NeurosimRLEnv(gym.Env):
             raise ValueError("event representation is required for combined obs_mode")
         return {"events": event_rep, "state": state_vec}
 
-    @staticmethod
-    def _write_png(path: Path, image: np.ndarray) -> None:
-        """Write PNG without GUI/display requirements."""
-        cv2.imwrite(str(path), image)
-
     def _event_rep_to_rgb(self, event_rep: np.ndarray, clip: float) -> np.ndarray:
         """Map negative/positive event channels to RGB for quick visual debugging."""
         scale = max(float(clip), 1e-6)
@@ -404,76 +346,6 @@ class NeurosimRLEnv(gym.Env):
         rgb[..., 2] = np.round(255.0 * pos).astype(np.uint8)
         return rgb
 
-    def _state_panel(self, state: dict[str, np.ndarray], width: int) -> np.ndarray:
-        """Create a compact text panel for state inspection."""
-        panel_h = 96
-        panel = np.full((panel_h, width, 3), 20, dtype=np.uint8)
-
-        x = np.asarray(state["x"], dtype=np.float32)
-        v = np.asarray(state["v"], dtype=np.float32)
-        w = np.asarray(state["w"], dtype=np.float32)
-
-        lines = [
-            f"step={self._debug_step_idx} t={self.sim.time:.3f}s",
-            f"x=[{x[0]:+.2f}, {x[1]:+.2f}, {x[2]:+.2f}]",
-            f"|v|={np.linalg.norm(v):.3f}  |w|={np.linalg.norm(w):.3f}",
-        ]
-
-        y = 24
-        for text in lines:
-            cv2.putText(
-                panel,
-                text,
-                (8, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (220, 220, 220),
-                1,
-                cv2.LINE_AA,
-            )
-            y += 26
-
-        return panel
-
-    def _maybe_dump_debug_images(
-        self,
-        event_rep: np.ndarray | None,
-        state: dict[str, np.ndarray],
-    ) -> None:
-        if not self.debug_save_events_png or event_rep is None:
-            return
-
-        self._debug_step_idx += 1
-
-        if self._debug_step_idx % self.debug_save_every_n_steps == 0:
-            rgb = self._event_rep_to_rgb(event_rep, clip=1.0)
-            panel = self._state_panel(state, width=rgb.shape[1])
-            frame = np.vstack([rgb, panel])
-            path = (
-                self._debug_png_dir
-                / f"ep{self._debug_episode_idx:04d}_step{self._debug_step_idx:06d}_events.png"
-            )
-            self._write_png(path, frame)
-
-        if self._debug_accum_frame is None:
-            self._debug_accum_frame = np.zeros_like(event_rep, dtype=np.float32)
-
-        self._debug_accum_frame += event_rep
-        self._debug_accum_counter += 1
-
-        if self._debug_accum_counter >= self.debug_accumulate_n_steps:
-            clip = float(self.debug_accumulate_n_steps)
-            rgb_acc = self._event_rep_to_rgb(self._debug_accum_frame, clip=clip)
-            panel = self._state_panel(state, width=rgb_acc.shape[1])
-            frame = np.vstack([rgb_acc, panel])
-            path = self._debug_png_dir / (
-                f"ep{self._debug_episode_idx:04d}_"
-                f"step{self._debug_step_idx:06d}_acc{self.debug_accumulate_n_steps}.png"
-            )
-            self._write_png(path, frame)
-            self._debug_accum_frame.fill(0.0)
-            self._debug_accum_counter = 0
-
     # ------------------------------------------------------------------
     # Reward / termination
     # ------------------------------------------------------------------
@@ -483,93 +355,26 @@ class NeurosimRLEnv(gym.Env):
         state: dict[str, np.ndarray],
         action: np.ndarray,
     ) -> tuple[float, dict[str, float]]:
-        v = np.asarray(state["v"], dtype=np.float32)
-        w = np.asarray(state["w"], dtype=np.float32)
-
-        vel_norm = float(np.linalg.norm(v))
-        ang_rate_norm = float(np.linalg.norm(w))
-        if self.obs_mode == "state":
-            # State-only baseline should not pay event penalties.
-            event_activity = 0.0
-            event_activity_density = 0.0
-        else:
-            event_activity = float(self._event_manager.step_event_count)
-            event_activity_density = event_activity / (
-                self._raw_event_height * self._raw_event_width
-            )
-
-        if self._prev_action is None:
-            action_smoothness = 0.0
-        else:
-            action_smoothness = float(np.linalg.norm(action - self._prev_action))
-
-        r_velocity = -self.w_velocity * vel_norm
-        r_events = -self.w_events * event_activity_density
-        r_angular = -self.w_angular * ang_rate_norm
-        r_action = -self.w_action * action_smoothness
-        r_survival = self.w_survival
-
-        reward = r_velocity + r_events + r_angular + r_action + r_survival
-
-        return reward, {
-            "vel_norm": vel_norm,
-            "ang_rate_norm": ang_rate_norm,
-            "event_activity": event_activity,
-            "event_activity_density": event_activity_density,
-            "action_smoothness": action_smoothness,
-            "r_velocity": r_velocity,
-            "r_events": r_events,
-            "r_angular": r_angular,
-            "r_action": r_action,
-            "r_survival": r_survival,
-        }
+        return self._task.compute_reward(
+            state=state,
+            action=action,
+            prev_action=self._prev_action,
+            event_count=self._event_manager.step_event_count,
+            event_shape=(self._raw_event_height, self._raw_event_width),
+            obs_mode=self.obs_mode,
+        )
 
     def _check_terminated(self, state: dict[str, np.ndarray]) -> tuple[bool, str]:
         safe, reason = self._safety.check(np.asarray(state["x"]))
         if not safe:
             return True, reason
+        task_terminated, task_reason = self._task.check_terminated(state=state)
+        if task_terminated:
+            return True, task_reason
         return False, ""
 
     def _check_success(self, state: dict[str, np.ndarray]) -> bool:
-        vel_norm = float(np.linalg.norm(np.asarray(state["v"])))
-        if vel_norm < self.success_velocity_threshold:
-            self._consecutive_success_steps += 1
-        else:
-            self._consecutive_success_steps = 0
-        if self.success_steps_required > 0:
-            return self._consecutive_success_steps >= self.success_steps_required
-        return False
-
-    @staticmethod
-    def _minmax_scale(
-        x: np.ndarray,
-        min_values: float | np.ndarray,
-        max_values: float | np.ndarray,
-    ) -> np.ndarray:
-        """Scale from [-1, 1] policy space to [min_values, max_values]."""
-        x_scaled = (x + 1.0) * 0.5 * (max_values - min_values) + min_values
-        return np.clip(x_scaled, min_values, max_values)
-
-    def _rescale_ctbr_action(self, action: np.ndarray) -> tuple[float, np.ndarray]:
-        """Convert normalized action in [-1, 1]^4 to physical CTBR commands."""
-        cmd_thrust = float(
-            self._minmax_scale(
-                action[0],
-                self.cmd_thrust_min,
-                self.cmd_thrust_max,
-            )
-        )
-        cmd_roll_br = float(
-            self._minmax_scale(action[1], -self.max_roll_br, self.max_roll_br)
-        )
-        cmd_pitch_br = float(
-            self._minmax_scale(action[2], -self.max_pitch_br, self.max_pitch_br)
-        )
-        cmd_yaw_br = float(
-            self._minmax_scale(action[3], -self.max_yaw_br, self.max_yaw_br)
-        )
-        cmd_w = np.asarray([cmd_roll_br, cmd_pitch_br, cmd_yaw_br], dtype=np.float64)
-        return cmd_thrust, cmd_w
+        return self._task.check_success(state=state)
 
     # ------------------------------------------------------------------
     # Visualisation
@@ -619,18 +424,13 @@ class NeurosimRLEnv(gym.Env):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         self._ensure_visualizer()
-        self._consecutive_success_steps = 0
+        self._task.on_reset()
         self._prev_action = None
-        self._debug_episode_idx += 1
         if self.enable_visualization:
             self._rr_needs_episode_stream_switch = True
-        self._debug_step_idx = 0
-        self._debug_accum_counter = 0
-
-        if self.debug_save_events_png and self._debug_accum_frame is not None:
-            self._debug_accum_frame.fill(0.0)
 
         rng = np.random.default_rng(seed)
+        self._vehicle.on_reset(rng)
 
         # Sample a valid navigable starting position in Habitat space,
         # then convert to dynamics frame.
@@ -667,14 +467,7 @@ class NeurosimRLEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         action = np.asarray(action, dtype=np.float32)
-        action = np.clip(action, self.action_space.low, self.action_space.high)
-
-        cmd_thrust, cmd_w = self._rescale_ctbr_action(action)
-
-        control = {
-            "cmd_thrust": cmd_thrust,
-            "cmd_w": cmd_w,
-        }
+        control = self._vehicle.action_to_control(action)
 
         # Take multiple simulator steps per environment step to match control rate. ###
         if self.obs_mode == "state":
@@ -700,7 +493,6 @@ class NeurosimRLEnv(gym.Env):
         ###############################################################################
 
         state = self.sim.dynamics.state
-        self._maybe_dump_debug_images(event_rep, state)
         reward, reward_terms = self._compute_reward(state, action)
         self._prev_action = action.copy()
 

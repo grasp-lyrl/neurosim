@@ -9,6 +9,7 @@ next to the model or pass ``--vecnormalize`` explicitly.
 """
 
 import argparse
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -27,19 +28,7 @@ def load_rollout_config(config_path: str | Path) -> dict[str, Any]:
     if not isinstance(cfg, dict):
         raise ValueError("Rollout config must be a YAML mapping")
 
-    required_keys = [
-        "settings",
-        "obs_mode",
-        "episode_seconds",
-        "event_downsample_factor",
-        "init_speed_min",
-        "init_speed_max",
-        "enable_navigable_check",
-        "event_representation",
-        "event_log_compression",
-        "device",
-        "deterministic",
-    ]
+    required_keys = ["env", "policy"]
     missing = [k for k in required_keys if k not in cfg]
     if missing:
         raise ValueError(f"Missing required rollout config keys: {missing}")
@@ -65,14 +54,6 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--visualize", action="store_true")
     p.add_argument(
-        "--debug-save-events-png",
-        action="store_true",
-        help="Save periodic event-frame PNGs for headless debugging",
-    )
-    p.add_argument("--debug-png-dir", type=str, default=None)
-    p.add_argument("--debug-save-every-n-steps", type=int, default=25)
-    p.add_argument("--debug-accumulate-n-steps", type=int, default=10)
-    p.add_argument(
         "--vecnormalize",
         type=str,
         default=None,
@@ -84,31 +65,14 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     cfg = load_rollout_config(args.rollout_config)
-    init_speed_range = (float(cfg["init_speed_min"]), float(cfg["init_speed_max"]))
-
     parent = Path(args.checkpoint).parent
-    debug_png_dir = args.debug_png_dir
-    if args.debug_save_events_png and debug_png_dir is None:
-        debug_png_dir = parent / "debug_events_rollout"
-        print(f"Debug PNG directory not specified, using {debug_png_dir}")
+
+    base_env_config = copy.deepcopy(cfg["env"])
+    if args.visualize:
+        base_env_config["enable_visualization"] = True
 
     def _make_env():
-        return NeurosimRLEnv(
-            settings=str(cfg["settings"]),
-            obs_mode=str(cfg["obs_mode"]),
-            episode_seconds=float(cfg["episode_seconds"]),
-            init_speed_range=init_speed_range,
-            event_downsample_factor=int(cfg["event_downsample_factor"]),
-            enable_navigable_check=bool(cfg["enable_navigable_check"]),
-            enable_visualization=args.visualize,
-            debug_save_events_png=args.debug_save_events_png,
-            debug_png_dir=debug_png_dir,
-            debug_save_every_n_steps=args.debug_save_every_n_steps,
-            debug_accumulate_n_steps=args.debug_accumulate_n_steps,
-            event_representation=str(cfg["event_representation"]),
-            event_log_compression=cfg["event_log_compression"],
-            event_ts_decay_ms=float(cfg.get("event_ts_decay_ms", 10.0)),
-        )
+        return NeurosimRLEnv(env_config=base_env_config)
 
     vec_env = DummyVecEnv([_make_env])
 
@@ -125,7 +89,7 @@ def main():
         vec_env.norm_reward = False
         print(f"Loaded VecNormalize from {vecnorm_path}")
 
-    model = PPO.load(args.checkpoint, env=vec_env, device=str(cfg["device"]))
+    model = PPO.load(args.checkpoint, env=vec_env, device=str(cfg["policy"]["device"]))
 
     for ep in range(1, args.episodes + 1):
         episode_seed = int(args.seed) + (ep - 1)
@@ -138,7 +102,10 @@ def main():
 
         while True:
             step += 1
-            action, _ = model.predict(obs, deterministic=bool(cfg["deterministic"]))
+            action, _ = model.predict(
+                obs,
+                deterministic=bool(cfg["policy"]["deterministic"]),
+            )
             obs, reward, done, infos = vec_env.step(action)
             total_reward += float(reward[0])
 

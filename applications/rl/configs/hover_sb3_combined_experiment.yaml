@@ -1,48 +1,77 @@
 # Experimental/training hyperparameters for hover-stop PPO.
 
-settings: configs/apartment_1-rl-settings.yaml
-obs_mode: combined
 seed: 42
 num_envs: 8
-
-# Vec env backend for training rollouts: auto|dummy|subproc.
-# auto -> subproc when num_envs > 1, else dummy.
-# vec_env_type: auto
-# # Process start method for SubprocVecEnv: spawn|forkserver|fork.
-# # spawn is safest with CUDA/Habitat in most setups.
-# vec_env_start_method: spawn
-
 total_timesteps: 3000000
 
-# Desired eval cadence in total environment steps (auto-adjusted by num_envs).
-eval_freq: 2048
-eval_episodes: 5
-eval_num_envs: 1
+eval:
+  freq: 2048
+  episodes: 5
+  num_envs: 1
 
-episode_seconds: 15.0
-event_downsample_factor: 1
-init_speed_min: 0.5
-init_speed_max: 2.0
-enable_navigable_check: true
+vec_env:
+  type: auto
+  start_method: spawn
 
-event_representation: time_surface
-event_ts_decay_ms: 10.0
-event_log_compression: null
+env:
+  settings: configs/apartment_1-rl-settings.yaml
+  obs_mode: combined
+  episode_seconds: 15.0
+  event_sensor_uuid: null
+  event_clip: 10.0
+  event_downsample_factor: 1
+  init_speed_range: [0.5, 2.0]
+  event_representation: time_surface
+  event_log_compression: null
+  event_ts_decay_ms: 10.0
+  enable_navigable_check: true
+  enable_visualization: false
+  visualization_log_every_n_steps: 1
+  task:
+    name: hover_stop
+    config:
+      w_velocity: 2.0
+      w_events: 0.0
+      w_angular: 0.05
+      w_action: 0.01
+      w_survival: 0.5
+      crash_penalty: 100.0
+      success_velocity_threshold: 0.15
+      success_steps_required: 20
+  vehicle:
+    dynamics_model: rotorpy_multirotor_euler
+    vehicle_name: crazyflie
+    control_mode: ctbr
+    ctbr_rate_limits:
+      roll: 7.0
+      pitch: 7.0
+      yaw: 5.0
+    domain_randomization:
+      enabled: false
+      scales:
+        mass: [1.0, 1.0]
+        k_eta: [1.0, 1.0]
+        k_m: [1.0, 1.0]
+        rotor_speed_min: [1.0, 1.0]
+        rotor_speed_max: [1.0, 1.0]
 
-learning_rate: 0.0003
-n_steps: 512
-batch_size: 128
-n_epochs: 8
-gamma: 0.99
-gae_lambda: 0.95
-clip_range: 0.2
-ent_coef: 0.003
-log_std_init: -1.0
-vf_coef: 0.5
-max_grad_norm: 0.5
+ppo:
+  learning_rate: 0.0003
+  n_steps: 512
+  batch_size: 128
+  n_epochs: 8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.003
+  log_std_init: -1.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  device: auto
 
-device: auto
-normalize_obs: true
-normalize_reward: true
+vecnormalize:
+  normalize_obs: true
+  normalize_reward: true
 
-wandb_log_freq: 100
+wandb:
+  log_freq: 100
