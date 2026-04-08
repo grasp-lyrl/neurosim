@@ -58,6 +58,21 @@ Neurosim enables **real-time closed-loop control** (`src/neurosim/sims/asynchron
 </div>
 
 
+### RL Quick Start (reproducing the cool stuff above)
+
+Download the pretrained checkpoint folder from [here](https://drive.google.com/drive/folders/1I0XvLGo0jb_W-zJGP8SGHMvGu2ucsXrj?usp=sharing) and place them inside `applications/rl/example_ckpt/hover_sb3_combined_experiment`
+
+Then (once you have [Neurosim installed](#installation)) you can rollout the trained policy with:
+
+```bash
+python applications/rl/run_policy.py \
+  --checkpoint applications/rl/example_ckpt/hover_sb3_combined_experiment/best_model.zip \
+  --rollout-config applications/rl/configs/hover_sb3_combined_rollout.yaml \
+  --episodes 10 \
+  --visualize
+```
+
+
 ## Installation
 
 ### Option 1: Docker (Recommended)

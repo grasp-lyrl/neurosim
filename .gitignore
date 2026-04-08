@@ -33,3 +33,4 @@ deps/*
 *.prof
 *.pdf
 *.txt
+hover_sb3_combined_experiment/
