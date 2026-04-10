@@ -13,8 +13,12 @@ The script saves:
 Notes for vectorized training:
     - `num_envs` controls PPO rollout collection parallelism.
     - `eval_freq` in config is interpreted in environment steps;
-        converted to callback frequency so evaluation stays consistent
-    - training uses subprocess vectorization for heavy simulators (Habitat).
+        converted to callback frequency so evaluation stays consistent.
+    - Training uses subprocess vectorization for heavy simulators (Habitat).
+    - Domain randomization is configured via `env.domain_randomization` in the
+        experiment YAML.  Each vec-env worker is seeded with a different RNG so
+        workers start in distinct randomized configurations.
+    - Set `env.resample_on_reset: true` to re-randomize on every episode reset.
 """
 
 import yaml
@@ -63,14 +67,37 @@ def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
 def make_env(
     env_config: dict[str, Any],
     seed: int | None = None,
+    env_idx: int = 0,
 ):
-    """Factory callable for DummyVecEnv / SubprocVecEnv."""
+    """Factory callable for DummyVecEnv / SubprocVecEnv.
+
+    When domain randomization is configured, each worker pre-randomizes its
+    simulator with ``seed + env_idx`` so that parallel workers start in
+    distinct configurations.
+    """
 
     def _init():
-        env = NeurosimRLEnv(env_config=env_config)
+        import copy
+
+        from neurosim.sims.synchronous_simulator import RandomizedSimulator
+
+        cfg = copy.deepcopy(env_config)
+
+        has_dr = bool(cfg.get("domain_randomization"))
+        if has_dr and seed is not None:
+            rng = np.random.default_rng(seed + env_idx)
+            rsim = RandomizedSimulator(
+                base_settings=cfg["settings"],
+                randomization=cfg.get("domain_randomization"),
+            )
+            rsim.randomize(rng)
+            cfg["settings"] = rsim.last_sampled_settings
+            rsim.close()
+
+        env = NeurosimRLEnv(env_config=cfg)
         env = Monitor(env)
         if seed is not None:
-            env.reset(seed=seed)
+            env.reset(seed=seed + env_idx)
         return env
 
     return _init
@@ -86,6 +113,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--wandb-project", type=str, default="neurosim-rl")
     p.add_argument("--run-name", type=str, default=None)
+    p.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable Weights & Biases logging and WandbCallback",
+    )
     return p.parse_args()
 
 
@@ -186,14 +218,16 @@ def main():
     output = Path("outputs/rl") / run_name
     output.mkdir(parents=True, exist_ok=True)
 
-    run = wandb.init(
-        project=args.wandb_project,
-        name=run_name,
-        config={"cli": vars(args), "experiment": exp},
-        sync_tensorboard=True,
-        save_code=True,
-        dir=str(output),
-    )
+    run = None
+    if not args.no_wandb:
+        run = wandb.init(
+            project=args.wandb_project,
+            name=run_name,
+            config={"cli": vars(args), "experiment": exp},
+            sync_tensorboard=True,
+            save_code=True,
+            dir=str(output),
+        )
 
     vec_env_type = str(exp["vec_env"]["type"])
     vec_env_start_method = str(exp["vec_env"]["start_method"])
@@ -201,9 +235,12 @@ def main():
     # Training should never stream visualization.
     env_config = {**exp["env"], "enable_visualization": False}
 
-    # Training env (use multiprocessing for heavy simulators when num_envs > 1)
+    # Training env (use multiprocessing for heavy simulators when num_envs > 1).
+    # Each worker gets a distinct seed so domain randomization produces
+    # different initial simulator configurations across workers.
+    base_seed = int(exp["seed"])
     train_env_fns = [
-        make_env(env_config, seed=int(exp["seed"]) + env_idx)
+        make_env(env_config, seed=base_seed, env_idx=env_idx)
         for env_idx in range(num_envs)
     ]
     train_vec = build_train_vec_env(
@@ -232,7 +269,7 @@ def main():
 
     eval_vec = DummyVecEnv(
         [
-            make_env(env_config, seed=int(exp["seed"]) + 1000 + env_idx)
+            make_env(env_config, seed=base_seed + 1000, env_idx=env_idx)
             for env_idx in range(eval_num_envs)
         ]
     )
@@ -283,16 +320,20 @@ def main():
         deterministic=True,
     )
 
-    wandb_callback = WandbCallback(
-        gradient_save_freq=int(exp["wandb"]["log_freq"]),
-        model_save_path=str(output / "wandb_models"),
-        model_save_freq=max(int(exp["eval"]["freq"]) // num_envs, 1),
-        verbose=2,
-    )
+    learn_callbacks = [eval_callback]
+    if not args.no_wandb:
+        learn_callbacks.append(
+            WandbCallback(
+                gradient_save_freq=int(exp["wandb"]["log_freq"]),
+                model_save_path=str(output / "wandb_models"),
+                model_save_freq=max(int(exp["eval"]["freq"]) // num_envs, 1),
+                verbose=2,
+            )
+        )
 
     model.learn(
         total_timesteps=int(exp["total_timesteps"]),
-        callback=[eval_callback, wandb_callback],
+        callback=learn_callbacks,
     )
 
     model.save(str(output / "final_model"))

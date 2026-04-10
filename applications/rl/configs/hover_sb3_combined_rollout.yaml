@@ -2,6 +2,7 @@
 
 env:
   settings: configs/apartment_1-rl-settings.yaml
+  resample_on_reset: false
   obs_mode: combined
   episode_seconds: 15.0
   event_sensor_uuid: null

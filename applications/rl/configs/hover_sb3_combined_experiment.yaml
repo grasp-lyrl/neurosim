@@ -15,6 +15,7 @@ vec_env:
 
 env:
   settings: configs/apartment_1-rl-settings.yaml
+  resample_on_reset: false
   obs_mode: combined
   episode_seconds: 15.0
   event_sensor_uuid: null
@@ -54,6 +55,24 @@ env:
         k_m: [1.0, 1.0]
         rotor_speed_min: [1.0, 1.0]
         rotor_speed_max: [1.0, 1.0]
+
+  # Domain randomization (scene, sensor parameters, etc.)
+  # Uncomment to enable. Each worker samples from these specs on construction
+  # and (if resample_on_reset is true) on every episode reset.
+  # domain_randomization:
+  #   scenes:
+  #     - name: apartment_1
+  #       scene_path: data/scene_datasets/habitat-test-scenes/apartment_1.glb
+  #     - name: skokloster
+  #       scene_path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
+  #   sensors:
+  #     event_camera_1:
+  #       contrast_threshold_neg:
+  #         range: [0.1, 0.6]
+  #       contrast_threshold_pos:
+  #         range: [0.1, 0.6]
+  #       hfov:
+  #         choices: [90, 100, 120]
 
 ppo:
   learning_rate: 0.0003

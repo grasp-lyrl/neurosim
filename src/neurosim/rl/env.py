@@ -7,20 +7,17 @@ collisions, using event-camera observations.
 Safety checks are delegated to Habitat pathfinder bounds and navigability.
 """
 
-import copy
 import logging
-from pathlib import Path
+import numpy as np
 from typing import Any
 
 import gymnasium as gym
-import numpy as np
-import yaml
 from gymnasium import spaces
 
 from neurosim.rl.safety import HabitatSafetyChecker, build_safety_checker
 from neurosim.rl.tasks import RLTask, build_task
-from neurosim.rl.vehicles import RLVehicle, build_vehicle
-from neurosim.sims.synchronous_simulator import SynchronousSimulator
+from neurosim.rl.vehicles import build_vehicle
+from neurosim.sims.synchronous_simulator import RandomizedSimulator
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +175,9 @@ class NeurosimRLEnv(gym.Env):
         task_kwargs = dict(env_config["task"]["config"])
         vehicle_config = env_config["vehicle"]
 
+        self._resample_on_reset = bool(env_config.get("resample_on_reset", False))
+        self._episode_count = 0
+
         if obs_mode not in {"events", "state", "combined"}:
             raise ValueError("obs_mode must be one of: events, state, combined")
 
@@ -209,36 +209,58 @@ class NeurosimRLEnv(gym.Env):
         # Legacy attribute kept for compatibility with downstream scripts.
         self.crash_penalty = float(self._task.crash_penalty)
         self._prev_action: np.ndarray | None = None
+        self._enable_navigable_check = bool(enable_navigable_check)
+        self._event_sensor_uuid_cfg = event_sensor_uuid
+        self._vehicle_config = dict(vehicle_config)
 
-        # Build simulator — strip trajectory config since RL drives the drone
-        # directly via CTBR; trajectory planning is unused and expensive.
-        settings_dict = self._load_settings_dict(settings)
-        settings_dict.pop("trajectory", None)
-        settings_dict["dynamics"] = {
-            "model": vehicle_config["dynamics_model"],
-            "vehicle": vehicle_config["vehicle_name"],
+        self._safety: HabitatSafetyChecker | None = None
+        self.event_sensor_uuid = ""
+
+        # Build the RandomizedSimulator wrapper.  The settings_transform
+        # strips trajectory config and injects RL-specific dynamics.
+        self._rsim = RandomizedSimulator(
+            base_settings=settings,
+            randomization=env_config.get("domain_randomization"),
+            visualizer_disabled=not self.enable_visualization,
+            settings_transform=self._rl_settings_transform,
+        )
+        self._sync_from_simulator()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _rl_settings_transform(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Strip trajectory and inject RL-specific dynamics into settings."""
+        settings.pop("trajectory", None)
+        settings["dynamics"] = {
+            "model": self._vehicle_config["dynamics_model"],
+            "vehicle": self._vehicle_config["vehicle_name"],
             "control_abstraction": "cmd_ctbr",
         }
+        return settings
 
-        self.sim = SynchronousSimulator(
-            settings_dict,
-            visualizer_disabled=not self.enable_visualization,
-        )
+    def _get_default_event_sensor_uuid(self) -> str:
+        event_sensors = self.sim.config.sensor_manager.get_sensors_by_type("event")
+        if not event_sensors:
+            raise RuntimeError(
+                "No event sensor configured; RL env expects at least one event sensor"
+            )
+        return event_sensors[0].uuid
 
-        # Safety checker — always Habitat-backed when used for RL.
-        self._safety: HabitatSafetyChecker = build_safety_checker(
+    def _sync_from_simulator(self) -> None:
+        """Re-derive spaces, vehicle, safety checker, etc. from the current simulator."""
+        self._safety = build_safety_checker(
             self.sim,
-            enable_navigable_check=enable_navigable_check,
+            enable_navigable_check=self._enable_navigable_check,
         )
 
-        # Timing
         world_rate = self.sim.config.world_rate
         control_rate = self.sim.config.control_rate
         self.steps_per_action = max(int(world_rate / control_rate), 1)
 
-        # Event sensor resolution
         self.event_sensor_uuid = (
-            event_sensor_uuid or self._get_default_event_sensor_uuid()
+            self._event_sensor_uuid_cfg or self._get_default_event_sensor_uuid()
         )
         event_cfg = self.sim.config.visual_sensors[self.event_sensor_uuid]
         self._raw_event_height = int(event_cfg["height"])
@@ -249,6 +271,7 @@ class NeurosimRLEnv(gym.Env):
             raise ValueError(
                 "event_downsample_factor is too large for event sensor resolution"
             )
+
         self._event_manager = EventRepresentationManager(
             representation=self.event_representation,
             raw_height=self._raw_event_height,
@@ -259,13 +282,12 @@ class NeurosimRLEnv(gym.Env):
             ts_tau_seconds=self._event_ts_tau_seconds,
         )
 
-        self._vehicle: RLVehicle = build_vehicle(
+        self._vehicle = build_vehicle(
             sim=self.sim,
-            vehicle_config=vehicle_config,
+            vehicle_config=self._vehicle_config,
         )
         self.action_space = self._vehicle.action_space
 
-        # Observation spaces
         event_space = spaces.Box(
             low=0.0,
             high=1.0,
@@ -285,24 +307,10 @@ class NeurosimRLEnv(gym.Env):
                 {"events": event_space, "state": state_space}
             )
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _load_settings_dict(settings: str | Path | dict[str, Any]) -> dict[str, Any]:
-        if isinstance(settings, dict):
-            return copy.deepcopy(settings)
-        with open(Path(settings), "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
-
-    def _get_default_event_sensor_uuid(self) -> str:
-        event_sensors = self.sim.config.sensor_manager.get_sensors_by_type("event")
-        if not event_sensors:
-            raise RuntimeError(
-                "No event sensor configured; RL env expects at least one event sensor"
-            )
-        return event_sensors[0].uuid
+    @property
+    def sim(self):
+        """Access the inner SynchronousSimulator."""
+        return self._rsim.sim if hasattr(self, "_rsim") else None
 
     @staticmethod
     def _state_vector(state: dict[str, np.ndarray]) -> np.ndarray:
@@ -423,13 +431,20 @@ class NeurosimRLEnv(gym.Env):
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
+
+        rng = np.random.default_rng(seed)
+
+        if self._resample_on_reset and self._episode_count > 0:
+            self._rsim.randomize(rng)
+            self._sync_from_simulator()
+            self._visualizer_initialized = False
+
         self._ensure_visualizer()
         self._task.on_reset()
         self._prev_action = None
         if self.enable_visualization:
             self._rr_needs_episode_stream_switch = True
 
-        rng = np.random.default_rng(seed)
         self._vehicle.on_reset(rng)
 
         # Sample a valid navigable starting position in Habitat space,
@@ -463,6 +478,7 @@ class NeurosimRLEnv(gym.Env):
             "time": self.sim.time,
             "simsteps": self.sim.simsteps,
         }
+        self._episode_count += 1
         return observation, info
 
     def step(self, action: np.ndarray):
@@ -517,4 +533,5 @@ class NeurosimRLEnv(gym.Env):
         return observation, float(reward), terminated, truncated, info
 
     def close(self):
-        self.sim.close()
+        if hasattr(self, "_rsim"):
+            self._rsim.close()
