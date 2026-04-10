@@ -1,0 +1,83 @@
+# Minimal PPO run for CI / local smoke tests (few rollouts, DummyVecEnv).
+#
+# Example without Weights & Biases:
+#   python applications/rl/train_sb3.py \
+#     --experiment-config tests/fixtures/hover_sb3_smoke_experiment.yaml \
+#     --run-name smoke --no-wandb
+
+seed: 42
+num_envs: 1
+total_timesteps: 2048
+
+eval:
+  freq: 100000
+  episodes: 1
+  num_envs: 1
+
+vec_env:
+  type: dummy
+  start_method: spawn
+
+env:
+  settings: configs/apartment_1-rl-settings.yaml
+  resample_on_reset: false
+  obs_mode: state
+  episode_seconds: 15.0
+  event_sensor_uuid: null
+  event_clip: 10.0
+  event_downsample_factor: 1
+  init_speed_range: [0.5, 2.0]
+  event_representation: time_surface
+  event_log_compression: null
+  event_ts_decay_ms: 10.0
+  enable_navigable_check: true
+  enable_visualization: false
+  visualization_log_every_n_steps: 1
+  task:
+    name: hover_stop
+    config:
+      w_velocity: 2.0
+      w_events: 0.0
+      w_angular: 0.05
+      w_action: 0.01
+      w_survival: 0.5
+      crash_penalty: 100.0
+      success_velocity_threshold: 0.15
+      success_steps_required: 20
+  vehicle:
+    dynamics_model: rotorpy_multirotor_euler
+    vehicle_name: crazyflie
+    control_mode: ctbr
+    ctbr_rate_limits:
+      roll: 7.0
+      pitch: 7.0
+      yaw: 5.0
+    domain_randomization:
+      enabled: false
+      scales:
+        mass: [1.0, 1.0]
+        k_eta: [1.0, 1.0]
+        k_m: [1.0, 1.0]
+        rotor_speed_min: [1.0, 1.0]
+        rotor_speed_max: [1.0, 1.0]
+
+ppo:
+  learning_rate: 0.0003
+  n_steps: 256
+  batch_size: 64
+  n_epochs: 2
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.003
+  log_std_init: -1.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  device: auto
+
+vecnormalize:
+  normalize_obs: true
+  normalize_reward: true
+
+wandb:
+  log_freq: 100
