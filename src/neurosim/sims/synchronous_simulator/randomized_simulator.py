@@ -7,24 +7,7 @@ randomizable parameter, and rebuilds the inner
 :class:`SynchronousSimulator`.  When no randomization config is supplied the
 wrapper is a transparent pass-through.
 
-The randomization config uses an explicit ``range`` / ``choices`` syntax so
-there is never ambiguity between a two-element choice list and a continuous
-range::
-
-    domain_randomization:
-      scenes:
-        - name: apartment_1
-          scene_path: data/scene_datasets/.../apartment_1.glb
-        - name: skokloster
-          scene_path: data/scene_datasets/.../skokloster-castle.glb
-      sensors:
-        event_camera_1:
-          contrast_threshold_neg:
-            range: [0.1, 0.6]
-          hfov:
-            choices: [90, 100, 120]
-      simulator: {}
-      visual_backend: {}
+The randomization config uses an explicit ``range`` / ``choices`` syntax.
 """
 
 import copy
@@ -91,26 +74,19 @@ class DomainRandomizationConfig:
     """Parsed representation of a ``domain_randomization`` YAML section.
 
     Attributes:
-        scenes: List of ``{"name": ..., "scene_path": ...}`` dicts.  One is
+        scenes: List of ``{"name": ..., "path": ...}`` dicts.  One is
             chosen uniformly at random per :meth:`sample`.
         sensors: Per-sensor-UUID dict of randomizable parameters.
-        simulator: Randomizable overrides for the ``simulator`` settings block.
-        visual_backend: Randomizable overrides for ``visual_backend`` (non-sensor
-            fields).
     """
 
     scenes: list[dict[str, str]] = field(default_factory=list)
     sensors: dict[str, dict[str, Any]] = field(default_factory=dict)
-    simulator: dict[str, Any] = field(default_factory=dict)
-    visual_backend: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DomainRandomizationConfig":
         return cls(
             scenes=list(data.get("scenes", [])),
             sensors=dict(data.get("sensors", {})),
-            simulator=dict(data.get("simulator", {})),
-            visual_backend=dict(data.get("visual_backend", {})),
         )
 
     def sample(
@@ -124,12 +100,10 @@ class DomainRandomizationConfig:
         """
         settings = copy.deepcopy(base_settings)
 
-        # -- Scene randomization ------------------------------------------------
         if self.scenes:
             scene = self.scenes[int(rng.integers(0, len(self.scenes)))]
-            settings.setdefault("visual_backend", {})["scene"] = scene["scene_path"]
+            settings.setdefault("visual_backend", {})["scene"] = scene["path"]
 
-        # -- Sensor parameter randomization -------------------------------------
         if self.sensors:
             vb_sensors = settings.setdefault("visual_backend", {}).setdefault(
                 "sensors", {}
@@ -142,18 +116,6 @@ class DomainRandomizationConfig:
                     )
                     continue
                 _apply_randomization_layer(vb_sensors[uuid], param_specs, rng)
-
-        # -- Simulator-level randomization --------------------------------------
-        if self.simulator:
-            _apply_randomization_layer(
-                settings.setdefault("simulator", {}), self.simulator, rng
-            )
-
-        # -- Visual-backend-level randomization (non-sensor fields) -------------
-        if self.visual_backend:
-            _apply_randomization_layer(
-                settings.setdefault("visual_backend", {}), self.visual_backend, rng
-            )
 
         return settings
 
@@ -174,14 +136,9 @@ class RandomizedSimulator:
         Path to a YAML file **or** a raw settings ``dict``.
     randomization:
         Optional dict matching the ``domain_randomization`` schema (scenes,
-        sensors, simulator, visual_backend).  ``None`` disables randomization.
+        and sensors).  ``None`` disables randomization.
     visualizer_disabled:
         Forwarded to ``SynchronousSimulator``.
-    settings_transform:
-        Optional callable ``(dict) -> dict`` applied to settings *after*
-        randomization and *before* building the simulator.  Useful for
-        consumers that need to patch settings (e.g. RL env strips trajectory
-        and overrides dynamics).
     """
 
     def __init__(
@@ -189,7 +146,6 @@ class RandomizedSimulator:
         base_settings: str | Path | dict[str, Any],
         randomization: dict[str, Any] | None = None,
         visualizer_disabled: bool = False,
-        settings_transform: Any | None = None,
     ):
         self._base_settings = self._load_settings(base_settings)
         self._rand_cfg: DomainRandomizationConfig | None = (
@@ -198,13 +154,10 @@ class RandomizedSimulator:
             else None
         )
         self._viz_disabled = visualizer_disabled
-        self._settings_transform = settings_transform
         self.sim: SynchronousSimulator | None = None
         self._last_sampled_settings: dict[str, Any] | None = None
 
         self.build()
-
-    # -- Settings loading ---------------------------------------------------
 
     @staticmethod
     def _load_settings(settings: str | Path | dict[str, Any]) -> dict[str, Any]:
@@ -214,18 +167,11 @@ class RandomizedSimulator:
         with open(path, "r", encoding="utf-8") as fh:
             return yaml.safe_load(fh)
 
-    # -- Build / randomize --------------------------------------------------
-
-    def _prepare_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        if self._settings_transform is not None:
-            settings = self._settings_transform(settings)
-        return settings
-
     def build(self) -> None:
         """(Re-)build the simulator from base settings without randomization."""
         if self.sim is not None:
             self.sim.close()
-        settings = self._prepare_settings(copy.deepcopy(self._base_settings))
+        settings = copy.deepcopy(self._base_settings)
         self._last_sampled_settings = settings
         self.sim = SynchronousSimulator(
             settings, visualizer_disabled=self._viz_disabled
@@ -245,7 +191,6 @@ class RandomizedSimulator:
         else:
             settings = copy.deepcopy(self._base_settings)
 
-        settings = self._prepare_settings(settings)
         self._last_sampled_settings = settings
         self.sim = SynchronousSimulator(
             settings, visualizer_disabled=self._viz_disabled
@@ -255,8 +200,6 @@ class RandomizedSimulator:
     def last_sampled_settings(self) -> dict[str, Any] | None:
         """The settings dict used to build the current simulator instance."""
         return self._last_sampled_settings
-
-    # -- Delegation ---------------------------------------------------------
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):
