@@ -15,8 +15,8 @@ class RLVehicle(ABC):
         """Normalized policy action space."""
 
     @abstractmethod
-    def on_reset(self, rng: np.random.Generator) -> None:
-        """Apply optional episode-level updates (e.g., randomization)."""
+    def randomize(self, episode_count: int, rng: np.random.Generator) -> None:
+        """Optionally resample vehicle-side randomization (see dynamics config)."""
 
     @abstractmethod
     def action_to_control(self, action: np.ndarray) -> dict[str, np.ndarray | float]:

@@ -5,135 +5,55 @@ velocity and must decelerate to a stable hover inside the scene without
 collisions, using event-camera observations.
 
 Safety checks are delegated to Habitat pathfinder bounds and navigability.
+
+Experiment configs are self-contained: scenes, sensors, a ``dynamics`` block
+(model / vehicle / control_abstraction, plus RL-only fields), the full
+``simulator`` block (rates, IMU, etc.), and optional
+``simulator.domain_randomization`` (``enabled``, ``resample_every`` for how
+often to rebuild the sim, and per-sensor specs under ``sensors``) gate
+scene/sensor sampling for
+:class:`~neurosim.sims.synchronous_simulator.randomized_simulator.RandomizedSimulator`.
+
+Dynamics randomization is optional under ``dynamics.domain_randomization``
+(``enabled``, ``resample_every``, ``scales``); omit the block to disable.
+
+Habitat-oriented defaults live in ``_VISUAL_BACKEND_DEFAULTS`` only;
+everything tunable for a run is in YAML. The RL policy supplies control via
+``sim.step()`` — no ``controller`` or ``trajectory`` entries in settings
+(same idea as omitting trajectory for ``sim.run()``-style workflows).
 """
 
 import copy
-import logging
-from pathlib import Path
+import numpy as np
 from typing import Any
 
 import gymnasium as gym
-import numpy as np
-import yaml
 from gymnasium import spaces
 
 from neurosim.rl.safety import HabitatSafetyChecker, build_safety_checker
-from neurosim.rl.tasks import RLTask, build_task
-from neurosim.rl.vehicles import RLVehicle, build_vehicle
-from neurosim.sims.synchronous_simulator import SynchronousSimulator
+from neurosim.rl.tasks import EventRepresentationManager, RLTask, build_task
+from neurosim.rl.vehicles import build_vehicle
+from neurosim.sims.synchronous_simulator import RandomizedSimulator
 
-logger = logging.getLogger(__name__)
+# ---------------------------------------------------------------------------
+# Defaults for building SynchronousSimulator settings from env_config
+# ---------------------------------------------------------------------------
 
-
-class EventRepresentationManager:
-    """Owns event representation state and update logic for RL observations."""
-
-    def __init__(
-        self,
-        representation: str,
-        raw_height: int,
-        raw_width: int,
-        downsample_factor: int,
-        event_clip: float,
-        event_log_compression: float | None,
-        ts_tau_seconds: float,
-    ):
-        self.representation = representation
-        self.raw_height = int(raw_height)
-        self.raw_width = int(raw_width)
-        self.downsample_factor = max(int(downsample_factor), 1)
-        self.event_clip = float(event_clip)
-        self.event_log_compression = event_log_compression
-        self.ts_tau_seconds = float(ts_tau_seconds)
-
-        self.raw = np.zeros((2, self.raw_height, self.raw_width), dtype=np.float32)
-        self.step_event_count = 0
-        self._last_update_time_s: float | None = None
-
-    def reset_episode(self) -> None:
-        self.raw.fill(0.0)
-        self.step_event_count = 0
-        self._last_update_time_s = None
-
-    def begin_step(self) -> None:
-        self.step_event_count = 0
-        if self.representation != "time_surface":
-            self.raw.fill(0.0)
-
-    def _downsample(self, event_rep: np.ndarray) -> np.ndarray:
-        if self.downsample_factor == 1:
-            return event_rep
-
-        factor = self.downsample_factor
-        h = (event_rep.shape[1] // factor) * factor
-        w = (event_rep.shape[2] // factor) * factor
-        cropped = event_rep[:, :h, :w]
-        reshaped = cropped.reshape(2, h // factor, factor, w // factor, factor)
-        return reshaped.mean(axis=(2, 4), dtype=np.float32)
-
-    def _normalize(self, event_rep: np.ndarray) -> np.ndarray:
-        if self.event_log_compression is not None:
-            k = self.event_log_compression
-            event_rep = np.log1p(k * event_rep) / np.log1p(k * self.event_clip)
-        else:
-            scale = max(self.event_clip, 1e-6)
-            event_rep /= scale
-        np.clip(event_rep, 0.0, 1.0, out=event_rep)
-        return event_rep
-
-    def accumulate(self, events: Any | None) -> None:
-        if events is None:
-            return
-
-        x, y, t, p = events.x, events.y, events.t, events.p
-
-        if hasattr(x, "detach"):
-            x = x.detach().cpu().numpy()
-            y = y.detach().cpu().numpy()
-            t = t.detach().cpu().numpy()
-            p = p.detach().cpu().numpy()
-
-        if x.size == 0:
-            return
-
-        self.step_event_count += int(x.size)
-
-        x = x.astype(np.int64, copy=False)
-        y = y.astype(np.int64, copy=False)
-        t = (t * 1e-6).astype(np.float64, copy=False)
-        p = p.astype(np.int64, copy=False)
-
-        if self.representation == "histogram":
-            flat_idx = p * (self.raw_height * self.raw_width) + y * self.raw_width + x
-            counts = np.bincount(
-                flat_idx, minlength=2 * self.raw_height * self.raw_width
-            ).astype(np.float32)
-            self.raw += counts.reshape(2, self.raw_height, self.raw_width)
-            return
-
-        if self.representation == "event_frame":
-            self.raw[p, y, x] = 1.0
-            return
-
-        if self.representation == "time_surface":
-            latest_time_s = float(t[-1])
-            if self._last_update_time_s is not None:
-                dt_seconds = latest_time_s - self._last_update_time_s
-                if dt_seconds > 0.0:
-                    decay = np.float32(np.exp(-dt_seconds / self.ts_tau_seconds))
-                    self.raw *= decay
-            self._last_update_time_s = latest_time_s
-            self.raw[p, y, x] += 1.0
-            return
-
-        raise ValueError(f"Unsupported event_representation: {self.representation}")
-
-    def observation(self) -> np.ndarray:
-        if self.representation == "histogram":
-            np.clip(self.raw, 0.0, self.event_clip, out=self.raw)
-            self._normalize(self.raw)
-        obs = self._downsample(self.raw)
-        return obs.astype(np.float32, copy=True)
+_VISUAL_BACKEND_DEFAULTS: dict[str, Any] = {
+    "gpu_id": 0,
+    "scene_dataset_config_file": "default",
+    "clear_color": [0.0, 0.0, 0.0, 1.0],
+    "default_agent": 0,
+    "agent_height": 1.0,
+    "agent_radius": 0.3,
+    "agent_max_climb": 1.0,
+    "agent_max_slope": 90.0,
+    "enable_hbao": False,
+    "frustum_culling": True,
+    "seed": 324,
+    "physics_config_file": "data/default.physics_config.json",
+    "enable_physics": True,
+}
 
 
 class NeurosimRLEnv(gym.Env):
@@ -150,95 +70,165 @@ class NeurosimRLEnv(gym.Env):
 
     Safety checks are performed via Habitat pathfinder bounds and
     navigability queries.
+
+    ``train=True`` forces Rerun visualization off regardless of
+    ``env_config["enable_visualization"]`` (for SB3 training; rollouts use
+    ``train=False``).
     """
 
-    def __init__(self, env_config: dict[str, Any]):
+    def __init__(self, env_config: dict[str, Any], *, train: bool = False):
         super().__init__()
 
-        settings = env_config["settings"]
-        obs_mode = env_config["obs_mode"]
-        episode_seconds = env_config["episode_seconds"]
-
-        event_sensor_uuid = env_config["event_sensor_uuid"]
-        event_clip = env_config["event_clip"]
-        event_downsample_factor = env_config["event_downsample_factor"]
-
-        init_speed_range = env_config["init_speed_range"]
-
-        event_representation = env_config["event_representation"]
-        event_log_compression = env_config["event_log_compression"]
-        event_ts_decay_ms = env_config["event_ts_decay_ms"]
-
-        enable_navigable_check = env_config["enable_navigable_check"]
-
-        enable_visualization = env_config["enable_visualization"]
-        visualization_log_every_n_steps = env_config["visualization_log_every_n_steps"]
-
-        task_name = env_config["task"]["name"]
-        task_kwargs = dict(env_config["task"]["config"])
-        vehicle_config = env_config["vehicle"]
-
-        if obs_mode not in {"events", "state", "combined"}:
+        # Observation mode -----------------------------------------------------------------
+        self.obs_mode = env_config["obs_mode"]
+        if self.obs_mode not in {"events", "state", "combined"}:
             raise ValueError("obs_mode must be one of: events, state, combined")
 
-        self.obs_mode = obs_mode
-        self.episode_seconds = float(episode_seconds)
-        self.event_clip = float(event_clip)
-        self.event_downsample_factor = max(int(event_downsample_factor), 1)
-        self.event_representation = event_representation
-        if event_representation not in {"histogram", "event_frame", "time_surface"}:
+        # Episode specification ------------------------------------------------------------
+        self.episode_seconds = env_config["episode_seconds"]
+        self.init_speed_range = env_config["init_speed_range"]
+
+        # Event representation -------------------------------------------------------------
+        self.event_downsample_factor = env_config.get("event_downsample_factor", 1)
+        self.event_representation = env_config.get(
+            "event_representation", "time_surface"
+        )
+        if self.event_representation not in {
+            "histogram",
+            "event_frame",
+            "time_surface",
+        }:
             raise ValueError(
                 "event_representation must be 'histogram', 'event_frame', or 'time_surface'"
             )
-        self.event_log_compression = (
-            float(event_log_compression) if event_log_compression is not None else None
+        self.event_log_compression = env_config.get("event_log_compression", 1.0)
+        self._event_ts_tau_seconds = env_config.get("event_ts_decay_ms", 10.0) * 1e-3
+
+        # Visualization --------------------------------------------------------------------
+        self.enable_visualization = (
+            False if train else bool(env_config.get("enable_visualization", False))
         )
-        self._event_ts_tau_seconds = float(event_ts_decay_ms) * 1e-3
-        self.enable_visualization = bool(enable_visualization)
-        self.visualization_log_every_n_steps = max(
-            int(visualization_log_every_n_steps), 1
+        self.visualization_log_every_n_steps = env_config.get(
+            "visualization_log_every_n_steps", 1
         )
         self._visualizer_initialized = False
         self._rr_rollout_episode_idx = 0
         self._rr_needs_episode_stream_switch = False
 
-        self.init_speed_range = tuple(init_speed_range)
+        # Task ----------------------------------------------------------------------------
+        self._task: RLTask = build_task(
+            task_name=env_config["task"]["name"], **env_config["task"]["config"]
+        )
 
-        self._task: RLTask = build_task(task_name=task_name, **task_kwargs)
-
-        # Legacy attribute kept for compatibility with downstream scripts.
         self.crash_penalty = float(self._task.crash_penalty)
         self._prev_action: np.ndarray | None = None
+        self._enable_navigable_check = env_config.get("enable_navigable_check", True)
+        self._event_sensor_uuid_cfg = env_config.get("event_sensor_uuid")
+        self._dynamics_config = env_config["dynamics"]
 
-        # Build simulator — strip trajectory config since RL drives the drone
-        # directly via CTBR; trajectory planning is unused and expensive.
-        settings_dict = self._load_settings_dict(settings)
-        settings_dict.pop("trajectory", None)
-        settings_dict["dynamics"] = {
-            "model": vehicle_config["dynamics_model"],
-            "vehicle": vehicle_config["vehicle_name"],
-            "control_abstraction": "cmd_ctbr",
-        }
+        self._safety: HabitatSafetyChecker | None = None
+        self.event_sensor_uuid = ""
 
-        self.sim = SynchronousSimulator(
-            settings_dict,
+        # Domain randomization -------------------------------------------------------------
+        dr_cfg = env_config.get("simulator", {}).get("domain_randomization", {})
+        self._dr_enabled = bool(dr_cfg.get("enabled", False))
+        if self._dr_enabled:
+            self._resample_every = int(dr_cfg["resample_every"])
+            assert self._resample_every > 0, "resample_every must be positive"
+        self._episode_count = 0
+
+        base_settings = self._build_simulator_settings(env_config)
+
+        randomization: dict[str, Any] | None = None
+        if self._dr_enabled:
+            randomization = {
+                "scenes": list(env_config.get("scenes", [])),
+                "sensors": dict(dr_cfg.get("sensors", {})),
+            }
+
+        self._rsim = RandomizedSimulator(
+            base_settings=base_settings,
+            randomization=randomization,
             visualizer_disabled=not self.enable_visualization,
         )
+        self._sync_from_simulator()
 
-        # Safety checker — always Habitat-backed when used for RL.
-        self._safety: HabitatSafetyChecker = build_safety_checker(
-            self.sim,
-            enable_navigable_check=enable_navigable_check,
+        self.steps_per_action = max(
+            int(self.sim.config.world_rate / self.sim.config.control_rate), 1
         )
 
-        # Timing
-        world_rate = self.sim.config.world_rate
-        control_rate = self.sim.config.control_rate
-        self.steps_per_action = max(int(world_rate / control_rate), 1)
+    # ------------------------------------------------------------------
+    # Settings builder
+    # ------------------------------------------------------------------
 
-        # Event sensor resolution
+    @staticmethod
+    def _build_simulator_settings(env_config: dict[str, Any]) -> dict[str, Any]:
+        """Construct a SynchronousSimulator-compatible settings dict.
+
+        Expects ``env_config["simulator"]`` to be the full block passed to
+        ``SimulationConfig`` (world/control rates, ``additional_sensors``,
+        ``sensor_rates``, ``viz_rates``, etc.).  Expects ``env_config["dynamics"]``
+        with ``model``, ``vehicle``, and ``control_abstraction`` (same shape as
+        top-level ``dynamics`` in full simulator YAMLs).  RL-only keys such as
+        ``ctbr_rate_limits`` and ``domain_randomization`` (including
+        ``resample_every``) are not forwarded to ``create_dynamics``.  Merges
+        optional ``visual_backend`` overrides with
+        ``_VISUAL_BACKEND_DEFAULTS``, then sets ``scene`` from the first entry in
+        ``scenes`` and ``sensors`` from ``env_config["sensors"]``.  Strips
+        ``domain_randomization`` from the ``simulator`` sub-dict before building
+        :class:`~neurosim.core.utils.utils_simcfg.SimulationConfig` (unknown keys
+        would otherwise be rejected).
+
+        Omits ``controller`` and ``trajectory`` so the simulator runs under
+        external RL control via :meth:`~neurosim.sims.synchronous_simulator.simulator.SynchronousSimulator.step`.
+        """
+        if "simulator" not in env_config:
+            raise KeyError(
+                'env_config must include a "simulator" block '
+                "(world_rate, control_rate, additional_sensors, sensor_rates, viz_rates, …)"
+            )
+
+        scenes = env_config["scenes"]
+        scene_path = scenes[0]["path"]
+        sensors = dict(env_config["sensors"])
+        dyn_cfg = env_config["dynamics"]
+
+        sim_settings = copy.deepcopy(env_config["simulator"])
+        sim_settings.pop("domain_randomization", None)
+        vb_overrides = dict(env_config.get("visual_backend", {}))
+        vb_settings = {**_VISUAL_BACKEND_DEFAULTS, **vb_overrides}
+        vb_settings["scene"] = scene_path
+        vb_settings["sensors"] = sensors
+
+        dynamics_settings: dict[str, Any] = {
+            "model": dyn_cfg["model"],
+            "vehicle": dyn_cfg["vehicle"],
+            "control_abstraction": dyn_cfg["control_abstraction"],
+        }
+
+        return {
+            "simulator": sim_settings,
+            "visual_backend": vb_settings,
+            "dynamics": dynamics_settings,
+        }
+
+    def _get_default_event_sensor_uuid(self) -> str:
+        event_sensors = self.sim.config.sensor_manager.get_sensors_by_type("event")
+        if not event_sensors:
+            raise RuntimeError(
+                "No event sensor configured; RL env expects at least one event sensor"
+            )
+        return event_sensors[0].uuid
+
+    def _sync_from_simulator(self) -> None:
+        """Re-derive spaces, vehicle, safety checker, etc. from the current simulator."""
+        self._safety = build_safety_checker(
+            self.sim,
+            enable_navigable_check=self._enable_navigable_check,
+        )
+
         self.event_sensor_uuid = (
-            event_sensor_uuid or self._get_default_event_sensor_uuid()
+            self._event_sensor_uuid_cfg or self._get_default_event_sensor_uuid()
         )
         event_cfg = self.sim.config.visual_sensors[self.event_sensor_uuid]
         self._raw_event_height = int(event_cfg["height"])
@@ -249,23 +239,22 @@ class NeurosimRLEnv(gym.Env):
             raise ValueError(
                 "event_downsample_factor is too large for event sensor resolution"
             )
+
         self._event_manager = EventRepresentationManager(
             representation=self.event_representation,
             raw_height=self._raw_event_height,
             raw_width=self._raw_event_width,
             downsample_factor=self.event_downsample_factor,
-            event_clip=self.event_clip,
             event_log_compression=self.event_log_compression,
             ts_tau_seconds=self._event_ts_tau_seconds,
         )
 
-        self._vehicle: RLVehicle = build_vehicle(
+        self._vehicle = build_vehicle(
             sim=self.sim,
-            vehicle_config=vehicle_config,
+            dynamics_config=self._dynamics_config,
         )
         self.action_space = self._vehicle.action_space
 
-        # Observation spaces
         event_space = spaces.Box(
             low=0.0,
             high=1.0,
@@ -285,24 +274,10 @@ class NeurosimRLEnv(gym.Env):
                 {"events": event_space, "state": state_space}
             )
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _load_settings_dict(settings: str | Path | dict[str, Any]) -> dict[str, Any]:
-        if isinstance(settings, dict):
-            return copy.deepcopy(settings)
-        with open(Path(settings), "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
-
-    def _get_default_event_sensor_uuid(self) -> str:
-        event_sensors = self.sim.config.sensor_manager.get_sensors_by_type("event")
-        if not event_sensors:
-            raise RuntimeError(
-                "No event sensor configured; RL env expects at least one event sensor"
-            )
-        return event_sensors[0].uuid
+    @property
+    def sim(self):
+        """Access the inner SynchronousSimulator."""
+        return self._rsim.sim
 
     @staticmethod
     def _state_vector(state: dict[str, np.ndarray]) -> np.ndarray:
@@ -322,29 +297,16 @@ class NeurosimRLEnv(gym.Env):
         state: dict[str, np.ndarray],
     ) -> np.ndarray | dict[str, np.ndarray]:
         state_vec = self._state_vector(state)
-        if self.obs_mode == "events":
-            if event_rep is None:
-                raise ValueError("event representation is required for events obs_mode")
-            return event_rep
         if self.obs_mode == "state":
             return state_vec
+
         if event_rep is None:
-            raise ValueError("event representation is required for combined obs_mode")
+            raise ValueError(
+                f"event representation is required for obs_mode={self.obs_mode!r}"
+            )
+        if self.obs_mode == "events":
+            return event_rep
         return {"events": event_rep, "state": state_vec}
-
-    def _event_rep_to_rgb(self, event_rep: np.ndarray, clip: float) -> np.ndarray:
-        """Map negative/positive event channels to RGB for quick visual debugging."""
-        scale = max(float(clip), 1e-6)
-        neg = np.clip(event_rep[0] / scale, 0.0, 1.0)
-        pos = np.clip(event_rep[1] / scale, 0.0, 1.0)
-
-        rgb = np.zeros(
-            (event_rep.shape[1], event_rep.shape[2], 3),
-            dtype=np.uint8,
-        )
-        rgb[..., 0] = np.round(255.0 * neg).astype(np.uint8)
-        rgb[..., 2] = np.round(255.0 * pos).astype(np.uint8)
-        return rgb
 
     # ------------------------------------------------------------------
     # Reward / termination
@@ -359,8 +321,7 @@ class NeurosimRLEnv(gym.Env):
             state=state,
             action=action,
             prev_action=self._prev_action,
-            event_count=self._event_manager.step_event_count,
-            event_shape=(self._raw_event_height, self._raw_event_width),
+            event_manager=self._event_manager,
             obs_mode=self.obs_mode,
         )
 
@@ -397,44 +358,60 @@ class NeurosimRLEnv(gym.Env):
         measurements: dict[str, Any],
         event_rep: np.ndarray | None = None,
     ) -> None:
-        if not self.enable_visualization or self.sim.visualizer is None:
+        if (
+            not self.enable_visualization
+            or not self.sim.visualizer
+            or self.sim.simsteps % self.visualization_log_every_n_steps != 0
+        ):
             return
-        if self.sim.simsteps % self.visualization_log_every_n_steps != 0:
-            return
+
         if self._rr_needs_episode_stream_switch:
             self._rr_rollout_episode_idx += 1
             self.sim.visualizer.set_episode_index(self._rr_rollout_episode_idx)
             self._rr_needs_episode_stream_switch = False
-        self.sim.visualizer.log_measurements(
-            measurements, self.sim.time, self.sim.simsteps
-        )
-        if event_rep is not None and self.sim.config.sensor_manager.should_visualize(
-            self.event_sensor_uuid, self.sim.simsteps
-        ):
-            self.sim.visualizer.log_image(
-                f"sensors/{self.event_sensor_uuid}/event_representation",
-                self._event_rep_to_rgb(event_rep, clip=1.0),
+
+        if measurements:
+            self.sim.visualizer.log_measurements(
+                measurements, self.sim.time, self.sim.simsteps
             )
-        self.sim.visualizer.log_state(self.sim.dynamics.state)
+            self.sim.visualizer.log_state(self.sim.dynamics.state)
+
+        if event_rep is not None:
+            self.sim.visualizer.log_image(
+                path=f"sensors/{self.event_sensor_uuid}/event_representation",
+                image=self._event_manager.to_rgb(event_rep),
+            )
 
     # ------------------------------------------------------------------
     # Gym API
     # ------------------------------------------------------------------
 
+    def _should_domain_randomize_now(self) -> bool:
+        """True when ``RandomizedSimulator.randomize`` should run on this reset."""
+        if not self._dr_enabled:
+            return False
+        return self._episode_count % self._resample_every == 0
+
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
+        rng = np.random.default_rng(seed)
+
+        if self._should_domain_randomize_now():
+            self._rsim.randomize(rng)
+            self._sync_from_simulator()
+            self._visualizer_initialized = False
+
+        self._vehicle.randomize(self._episode_count, rng)
+
         self._ensure_visualizer()
         self._task.on_reset()
         self._prev_action = None
         if self.enable_visualization:
             self._rr_needs_episode_stream_switch = True
 
-        rng = np.random.default_rng(seed)
-        self._vehicle.on_reset(rng)
-
         # Sample a valid navigable starting position in Habitat space,
         # then convert to dynamics frame.
-        hab_start = self._safety.sample_habitat_start(rng)
+        hab_start = self._safety.sample_habitat_start()
         x0 = (self.sim.coord_trans.pos_transform_inv @ hab_start).astype(np.float32)
 
         # Random initial velocity (random direction, speed from range).
@@ -463,34 +440,27 @@ class NeurosimRLEnv(gym.Env):
             "time": self.sim.time,
             "simsteps": self.sim.simsteps,
         }
+        self._episode_count += 1
         return observation, info
 
     def step(self, action: np.ndarray):
         action = np.asarray(action, dtype=np.float32)
         control = self._vehicle.action_to_control(action)
 
-        # Take multiple simulator steps per environment step to match control rate. ###
-        if self.obs_mode == "state":
-            event_rep = None
-            self._event_manager.begin_step()
+        self._event_manager.begin_step()
+        events_accum = self.obs_mode != "state"
 
-            for _ in range(self.steps_per_action):
-                self.sim.step(control)
-                if self.enable_visualization:
-                    measurements = self.sim._render_sensors()
-                    self._maybe_visualize(measurements)
-        else:
-            self._event_manager.begin_step()
-            event_rep = self._event_manager.raw
-
-            for _ in range(self.steps_per_action):
-                self.sim.step(control)
-                measurements = self.sim._render_sensors()
+        for _ in range(self.steps_per_action):
+            self.sim.step(control)
+            measurements = self.sim._render_sensors()
+            if events_accum:
                 self._event_manager.accumulate(measurements.get(self.event_sensor_uuid))
-                self._maybe_visualize(measurements, event_rep)
+            self._maybe_visualize(measurements)
 
-            event_rep = self._event_manager.observation()
-        ###############################################################################
+        event_rep = (
+            None if self.obs_mode == "state" else self._event_manager.observation()
+        )
+        self._maybe_visualize(None, event_rep)
 
         state = self.sim.dynamics.state
         reward, reward_terms = self._compute_reward(state, action)
@@ -517,4 +487,5 @@ class NeurosimRLEnv(gym.Env):
         return observation, float(reward), terminated, truncated, info
 
     def close(self):
-        self.sim.close()
+        if hasattr(self, "_rsim"):
+            self._rsim.close()

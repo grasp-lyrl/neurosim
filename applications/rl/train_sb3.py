@@ -13,8 +13,22 @@ The script saves:
 Notes for vectorized training:
     - `num_envs` controls PPO rollout collection parallelism.
     - `eval_freq` in config is interpreted in environment steps;
-        converted to callback frequency so evaluation stays consistent
-    - training uses subprocess vectorization for heavy simulators (Habitat).
+        converted to callback frequency so evaluation stays consistent.
+    - Training uses subprocess vectorization for heavy simulators (Habitat).
+    - Experiment configs are self-contained: scenes, sensors, ``dynamics``,
+        the full ``simulator`` block, and domain randomization are in the YAML
+        (no external settings file).  Training passes ``train=True`` into the RL
+        env, which disables Rerun visualization regardless of YAML until
+        short-episode logging is sorted out; use ``run_policy.py --visualize``
+        for rollout logging.
+    - Each vec-env worker is seeded with ``seed + env_idx`` so workers get
+        distinct randomized configurations when DR is enabled.
+    - ``simulator.domain_randomization.resample_every`` controls how often the
+        Habitat-backed sim is rebuilt.  Optional dynamics DR lives under
+        ``env.dynamics.domain_randomization`` (``enabled``, ``resample_every``,
+        ``scales``).
+    - Eval uses ``SubprocVecEnv`` (spawn) so Habitat teardown does not share a
+        process with the training ``DummyVecEnv`` when ``num_envs == 1``.
 """
 
 import yaml
@@ -63,14 +77,27 @@ def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
 def make_env(
     env_config: dict[str, Any],
     seed: int | None = None,
+    env_idx: int = 0,
+    *,
+    train: bool = True,
 ):
-    """Factory callable for DummyVecEnv / SubprocVecEnv."""
+    """Factory callable for DummyVecEnv / SubprocVecEnv.
+
+    Each worker resets with ``seed + env_idx`` so that parallel workers
+    get distinct initial randomizations (when DR is enabled in the config).
+
+    ``train`` is forwarded to :class:`~neurosim.rl.env.NeurosimRLEnv`; when
+    true, Rerun visualization is forced off regardless of YAML.
+    """
 
     def _init():
-        env = NeurosimRLEnv(env_config=env_config)
+        import copy
+
+        cfg = copy.deepcopy(env_config)
+        env = NeurosimRLEnv(env_config=cfg, train=train)
         env = Monitor(env)
         if seed is not None:
-            env.reset(seed=seed)
+            env.reset(seed=seed + env_idx)
         return env
 
     return _init
@@ -86,6 +113,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--wandb-project", type=str, default="neurosim-rl")
     p.add_argument("--run-name", type=str, default=None)
+    p.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable Weights & Biases logging and WandbCallback",
+    )
     return p.parse_args()
 
 
@@ -133,6 +165,36 @@ def build_vecnormalize_kwargs(
         # Normalize privileged state only, not event frames.
         kwargs["norm_obs_keys"] = ["state"]
     return kwargs
+
+
+def maybe_wrap_vecnormalize(
+    vec_env,
+    *,
+    obs_mode: str,
+    normalize_obs: bool,
+    normalize_reward: bool,
+    training: bool,
+    enabled: bool | None = None,
+):
+    """Return ``VecNormalize(vec_env, ...)`` when normalization is active.
+
+    ``enabled`` defaults to ``normalize_obs or normalize_reward``.  Eval envs
+    pass an explicit ``enabled`` from the experiment vecnormalize block so a
+    reward-only training setup still wraps eval (``norm_reward=False``) for SB3.
+    """
+    if enabled is None:
+        enabled = normalize_obs or normalize_reward
+    if not enabled:
+        return vec_env
+    return VecNormalize(
+        vec_env,
+        **build_vecnormalize_kwargs(
+            obs_mode=obs_mode,
+            normalize_obs=normalize_obs,
+            normalize_reward=normalize_reward,
+            training=training,
+        ),
+    )
 
 
 def build_train_vec_env(
@@ -186,24 +248,28 @@ def main():
     output = Path("outputs/rl") / run_name
     output.mkdir(parents=True, exist_ok=True)
 
-    run = wandb.init(
-        project=args.wandb_project,
-        name=run_name,
-        config={"cli": vars(args), "experiment": exp},
-        sync_tensorboard=True,
-        save_code=True,
-        dir=str(output),
-    )
+    run = None
+    if not args.no_wandb:
+        run = wandb.init(
+            project=args.wandb_project,
+            name=run_name,
+            config={"cli": vars(args), "experiment": exp},
+            sync_tensorboard=True,
+            save_code=True,
+            dir=str(output),
+        )
 
     vec_env_type = str(exp["vec_env"]["type"])
     vec_env_start_method = str(exp["vec_env"]["start_method"])
 
-    # Training should never stream visualization.
-    env_config = {**exp["env"], "enable_visualization": False}
+    env_config = dict(exp["env"])
 
-    # Training env (use multiprocessing for heavy simulators when num_envs > 1)
+    # Training env (use multiprocessing for heavy simulators when num_envs > 1).
+    # Each worker gets a distinct seed so domain randomization produces
+    # different initial simulator configurations across workers.
+    base_seed = int(exp["seed"])
     train_env_fns = [
-        make_env(env_config, seed=int(exp["seed"]) + env_idx)
+        make_env(env_config, seed=base_seed, env_idx=env_idx, train=True)
         for env_idx in range(num_envs)
     ]
     train_vec = build_train_vec_env(
@@ -212,42 +278,37 @@ def main():
         vec_env_type=vec_env_type,
         start_method=vec_env_start_method,
     )
-    if bool(exp["vecnormalize"]["normalize_obs"]) or bool(
-        exp["vecnormalize"]["normalize_reward"]
-    ):
-        train_vec = VecNormalize(
-            train_vec,
-            **build_vecnormalize_kwargs(
-                obs_mode=str(exp["env"]["obs_mode"]),
-                normalize_obs=bool(exp["vecnormalize"]["normalize_obs"]),
-                normalize_reward=bool(exp["vecnormalize"]["normalize_reward"]),
-                training=True,
-            ),
-        )
+    vn = exp["vecnormalize"]
+    train_vec = maybe_wrap_vecnormalize(
+        train_vec,
+        obs_mode=str(exp["env"]["obs_mode"]),
+        normalize_obs=bool(vn["normalize_obs"]),
+        normalize_reward=bool(vn["normalize_reward"]),
+        training=True,
+    )
 
     # Eval env (separate instance, shared normalization stats)
     eval_num_envs = int(exp["eval"]["num_envs"])
     if eval_num_envs <= 0:
         raise ValueError("eval_num_envs must be >= 1")
 
-    eval_vec = DummyVecEnv(
+    # Run eval in a subprocess so Habitat/OpenGL is not in the same process as a
+    # training DummyVecEnv (avoids double GL context and Magnum teardown aborts).
+    eval_vec = SubprocVecEnv(
         [
-            make_env(env_config, seed=int(exp["seed"]) + 1000 + env_idx)
+            make_env(env_config, seed=base_seed + 1000, env_idx=env_idx, train=True)
             for env_idx in range(eval_num_envs)
-        ]
+        ],
+        start_method="spawn",
     )
-    if bool(exp["vecnormalize"]["normalize_obs"]) or bool(
-        exp["vecnormalize"]["normalize_reward"]
-    ):
-        eval_vec = VecNormalize(
-            eval_vec,
-            **build_vecnormalize_kwargs(
-                obs_mode=str(exp["env"]["obs_mode"]),
-                normalize_obs=bool(exp["vecnormalize"]["normalize_obs"]),
-                normalize_reward=False,
-                training=False,
-            ),
-        )
+    eval_vec = maybe_wrap_vecnormalize(
+        eval_vec,
+        obs_mode=str(exp["env"]["obs_mode"]),
+        normalize_obs=bool(vn["normalize_obs"]),
+        normalize_reward=False,
+        training=False,
+        enabled=bool(vn["normalize_obs"] or vn["normalize_reward"]),
+    )
 
     policy, policy_kwargs = build_policy_config(
         str(exp["env"]["obs_mode"]),
@@ -283,16 +344,20 @@ def main():
         deterministic=True,
     )
 
-    wandb_callback = WandbCallback(
-        gradient_save_freq=int(exp["wandb"]["log_freq"]),
-        model_save_path=str(output / "wandb_models"),
-        model_save_freq=max(int(exp["eval"]["freq"]) // num_envs, 1),
-        verbose=2,
-    )
+    learn_callbacks = [eval_callback]
+    if not args.no_wandb:
+        learn_callbacks.append(
+            WandbCallback(
+                gradient_save_freq=int(exp["wandb"]["log_freq"]),
+                model_save_path=str(output / "wandb_models"),
+                model_save_freq=max(int(exp["eval"]["freq"]) // num_envs, 1),
+                verbose=2,
+            )
+        )
 
     model.learn(
         total_timesteps=int(exp["total_timesteps"]),
-        callback=[eval_callback, wandb_callback],
+        callback=learn_callbacks,
     )
 
     model.save(str(output / "final_model"))
@@ -300,8 +365,9 @@ def main():
         train_vec.save(str(output / "vecnormalize.pkl"))
 
     print(f"Training complete. Artifacts saved to {output}")
-    train_vec.close()
+
     eval_vec.close()
+    train_vec.close()
 
     if run is not None:
         wandb.finish()

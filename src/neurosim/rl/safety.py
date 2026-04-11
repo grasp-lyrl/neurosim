@@ -5,12 +5,9 @@ Safety policy in this module:
 - Optional direct `pathfinder.is_navigable(point)` check.
 """
 
-import logging
 from typing import Any
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
 
 
 class HabitatSafetyChecker:
@@ -68,13 +65,8 @@ class HabitatSafetyChecker:
             return False, "not_navigable"
         return True, ""
 
-    def sample_habitat_start(
-        self,
-        rng: np.random.Generator,
-        max_tries: int = 200,
-    ) -> np.ndarray:
+    def sample_habitat_start(self, max_tries: int = 200) -> np.ndarray:
         """Sample a random valid starting position in Habitat space."""
-        _ = rng
         for _ in range(max_tries):
             nav_pt = np.array(
                 self._pathfinder.get_random_navigable_point(), dtype=np.float64
@@ -93,19 +85,10 @@ def build_safety_checker(
     *,
     enable_navigable_check: bool = True,
 ) -> HabitatSafetyChecker:
-    """Build a HabitatSafetyChecker from a SynchronousSimulator.
-
-    Always expects a Habitat visual backend (raises if not available).
-    """
-    backend = getattr(sim, "visual_backend", None)
-    hsim_obj = getattr(backend, "_sim", None) if backend is not None else None
-    pathfinder = getattr(hsim_obj, "pathfinder", None) if hsim_obj is not None else None
-
+    """Build a HabitatSafetyChecker from a SynchronousSimulator."""
+    pathfinder = sim.visual_backend._sim.pathfinder
     if pathfinder is None or not pathfinder.is_loaded:
-        raise RuntimeError(
-            "HabitatSafetyChecker requires a loaded Habitat pathfinder. "
-            "Make sure you are using the Habitat visual backend."
-        )
+        raise RuntimeError("HabitatSafetyChecker requires a loaded Habitat pathfinder.")
 
     return HabitatSafetyChecker(
         pathfinder=pathfinder,

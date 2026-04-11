@@ -1,24 +1,26 @@
-# Experimental/training hyperparameters for hover-stop PPO (state obs).
-# Domain randomization: two habitat-test scenes + mild event-camera sampling
-# (contrast + hfov). ``resample_every`` rebuilds the sim every N completed episodes.
+# Minimal SB3 training run with simulator domain randomization on.
+# Used for manual / CI checks, e.g.:
+#   python applications/rl/train_sb3.py \
+#     --experiment-config tests/fixtures/hover_sb3_dr_train_smoke.yaml \
+#     --run-name dr-train-smoke --no-wandb
 
 seed: 42
 num_envs: 1
-total_timesteps: 10000000
+total_timesteps: 512
 
 eval:
-  freq: 2048
-  episodes: 5
+  freq: 100000
+  episodes: 1
   num_envs: 1
 
 vec_env:
-  type: auto
+  type: dummy
   start_method: spawn
 
 env:
   obs_mode: state
-  episode_seconds: 15.0
-  init_speed_range: [0.5, 2.0]
+  episode_seconds: 2.0
+  init_speed_range: [0.5, 1.0]
   enable_navigable_check: true
 
   event_sensor_uuid: null
@@ -42,8 +44,8 @@ env:
   scenes:
     - name: apartment_1
       path: data/scene_datasets/habitat-test-scenes/apartment_1.glb
-    - name: skokloster
-      path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
+    - name: apartment_1_alt
+      path: data/scene_datasets/habitat-test-scenes/apartment_1.glb
 
   sensors:
     event_camera_1:
@@ -68,24 +70,15 @@ env:
       pitch: 7.0
       yaw: 5.0
 
-    # Optional multirotor parameter sampling (see ``RotorpyCtbrVehicle.randomize``).
-    domain_randomization:
-      enabled: true
-      resample_every: 50
-      scales:
-        mass: [0.85, 1.15]
-        k_eta: [0.9, 1.1]
-        k_m: [0.9, 1.1]
-        rotor_speed_min: [1.0, 1.0]
-        rotor_speed_max: [0.95, 1.05]
-
   simulator:
     world_rate: 1000
     control_rate: 100
     sim_time: 30
     coord_transform: rotorpy_to_hm3d
+
     sensor_rates:
       event_camera_1: 1000
+
     viz_rates:
       event_camera_1: 20
 
@@ -94,18 +87,13 @@ env:
       resample_every: 50
       sensors:
         event_camera_1:
-          contrast_threshold_neg:
-            range: [0.1, 0.3]
-          contrast_threshold_pos:
-            range: [0.1, 0.3]
-          hfov:
-            choices: [90, 120]
+          contrast_threshold_neg: {range: [0.14, 0.16]}
 
 ppo:
   learning_rate: 0.0003
-  n_steps: 512
-  batch_size: 128
-  n_epochs: 8
+  n_steps: 128
+  batch_size: 64
+  n_epochs: 2
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2

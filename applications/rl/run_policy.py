@@ -72,7 +72,7 @@ def main():
         base_env_config["enable_visualization"] = True
 
     def _make_env():
-        return NeurosimRLEnv(env_config=base_env_config)
+        return NeurosimRLEnv(env_config=base_env_config, train=False)
 
     vec_env = DummyVecEnv([_make_env])
 
