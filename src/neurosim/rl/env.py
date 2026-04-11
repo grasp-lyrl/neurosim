@@ -5,8 +5,22 @@ velocity and must decelerate to a stable hover inside the scene without
 collisions, using event-camera observations.
 
 Safety checks are delegated to Habitat pathfinder bounds and navigability.
+
+Experiment configs are self-contained: scenes, sensors, the full
+``simulator`` block (rates, IMU, etc.), and optional
+``simulator.domain_randomization`` (``enabled``, ``resample_on_reset``, and
+per-sensor specs under ``sensors``) gate scene/sensor sampling for
+:class:`~neurosim.sims.synchronous_simulator.randomized_simulator.RandomizedSimulator`.
+Vehicle dynamics DR is optional under ``vehicle.domain_randomization``; when
+omitted, vehicle DR is treated as disabled.
+
+Habitat-oriented defaults live in ``_VISUAL_BACKEND_DEFAULTS`` only;
+everything tunable for a run is in YAML. The RL policy supplies control via
+``sim.step()`` — no ``controller`` or ``trajectory`` entries in settings
+(same idea as omitting trajectory for ``sim.run()``-style workflows).
 """
 
+import copy
 import logging
 import numpy as np
 from typing import Any
@@ -21,6 +35,30 @@ from neurosim.sims.synchronous_simulator import RandomizedSimulator
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Defaults for building SynchronousSimulator settings from env_config
+# ---------------------------------------------------------------------------
+
+_VISUAL_BACKEND_DEFAULTS: dict[str, Any] = {
+    "gpu_id": 0,
+    "scene_dataset_config_file": "default",
+    "clear_color": [0.0, 0.0, 0.0, 1.0],
+    "default_agent": 0,
+    "agent_height": 1.0,
+    "agent_radius": 0.3,
+    "agent_max_climb": 1.0,
+    "agent_max_slope": 90.0,
+    "enable_hbao": False,
+    "frustum_culling": True,
+    "seed": 324,
+    "physics_config_file": "data/default.physics_config.json",
+    "enable_physics": True,
+}
+
+# Reference count level in log normalization: output maps ~linearly near this
+# accumulation (replaces the former ``event_clip`` scale in the denominator).
+_EVENT_LOG_COUNT_REFERENCE = 10.0
+
 
 class EventRepresentationManager:
     """Owns event representation state and update logic for RL observations."""
@@ -31,16 +69,14 @@ class EventRepresentationManager:
         raw_height: int,
         raw_width: int,
         downsample_factor: int,
-        event_clip: float,
-        event_log_compression: float | None,
+        event_log_compression: float,
         ts_tau_seconds: float,
     ):
         self.representation = representation
         self.raw_height = int(raw_height)
         self.raw_width = int(raw_width)
         self.downsample_factor = max(int(downsample_factor), 1)
-        self.event_clip = float(event_clip)
-        self.event_log_compression = event_log_compression
+        self.event_log_compression = float(event_log_compression)
         self.ts_tau_seconds = float(ts_tau_seconds)
 
         self.raw = np.zeros((2, self.raw_height, self.raw_width), dtype=np.float32)
@@ -69,12 +105,8 @@ class EventRepresentationManager:
         return reshaped.mean(axis=(2, 4), dtype=np.float32)
 
     def _normalize(self, event_rep: np.ndarray) -> np.ndarray:
-        if self.event_log_compression is not None:
-            k = self.event_log_compression
-            event_rep = np.log1p(k * event_rep) / np.log1p(k * self.event_clip)
-        else:
-            scale = max(self.event_clip, 1e-6)
-            event_rep /= scale
+        k = self.event_log_compression
+        event_rep = np.log1p(k * event_rep) / np.log1p(k * _EVENT_LOG_COUNT_REFERENCE)
         np.clip(event_rep, 0.0, 1.0, out=event_rep)
         return event_rep
 
@@ -127,8 +159,7 @@ class EventRepresentationManager:
 
     def observation(self) -> np.ndarray:
         if self.representation == "histogram":
-            np.clip(self.raw, 0.0, self.event_clip, out=self.raw)
-            self._normalize(self.raw)
+            self.raw = self._normalize(self.raw)
         obs = self._downsample(self.raw)
         return obs.astype(np.float32, copy=True)
 
@@ -147,35 +178,42 @@ class NeurosimRLEnv(gym.Env):
 
     Safety checks are performed via Habitat pathfinder bounds and
     navigability queries.
+
+    ``train=True`` forces Rerun visualization off regardless of
+    ``env_config["enable_visualization"]`` (for SB3 training; rollouts use
+    ``train=False``).
     """
 
-    def __init__(self, env_config: dict[str, Any]):
+    def __init__(self, env_config: dict[str, Any], *, train: bool = False):
         super().__init__()
 
-        settings = env_config["settings"]
         obs_mode = env_config["obs_mode"]
         episode_seconds = env_config["episode_seconds"]
 
-        event_sensor_uuid = env_config["event_sensor_uuid"]
-        event_clip = env_config["event_clip"]
-        event_downsample_factor = env_config["event_downsample_factor"]
+        event_sensor_uuid = env_config.get("event_sensor_uuid")
+        event_downsample_factor = env_config.get("event_downsample_factor", 1)
 
         init_speed_range = env_config["init_speed_range"]
 
-        event_representation = env_config["event_representation"]
-        event_log_compression = env_config["event_log_compression"]
-        event_ts_decay_ms = env_config["event_ts_decay_ms"]
+        event_representation = env_config.get("event_representation", "time_surface")
+        event_log_compression = float(env_config.get("event_log_compression", 1.0))
+        event_ts_decay_ms = env_config.get("event_ts_decay_ms", 10.0)
 
-        enable_navigable_check = env_config["enable_navigable_check"]
+        enable_navigable_check = env_config.get("enable_navigable_check", True)
 
-        enable_visualization = env_config["enable_visualization"]
-        visualization_log_every_n_steps = env_config["visualization_log_every_n_steps"]
+        enable_visualization = bool(env_config.get("enable_visualization", False))
+        if train:
+            enable_visualization = False
+        visualization_log_every_n_steps = env_config.get(
+            "visualization_log_every_n_steps", 1
+        )
 
         task_name = env_config["task"]["name"]
         task_kwargs = dict(env_config["task"]["config"])
-        vehicle_config = env_config["vehicle"]
 
-        self._resample_on_reset = bool(env_config.get("resample_on_reset", False))
+        dr_cfg = env_config.get("simulator", {}).get("domain_randomization", {})
+        self._dr_enabled = bool(dr_cfg.get("enabled", False))
+        self._resample_on_reset = bool(dr_cfg.get("resample_on_reset", False))
         self._episode_count = 0
 
         if obs_mode not in {"events", "state", "combined"}:
@@ -183,16 +221,13 @@ class NeurosimRLEnv(gym.Env):
 
         self.obs_mode = obs_mode
         self.episode_seconds = float(episode_seconds)
-        self.event_clip = float(event_clip)
         self.event_downsample_factor = max(int(event_downsample_factor), 1)
         self.event_representation = event_representation
         if event_representation not in {"histogram", "event_frame", "time_surface"}:
             raise ValueError(
                 "event_representation must be 'histogram', 'event_frame', or 'time_surface'"
             )
-        self.event_log_compression = (
-            float(event_log_compression) if event_log_compression is not None else None
-        )
+        self.event_log_compression = event_log_compression
         self._event_ts_tau_seconds = float(event_ts_decay_ms) * 1e-3
         self.enable_visualization = bool(enable_visualization)
         self.visualization_log_every_n_steps = max(
@@ -206,39 +241,79 @@ class NeurosimRLEnv(gym.Env):
 
         self._task: RLTask = build_task(task_name=task_name, **task_kwargs)
 
-        # Legacy attribute kept for compatibility with downstream scripts.
         self.crash_penalty = float(self._task.crash_penalty)
         self._prev_action: np.ndarray | None = None
         self._enable_navigable_check = bool(enable_navigable_check)
         self._event_sensor_uuid_cfg = event_sensor_uuid
-        self._vehicle_config = dict(vehicle_config)
+        self._vehicle_config = env_config["vehicle"]
 
         self._safety: HabitatSafetyChecker | None = None
         self.event_sensor_uuid = ""
 
-        # Build the RandomizedSimulator wrapper.  The settings_transform
-        # strips trajectory config and injects RL-specific dynamics.
+        base_settings = self._build_simulator_settings(env_config)
+
+        randomization: dict[str, Any] | None = None
+        if self._dr_enabled:
+            randomization = {
+                "scenes": list(env_config.get("scenes", [])),
+                "sensors": dict(dr_cfg.get("sensors", {})),
+            }
+
         self._rsim = RandomizedSimulator(
-            base_settings=settings,
-            randomization=env_config.get("domain_randomization"),
+            base_settings=base_settings,
+            randomization=randomization,
             visualizer_disabled=not self.enable_visualization,
-            settings_transform=self._rl_settings_transform,
         )
         self._sync_from_simulator()
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Settings builder
     # ------------------------------------------------------------------
 
-    def _rl_settings_transform(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Strip trajectory and inject RL-specific dynamics into settings."""
-        settings.pop("trajectory", None)
-        settings["dynamics"] = {
-            "model": self._vehicle_config["dynamics_model"],
-            "vehicle": self._vehicle_config["vehicle_name"],
-            "control_abstraction": "cmd_ctbr",
+    @staticmethod
+    def _build_simulator_settings(env_config: dict[str, Any]) -> dict[str, Any]:
+        """Construct a SynchronousSimulator-compatible settings dict.
+
+        Expects ``env_config["simulator"]`` to be the full block passed to
+        ``SimulationConfig`` (world/control rates, ``additional_sensors``,
+        ``sensor_rates``, ``viz_rates``, etc.).  Merges optional
+        ``visual_backend`` overrides with ``_VISUAL_BACKEND_DEFAULTS``,
+        then sets ``scene`` from the first entry in ``scenes`` and
+        ``sensors`` from ``env_config["sensors"]``.  Strips
+        ``domain_randomization`` from the ``simulator`` sub-dict before building
+        :class:`~neurosim.core.utils.utils_simcfg.SimulationConfig` (unknown keys
+        would otherwise be rejected).
+
+        Omits ``controller`` and ``trajectory`` so the simulator runs under
+        external RL control via :meth:`~neurosim.sims.synchronous_simulator.simulator.SynchronousSimulator.step`.
+        """
+        if "simulator" not in env_config:
+            raise KeyError(
+                'env_config must include a "simulator" block '
+                "(world_rate, control_rate, additional_sensors, sensor_rates, viz_rates, …)"
+            )
+
+        scenes = env_config["scenes"]
+        scene_path = scenes[0]["path"]
+        sensors = dict(env_config["sensors"])
+        vehicle_cfg = env_config["vehicle"]
+
+        sim_settings = copy.deepcopy(env_config["simulator"])
+        sim_settings.pop("domain_randomization", None)
+        vb_overrides = dict(env_config.get("visual_backend", {}))
+        vb_settings = {**_VISUAL_BACKEND_DEFAULTS, **vb_overrides}
+        vb_settings["scene"] = scene_path
+        vb_settings["sensors"] = sensors
+
+        return {
+            "simulator": sim_settings,
+            "visual_backend": vb_settings,
+            "dynamics": {
+                "model": vehicle_cfg["dynamics_model"],
+                "vehicle": vehicle_cfg["vehicle_name"],
+                "control_abstraction": "cmd_ctbr",
+            },
         }
-        return settings
 
     def _get_default_event_sensor_uuid(self) -> str:
         event_sensors = self.sim.config.sensor_manager.get_sensors_by_type("event")
@@ -277,7 +352,6 @@ class NeurosimRLEnv(gym.Env):
             raw_height=self._raw_event_height,
             raw_width=self._raw_event_width,
             downsample_factor=self.event_downsample_factor,
-            event_clip=self.event_clip,
             event_log_compression=self.event_log_compression,
             ts_tau_seconds=self._event_ts_tau_seconds,
         )
@@ -434,7 +508,10 @@ class NeurosimRLEnv(gym.Env):
 
         rng = np.random.default_rng(seed)
 
-        if self._resample_on_reset and self._episode_count > 0:
+        should_randomize = self._dr_enabled and (
+            self._episode_count == 0 or self._resample_on_reset
+        )
+        if should_randomize:
             self._rsim.randomize(rng)
             self._sync_from_simulator()
             self._visualizer_initialized = False

@@ -27,12 +27,12 @@ class RotorpyCtbrVehicle(RLVehicle):
         multirotor: Any,
         vehicle_name: str,
         rate_limits: _RateLimits,
-        domain_randomization: dict[str, Any],
+        domain_randomization: dict[str, Any] | None = None,
     ):
         self._multirotor = multirotor
         self.vehicle_name = str(vehicle_name)
         self._rate_limits = rate_limits
-        self._domain_randomization = domain_randomization
+        self._domain_randomization: dict[str, Any] | None = domain_randomization
 
         self.reference_vehicle_params = get_vehicle_params(self.vehicle_name)
 
@@ -77,11 +77,11 @@ class RotorpyCtbrVehicle(RLVehicle):
             )
 
     def _apply_domain_randomization(self, rng: np.random.Generator) -> None:
-        enabled = bool(self._domain_randomization["enabled"])
-        if not enabled:
+        dr = self._domain_randomization
+        if dr is None or not bool(dr.get("enabled", False)):
             return
 
-        scales = self._domain_randomization["scales"]
+        scales = dr["scales"]
         for key, base_value in self._base_dynamic_params.items():
             low, high = scales[key]
             sampled = float(base_value) * float(rng.uniform(float(low), float(high)))

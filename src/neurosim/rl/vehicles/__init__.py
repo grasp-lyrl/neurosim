@@ -23,7 +23,7 @@ def build_vehicle(*, sim: Any, vehicle_config: dict[str, Any]) -> RLVehicle:
         multirotor=sim.dynamics._multirotor,
         vehicle_name=str(vehicle_config["vehicle_name"]),
         rate_limits=rate_limits,
-        domain_randomization=vehicle_config["domain_randomization"],
+        domain_randomization=vehicle_config.get("domain_randomization"),
     )
 
 
