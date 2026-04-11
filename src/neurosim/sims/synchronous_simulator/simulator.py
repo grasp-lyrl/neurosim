@@ -257,7 +257,11 @@ class SynchronousSimulator:
         self.dynamics = create_dynamics(**self.settings["dynamics"])
 
     def _init_controller(self) -> None:
-        self.controller = create_controller(**self.settings.get("controller", {}))
+        ctrl = self.settings.get("controller")
+        if not ctrl:
+            self.controller = None
+        else:
+            self.controller = create_controller(**ctrl)
 
     def _init_trajectory(self) -> None:
         # TODO: Right now this assumes the visual backend has a pathfinder
@@ -265,7 +269,9 @@ class SynchronousSimulator:
         # TODO: Ideally, we want to move on from habitat pathfinder to a more general navmesh handler
         # TODO: and path planner, say GCOPTER with Recast/Detour or similar.
         traj_settings = self.settings.get("trajectory")
-        if traj_settings:
+        if not traj_settings:
+            self.trajectory = None
+        else:
             traj_kwargs = traj_settings.copy()
             if hasattr(self.visual_backend, "_sim"):
                 traj_kwargs["pathfinder"] = self.visual_backend._sim.pathfinder
@@ -400,6 +406,17 @@ class SynchronousSimulator:
         callback_hook_: Callable | None = None,
     ) -> list[float]:
         """Run the main simulation loop."""
+        if self.trajectory is None:
+            raise RuntimeError(
+                "Trajectory is not configured; use sim.step(control) for manual "
+                "or external control (e.g. RL) instead of sim.run()."
+            )
+        if self.controller is None:
+            raise RuntimeError(
+                "Controller is not configured; use sim.step(control) for manual "
+                "or external control (e.g. RL) instead of sim.run()."
+            )
+
         # Initialize control and state from first trajectory point
         flat = self.trajectory.update(self.time)
         self.dynamics.state = {
