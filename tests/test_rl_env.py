@@ -45,10 +45,10 @@ def _test_env_config(
                 "success_steps_required": 20,
             },
         },
-        "vehicle": {
-            "dynamics_model": "rotorpy_multirotor_euler",
-            "vehicle_name": "crazyflie",
-            "control_mode": "ctbr",
+        "dynamics": {
+            "model": "rotorpy_multirotor_euler",
+            "vehicle": "crazyflie",
+            "control_abstraction": "cmd_ctbr",
             "ctbr_rate_limits": {
                 "roll": 7.0,
                 "pitch": 7.0,
@@ -184,7 +184,7 @@ class TestNeurosimRLEnvDomainRandomization:
         finally:
             env.close()
 
-    def test_vehicle_dr_scales_dynamics_when_enabled(self):
+    def test_dynamics_dr_scales_multirotor_when_enabled(self):
         """Do not hold two Habitat-backed envs open: teardown can abort (IOT) in habitat_sim.close."""
         baseline_cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
         baseline = NeurosimRLEnv(env_config=baseline_cfg)
@@ -195,8 +195,8 @@ class TestNeurosimRLEnvDomainRandomization:
             baseline.close()
 
         dr_cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
-        dr_cfg["vehicle"] = {
-            **dr_cfg["vehicle"],
+        dr_cfg["dynamics"] = {
+            **dr_cfg["dynamics"],
             "domain_randomization": {
                 "enabled": True,
                 "scales": {
@@ -216,7 +216,7 @@ class TestNeurosimRLEnvDomainRandomization:
         finally:
             dr_env.close()
 
-    def test_vehicle_config_dict_not_mutated(self):
+    def test_dynamics_config_dict_not_mutated(self):
         cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
         scales = {
             "mass": [1.1, 1.1],
@@ -225,12 +225,12 @@ class TestNeurosimRLEnvDomainRandomization:
             "rotor_speed_min": [1.0, 1.0],
             "rotor_speed_max": [1.0, 1.0],
         }
-        cfg["vehicle"]["domain_randomization"] = {"enabled": True, "scales": scales}
+        cfg["dynamics"]["domain_randomization"] = {"enabled": True, "scales": scales}
         scales_before = copy.deepcopy(scales)
         env = NeurosimRLEnv(env_config=cfg)
         try:
             env.reset(seed=0)
-            assert cfg["vehicle"]["domain_randomization"]["scales"] == scales_before
+            assert cfg["dynamics"]["domain_randomization"]["scales"] == scales_before
         finally:
             env.close()
 
@@ -375,9 +375,8 @@ class TestHabitatSafetyCheckerWithRealScene:
     def test_sample_habitat_start_returns_safe_position(
         self, checker: HabitatSafetyChecker
     ):
-        rng = np.random.default_rng(42)
         for _ in range(5):
-            hab_pt = checker.sample_habitat_start(rng)
+            hab_pt = checker.sample_habitat_start()
             dyn_pos = np.linalg.solve(checker._pos_transform, hab_pt)
             ok, reason = checker.check(dyn_pos)
             assert ok, f"Sampled unsafe start: {reason}, hab={hab_pt}"

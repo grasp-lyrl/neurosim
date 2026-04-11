@@ -12,29 +12,30 @@ from .base import RLVehicle
 
 
 @dataclass
-class _RateLimits:
+class RateLimits:
     roll: float
     pitch: float
     yaw: float
 
 
 class RotorpyCtbrVehicle(RLVehicle):
-    """CTBR vehicle for RotorPy multirotor dynamics."""
+    """CTBR policy head for RotorPy multirotor dynamics (body rates + thrust)."""
 
     def __init__(
         self,
         *,
-        multirotor: Any,
-        vehicle_name: str,
-        rate_limits: _RateLimits,
+        dynamics: Any,
+        vehicle: str,
+        rate_limits: RateLimits,
         domain_randomization: dict[str, Any] | None = None,
     ):
-        self._multirotor = multirotor
-        self.vehicle_name = str(vehicle_name)
+        self._dynamics = dynamics
+        self._multirotor = dynamics._multirotor
+        self.vehicle = str(vehicle)
         self._rate_limits = rate_limits
         self._domain_randomization: dict[str, Any] | None = domain_randomization
 
-        self.reference_vehicle_params = get_vehicle_params(self.vehicle_name)
+        self.reference_vehicle_params = get_vehicle_params(self.vehicle)
 
         self._base_dynamic_params = {
             "mass": float(self._multirotor.mass),
@@ -93,7 +94,6 @@ class RotorpyCtbrVehicle(RLVehicle):
 
     def action_to_control(self, action: np.ndarray) -> dict[str, np.ndarray | float]:
         action = np.asarray(action, dtype=np.float32)
-        action = np.clip(action, self._action_space.low, self._action_space.high)
 
         cmd_thrust = float(
             self._minmax_scale(action[0], self._cmd_thrust_min, self._cmd_thrust_max)

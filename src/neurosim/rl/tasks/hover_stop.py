@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from .base import RLTask
+from .base import RLTask, EventRepresentationManager
 
 
 class HoverStopTask(RLTask):
@@ -42,8 +42,7 @@ class HoverStopTask(RLTask):
         state: dict[str, np.ndarray],
         action: np.ndarray,
         prev_action: np.ndarray | None,
-        event_count: int,
-        event_shape: tuple[int, int],
+        event_manager: EventRepresentationManager,
         obs_mode: str,
     ) -> tuple[float, dict[str, float]]:
         v = np.asarray(state["v"], dtype=np.float32)
@@ -55,8 +54,10 @@ class HoverStopTask(RLTask):
             event_activity = 0.0
             event_activity_density = 0.0
         else:
-            event_activity = float(event_count)
-            event_activity_density = event_activity / (event_shape[0] * event_shape[1])
+            event_activity = event_manager.step_event_count
+            event_activity_density = event_activity / (
+                event_manager.raw_height * event_manager.raw_width
+            )
 
         if prev_action is None:
             action_smoothness = 0.0

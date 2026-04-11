@@ -1,6 +1,6 @@
 """Task registry for Neurosim RL."""
 
-from .base import RLTask
+from .base import EventRepresentationManager, RLTask
 from .hover_stop import HoverStopTask
 
 
@@ -11,4 +11,4 @@ def build_task(task_name: str, **kwargs) -> RLTask:
     raise ValueError(f"Unsupported task_name: {task_name}")
 
 
-__all__ = ["RLTask", "HoverStopTask", "build_task"]
+__all__ = ["EventRepresentationManager", "RLTask", "HoverStopTask", "build_task"]

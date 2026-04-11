@@ -1,7 +1,126 @@
 """Task interfaces for Neurosim RL environments."""
 
-from abc import ABC, abstractmethod
 import numpy as np
+from typing import Any
+from abc import ABC, abstractmethod
+
+
+class EventRepresentationManager:
+    """Owns event representation state and update logic for RL observations."""
+
+    # Reference count level in log normalization: output maps ~linearly near this
+    # accumulation (replaces the former ``event_clip`` scale in the denominator).
+    _EVENT_LOG_COUNT_REFERENCE = 10.0
+
+    def __init__(
+        self,
+        representation: str,
+        raw_height: int,
+        raw_width: int,
+        downsample_factor: int,
+        event_log_compression: float,
+        ts_tau_seconds: float,
+    ):
+        self.representation = representation
+        self.raw_height = int(raw_height)
+        self.raw_width = int(raw_width)
+        self.downsample_factor = max(int(downsample_factor), 1)
+        self.event_log_compression = float(event_log_compression)
+        self.ts_tau_seconds = float(ts_tau_seconds)
+
+        self.raw = np.zeros((2, self.raw_height, self.raw_width), dtype=np.float32)
+        self.step_event_count = 0
+        self._last_update_time_s: float | None = None
+
+    def reset_episode(self) -> None:
+        self.raw.fill(0.0)
+        self.step_event_count = 0
+        self._last_update_time_s = None
+
+    def begin_step(self) -> None:
+        self.step_event_count = 0
+        if self.representation != "time_surface":
+            self.raw.fill(0.0)
+
+    def _downsample(self, event_rep: np.ndarray) -> np.ndarray:
+        if self.downsample_factor == 1:
+            return event_rep
+
+        factor = self.downsample_factor
+        h = (event_rep.shape[1] // factor) * factor
+        w = (event_rep.shape[2] // factor) * factor
+        cropped = event_rep[:, :h, :w]
+        reshaped = cropped.reshape(2, h // factor, factor, w // factor, factor)
+        return reshaped.mean(axis=(2, 4), dtype=np.float32)
+
+    def _normalize(self, event_rep: np.ndarray) -> np.ndarray:
+        k = self.event_log_compression
+        event_rep = np.log1p(k * event_rep) / np.log1p(
+            k * self._EVENT_LOG_COUNT_REFERENCE
+        )
+        np.clip(event_rep, 0.0, 1.0, out=event_rep)
+        return event_rep
+
+    def accumulate(self, events: Any | None) -> None:
+        if events is None:
+            return
+
+        x, y, t, p = events.x, events.y, events.t, events.p
+
+        if hasattr(x, "detach"):
+            x = x.detach().cpu().numpy()
+            y = y.detach().cpu().numpy()
+            t = t.detach().cpu().numpy()
+            p = p.detach().cpu().numpy()
+
+        if x.size == 0:
+            return
+
+        self.step_event_count += int(x.size)
+
+        x = x.astype(np.int64, copy=False)
+        y = y.astype(np.int64, copy=False)
+        t = (t * 1e-6).astype(np.float64, copy=False)
+        p = p.astype(np.int64, copy=False)
+
+        if self.representation == "histogram":
+            flat_idx = p * (self.raw_height * self.raw_width) + y * self.raw_width + x
+            counts = np.bincount(
+                flat_idx, minlength=2 * self.raw_height * self.raw_width
+            ).astype(np.float32)
+            self.raw += counts.reshape(2, self.raw_height, self.raw_width)
+            return
+
+        if self.representation == "event_frame":
+            self.raw[p, y, x] = 1.0
+            return
+
+        if self.representation == "time_surface":
+            latest_time_s = float(t[-1])
+            if self._last_update_time_s is not None:
+                dt_seconds = latest_time_s - self._last_update_time_s
+                if dt_seconds > 0.0:
+                    decay = np.float32(np.exp(-dt_seconds / self.ts_tau_seconds))
+                    self.raw *= decay
+            self._last_update_time_s = latest_time_s
+            self.raw[p, y, x] += 1.0
+            return
+
+        raise ValueError(f"Unsupported event_representation: {self.representation}")
+
+    def observation(self) -> np.ndarray:
+        if self.representation == "histogram":
+            self.raw = self._normalize(self.raw)
+        obs = self._downsample(self.raw)
+        return obs.astype(np.float32, copy=True)
+
+    def to_rgb(self, event_rep: np.ndarray) -> np.ndarray:
+        """Pack event polarity channels into an RGB uint8 image (R=neg, B=pos, G=0)."""
+        neg, pos = event_rep[0], event_rep[1]
+        rgb = np.zeros((neg.shape[0], neg.shape[1], 3), dtype=np.uint8)
+        rgb[..., 0] = np.rint(255.0 * neg).astype(np.uint8)
+        rgb[..., 2] = np.rint(255.0 * pos).astype(np.uint8)
+        return rgb
 
 
 class RLTask(ABC):
@@ -23,8 +142,7 @@ class RLTask(ABC):
         state: dict[str, np.ndarray],
         action: np.ndarray,
         prev_action: np.ndarray | None,
-        event_count: int,
-        event_shape: tuple[int, int],
+        event_manager: EventRepresentationManager,
         obs_mode: str,
     ) -> tuple[float, dict[str, float]]:
         """Compute reward and structured reward terms."""
