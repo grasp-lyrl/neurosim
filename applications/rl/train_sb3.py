@@ -15,22 +15,21 @@ Notes for vectorized training:
     - `eval_freq` in config is interpreted in environment steps;
         converted to callback frequency so evaluation stays consistent.
     - Training uses subprocess vectorization for heavy simulators (Habitat).
-    - Experiment configs are self-contained: scenes, sensors, the full
-        ``simulator`` block, and domain randomization are in the YAML (no
-        external settings file).  Training passes ``train=True`` into the RL
+    - Experiment configs are self-contained: scenes, sensors, ``dynamics``,
+        the full ``simulator`` block, and domain randomization are in the YAML
+        (no external settings file).  Training passes ``train=True`` into the RL
         env, which disables Rerun visualization regardless of YAML until
         short-episode logging is sorted out; use ``run_policy.py --visualize``
         for rollout logging.
     - Each vec-env worker is seeded with ``seed + env_idx`` so workers get
         distinct randomized configurations when DR is enabled.
     - Set ``simulator.domain_randomization.resample_on_reset: true`` to
-        re-randomize on every episode reset.  Optional vehicle dynamics DR lives
-        under ``vehicle.domain_randomization``.
+        re-randomize on every episode reset.  Optional dynamics DR lives under
+        ``env.dynamics.domain_randomization``.
     - Eval uses ``SubprocVecEnv`` (spawn) so Habitat teardown does not share a
         process with the training ``DummyVecEnv`` when ``num_envs == 1``.
 """
 
-import logging
 import yaml
 import argparse
 import numpy as np
@@ -47,8 +46,6 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from neurosim.rl import CombinedEventStateExtractor, EventCnnExtractor, NeurosimRLEnv
-
-logger = logging.getLogger(__name__)
 
 
 def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
@@ -169,6 +166,36 @@ def build_vecnormalize_kwargs(
     return kwargs
 
 
+def maybe_wrap_vecnormalize(
+    vec_env,
+    *,
+    obs_mode: str,
+    normalize_obs: bool,
+    normalize_reward: bool,
+    training: bool,
+    enabled: bool | None = None,
+):
+    """Return ``VecNormalize(vec_env, ...)`` when normalization is active.
+
+    ``enabled`` defaults to ``normalize_obs or normalize_reward``.  Eval envs
+    pass an explicit ``enabled`` from the experiment vecnormalize block so a
+    reward-only training setup still wraps eval (``norm_reward=False``) for SB3.
+    """
+    if enabled is None:
+        enabled = normalize_obs or normalize_reward
+    if not enabled:
+        return vec_env
+    return VecNormalize(
+        vec_env,
+        **build_vecnormalize_kwargs(
+            obs_mode=obs_mode,
+            normalize_obs=normalize_obs,
+            normalize_reward=normalize_reward,
+            training=training,
+        ),
+    )
+
+
 def build_train_vec_env(
     env_fns: list,
     num_envs: int,
@@ -250,18 +277,14 @@ def main():
         vec_env_type=vec_env_type,
         start_method=vec_env_start_method,
     )
-    if bool(exp["vecnormalize"]["normalize_obs"]) or bool(
-        exp["vecnormalize"]["normalize_reward"]
-    ):
-        train_vec = VecNormalize(
-            train_vec,
-            **build_vecnormalize_kwargs(
-                obs_mode=str(exp["env"]["obs_mode"]),
-                normalize_obs=bool(exp["vecnormalize"]["normalize_obs"]),
-                normalize_reward=bool(exp["vecnormalize"]["normalize_reward"]),
-                training=True,
-            ),
-        )
+    vn = exp["vecnormalize"]
+    train_vec = maybe_wrap_vecnormalize(
+        train_vec,
+        obs_mode=str(exp["env"]["obs_mode"]),
+        normalize_obs=bool(vn["normalize_obs"]),
+        normalize_reward=bool(vn["normalize_reward"]),
+        training=True,
+    )
 
     # Eval env (separate instance, shared normalization stats)
     eval_num_envs = int(exp["eval"]["num_envs"])
@@ -277,18 +300,14 @@ def main():
         ],
         start_method="spawn",
     )
-    if bool(exp["vecnormalize"]["normalize_obs"]) or bool(
-        exp["vecnormalize"]["normalize_reward"]
-    ):
-        eval_vec = VecNormalize(
-            eval_vec,
-            **build_vecnormalize_kwargs(
-                obs_mode=str(exp["env"]["obs_mode"]),
-                normalize_obs=bool(exp["vecnormalize"]["normalize_obs"]),
-                normalize_reward=False,
-                training=False,
-            ),
-        )
+    eval_vec = maybe_wrap_vecnormalize(
+        eval_vec,
+        obs_mode=str(exp["env"]["obs_mode"]),
+        normalize_obs=bool(vn["normalize_obs"]),
+        normalize_reward=False,
+        training=False,
+        enabled=bool(vn["normalize_obs"] or vn["normalize_reward"]),
+    )
 
     policy, policy_kwargs = build_policy_config(
         str(exp["env"]["obs_mode"]),
@@ -346,15 +365,8 @@ def main():
 
     print(f"Training complete. Artifacts saved to {output}")
 
-    try:
-        eval_vec.close()
-    except Exception as exc:
-        logger.warning("eval_vec.close() failed: %s", exc)
-
-    try:
-        train_vec.close()
-    except Exception as exc:
-        logger.warning("train_vec.close() failed: %s", exc)
+    eval_vec.close()
+    train_vec.close()
 
     if run is not None:
         wandb.finish()

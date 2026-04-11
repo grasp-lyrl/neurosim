@@ -44,10 +44,10 @@ env:
       contrast_threshold_pos: 0.15
       anti_aliasing: 8
 
-  vehicle:
-    dynamics_model: rotorpy_multirotor_euler
-    vehicle_name: crazyflie
-    control_mode: ctbr
+  dynamics:
+    model: rotorpy_multirotor_euler
+    vehicle: crazyflie
+    control_abstraction: cmd_ctbr
     ctbr_rate_limits:
       roll: 7.0
       pitch: 7.0
