@@ -84,7 +84,7 @@ env:
 
     domain_randomization:
       enabled: true
-      resample_on_reset: true
+      resample_every: 50
       sensors:
         event_camera_1:
           contrast_threshold_neg: {range: [0.14, 0.16]}

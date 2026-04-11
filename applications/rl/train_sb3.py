@@ -23,9 +23,10 @@ Notes for vectorized training:
         for rollout logging.
     - Each vec-env worker is seeded with ``seed + env_idx`` so workers get
         distinct randomized configurations when DR is enabled.
-    - Set ``simulator.domain_randomization.resample_on_reset: true`` to
-        re-randomize on every episode reset.  Optional dynamics DR lives under
-        ``env.dynamics.domain_randomization``.
+    - ``simulator.domain_randomization.resample_every`` controls how often the
+        Habitat-backed sim is rebuilt.  Optional dynamics DR lives under
+        ``env.dynamics.domain_randomization`` (``enabled``, ``resample_every``,
+        ``scales``).
     - Eval uses ``SubprocVecEnv`` (spawn) so Habitat teardown does not share a
         process with the training ``DummyVecEnv`` when ``num_envs == 1``.
 """

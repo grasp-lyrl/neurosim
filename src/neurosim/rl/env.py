@@ -9,11 +9,13 @@ Safety checks are delegated to Habitat pathfinder bounds and navigability.
 Experiment configs are self-contained: scenes, sensors, a ``dynamics`` block
 (model / vehicle / control_abstraction, plus RL-only fields), the full
 ``simulator`` block (rates, IMU, etc.), and optional
-``simulator.domain_randomization`` (``enabled``, ``resample_on_reset``, and
-per-sensor specs under ``sensors``) gate scene/sensor sampling for
+``simulator.domain_randomization`` (``enabled``, ``resample_every`` for how
+often to rebuild the sim, and per-sensor specs under ``sensors``) gate
+scene/sensor sampling for
 :class:`~neurosim.sims.synchronous_simulator.randomized_simulator.RandomizedSimulator`.
-Dynamics randomization is optional under ``dynamics.domain_randomization``; when
-omitted, it is treated as disabled.
+
+Dynamics randomization is optional under ``dynamics.domain_randomization``
+(``enabled``, ``resample_every``, ``scales``); omit the block to disable.
 
 Habitat-oriented defaults live in ``_VISUAL_BACKEND_DEFAULTS`` only;
 everything tunable for a run is in YAML. The RL policy supplies control via
@@ -130,7 +132,9 @@ class NeurosimRLEnv(gym.Env):
         # Domain randomization -------------------------------------------------------------
         dr_cfg = env_config.get("simulator", {}).get("domain_randomization", {})
         self._dr_enabled = bool(dr_cfg.get("enabled", False))
-        self._resample_on_reset = bool(dr_cfg.get("resample_on_reset", False))
+        if self._dr_enabled:
+            self._resample_every = int(dr_cfg["resample_every"])
+            assert self._resample_every > 0, "resample_every must be positive"
         self._episode_count = 0
 
         base_settings = self._build_simulator_settings(env_config)
@@ -149,6 +153,10 @@ class NeurosimRLEnv(gym.Env):
         )
         self._sync_from_simulator()
 
+        self.steps_per_action = max(
+            int(self.sim.config.world_rate / self.sim.config.control_rate), 1
+        )
+
     # ------------------------------------------------------------------
     # Settings builder
     # ------------------------------------------------------------------
@@ -162,8 +170,9 @@ class NeurosimRLEnv(gym.Env):
         ``sensor_rates``, ``viz_rates``, etc.).  Expects ``env_config["dynamics"]``
         with ``model``, ``vehicle``, and ``control_abstraction`` (same shape as
         top-level ``dynamics`` in full simulator YAMLs).  RL-only keys such as
-        ``ctbr_rate_limits`` and ``domain_randomization`` are not forwarded to
-        ``create_dynamics``.  Merges optional ``visual_backend`` overrides with
+        ``ctbr_rate_limits`` and ``domain_randomization`` (including
+        ``resample_every``) are not forwarded to ``create_dynamics``.  Merges
+        optional ``visual_backend`` overrides with
         ``_VISUAL_BACKEND_DEFAULTS``, then sets ``scene`` from the first entry in
         ``scenes`` and ``sensors`` from ``env_config["sensors"]``.  Strips
         ``domain_randomization`` from the ``simulator`` sub-dict before building
@@ -217,10 +226,6 @@ class NeurosimRLEnv(gym.Env):
             self.sim,
             enable_navigable_check=self._enable_navigable_check,
         )
-
-        world_rate = self.sim.config.world_rate
-        control_rate = self.sim.config.control_rate
-        self.steps_per_action = max(int(world_rate / control_rate), 1)
 
         self.event_sensor_uuid = (
             self._event_sensor_uuid_cfg or self._get_default_event_sensor_uuid()
@@ -381,26 +386,28 @@ class NeurosimRLEnv(gym.Env):
     # Gym API
     # ------------------------------------------------------------------
 
+    def _should_domain_randomize_now(self) -> bool:
+        """True when ``RandomizedSimulator.randomize`` should run on this reset."""
+        if not self._dr_enabled:
+            return False
+        return self._episode_count % self._resample_every == 0
+
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
-
         rng = np.random.default_rng(seed)
 
-        should_randomize = self._dr_enabled and (
-            self._episode_count == 0 or self._resample_on_reset
-        )
-        if should_randomize:
+        if self._should_domain_randomize_now():
             self._rsim.randomize(rng)
             self._sync_from_simulator()
             self._visualizer_initialized = False
+
+        self._vehicle.randomize(self._episode_count, rng)
 
         self._ensure_visualizer()
         self._task.on_reset()
         self._prev_action = None
         if self.enable_visualization:
             self._rr_needs_episode_stream_switch = True
-
-        self._vehicle.on_reset(rng)
 
         # Sample a valid navigable starting position in Habitat space,
         # then convert to dynamics frame.

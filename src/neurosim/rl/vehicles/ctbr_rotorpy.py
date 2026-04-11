@@ -78,17 +78,20 @@ class RotorpyCtbrVehicle(RLVehicle):
             )
 
     def _apply_domain_randomization(self, rng: np.random.Generator) -> None:
-        dr = self._domain_randomization
-        if dr is None or not bool(dr.get("enabled", False)):
-            return
-
-        scales = dr["scales"]
+        """Resample multirotor fields; ``randomize`` must only call when ``scales`` is present."""
+        scales = self._domain_randomization["scales"]
         for key, base_value in self._base_dynamic_params.items():
             low, high = scales[key]
             sampled = float(base_value) * float(rng.uniform(float(low), float(high)))
             setattr(self._multirotor, key, sampled)
 
-    def on_reset(self, rng: np.random.Generator) -> None:
+    def randomize(self, episode_count: int, rng: np.random.Generator) -> None:
+        dr = self._domain_randomization
+        if dr is None or not dr["enabled"]:
+            return
+        if episode_count % dr["resample_every"] != 0:
+            return
+
         self._apply_domain_randomization(rng)
         self._refresh_from_multirotor()
 

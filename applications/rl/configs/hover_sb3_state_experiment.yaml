@@ -1,4 +1,6 @@
 # Experimental/training hyperparameters for hover-stop PPO (state obs).
+# Domain randomization: two habitat-test scenes + mild event-camera sampling
+# (contrast + hfov). ``resample_every`` rebuilds the sim every N completed episodes.
 
 seed: 42
 num_envs: 1
@@ -40,6 +42,8 @@ env:
   scenes:
     - name: apartment_1
       path: data/scene_datasets/habitat-test-scenes/apartment_1.glb
+    - name: skokloster
+      path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
 
   sensors:
     event_camera_1:
@@ -64,6 +68,17 @@ env:
       pitch: 7.0
       yaw: 5.0
 
+    # Optional multirotor parameter sampling (see ``RotorpyCtbrVehicle.randomize``).
+    domain_randomization:
+      enabled: true
+      resample_every: 50
+      scales:
+        mass: [0.85, 1.15]
+        k_eta: [0.9, 1.1]
+        k_m: [0.9, 1.1]
+        rotor_speed_min: [1.0, 1.0]
+        rotor_speed_max: [0.95, 1.05]
+
   simulator:
     world_rate: 1000
     control_rate: 100
@@ -73,6 +88,18 @@ env:
       event_camera_1: 1000
     viz_rates:
       event_camera_1: 20
+
+    domain_randomization:
+      enabled: true
+      resample_every: 50
+      sensors:
+        event_camera_1:
+          contrast_threshold_neg:
+            range: [0.1, 0.3]
+          contrast_threshold_pos:
+            range: [0.1, 0.3]
+          hfov:
+            choices: [90, 120]
 
 ppo:
   learning_rate: 0.0003

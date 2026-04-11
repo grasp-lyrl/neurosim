@@ -90,17 +90,16 @@ def _test_env_config(
 def _config_with_simulator_domain_randomization(
     *,
     enabled: bool,
-    resample_on_reset: bool,
+    resample_every: int | None = None,
     sensors: dict | None = None,
 ) -> dict:
     cfg = copy.deepcopy(
         _test_env_config(obs_mode="state", episode_seconds=0.05),
     )
     sim = cfg.setdefault("simulator", {})
-    dr = {
-        "enabled": enabled,
-        "resample_on_reset": resample_on_reset,
-    }
+    dr: dict = {"enabled": enabled}
+    if resample_every is not None:
+        dr["resample_every"] = int(resample_every)
     if sensors is not None:
         dr["sensors"] = sensors
     sim["domain_randomization"] = dr
@@ -125,7 +124,7 @@ class TestNeurosimRLEnvDomainRandomization:
     def test_dr_enabled_first_reset_calls_randomize(self):
         cfg = _config_with_simulator_domain_randomization(
             enabled=True,
-            resample_on_reset=False,
+            resample_every=2,
             sensors={
                 "event_camera_1": {
                     "contrast_threshold_neg": {"range": [0.41, 0.41]},
@@ -143,10 +142,11 @@ class TestNeurosimRLEnvDomainRandomization:
         finally:
             env.close()
 
-    def test_dr_resample_on_reset_randomizes_each_episode(self):
+    def test_dr_resample_every_one_randomizes_each_episode(self):
+        """``resample_every: 1`` matches per-episode DR (expensive; for tests)."""
         cfg = _config_with_simulator_domain_randomization(
             enabled=True,
-            resample_on_reset=True,
+            resample_every=1,
             sensors={
                 "event_camera_1": {
                     "contrast_threshold_neg": {"range": [0.41, 0.41]},
@@ -164,10 +164,33 @@ class TestNeurosimRLEnvDomainRandomization:
         finally:
             env.close()
 
+    def test_dr_resample_every_n_skips_intermediate_episodes(self):
+        cfg = _config_with_simulator_domain_randomization(
+            enabled=True,
+            resample_every=2,
+            sensors={
+                "event_camera_1": {
+                    "contrast_threshold_neg": {"range": [0.41, 0.41]},
+                },
+            },
+        )
+        env = NeurosimRLEnv(env_config=cfg)
+        try:
+            spy = Mock(wraps=env._rsim.randomize)
+            env._rsim.randomize = spy
+            env.reset(seed=0)
+            assert spy.call_count == 1
+            env.reset(seed=1)
+            assert spy.call_count == 1
+            env.reset(seed=2)
+            assert spy.call_count == 2
+        finally:
+            env.close()
+
     def test_simulator_dr_applies_sensor_sampling(self):
         cfg = _config_with_simulator_domain_randomization(
             enabled=True,
-            resample_on_reset=False,
+            resample_every=1,
             sensors={
                 "event_camera_1": {
                     "contrast_threshold_neg": {"range": [0.37, 0.37]},
@@ -199,6 +222,7 @@ class TestNeurosimRLEnvDomainRandomization:
             **dr_cfg["dynamics"],
             "domain_randomization": {
                 "enabled": True,
+                "resample_every": 1,
                 "scales": {
                     "mass": [1.25, 1.25],
                     "k_eta": [1.0, 1.0],
@@ -225,12 +249,45 @@ class TestNeurosimRLEnvDomainRandomization:
             "rotor_speed_min": [1.0, 1.0],
             "rotor_speed_max": [1.0, 1.0],
         }
-        cfg["dynamics"]["domain_randomization"] = {"enabled": True, "scales": scales}
+        cfg["dynamics"]["domain_randomization"] = {
+            "enabled": True,
+            "resample_every": 1,
+            "scales": scales,
+        }
         scales_before = copy.deepcopy(scales)
         env = NeurosimRLEnv(env_config=cfg)
         try:
             env.reset(seed=0)
             assert cfg["dynamics"]["domain_randomization"]["scales"] == scales_before
+        finally:
+            env.close()
+
+    def test_dynamics_dr_resample_every_skips_intermediate_episodes(self):
+        cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
+        cfg["dynamics"] = {
+            **cfg["dynamics"],
+            "domain_randomization": {
+                "enabled": True,
+                "resample_every": 2,
+                "scales": {
+                    "mass": [1.0, 1.0],
+                    "k_eta": [1.0, 1.0],
+                    "k_m": [1.0, 1.0],
+                    "rotor_speed_min": [1.0, 1.0],
+                    "rotor_speed_max": [1.0, 1.0],
+                },
+            },
+        }
+        env = NeurosimRLEnv(env_config=cfg)
+        try:
+            spy = Mock(wraps=env._vehicle._apply_domain_randomization)
+            env._vehicle._apply_domain_randomization = spy
+            env.reset(seed=0)
+            assert spy.call_count == 1
+            env.reset(seed=1)
+            assert spy.call_count == 1
+            env.reset(seed=2)
+            assert spy.call_count == 2
         finally:
             env.close()
 
