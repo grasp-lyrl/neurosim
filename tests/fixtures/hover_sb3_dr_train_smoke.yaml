@@ -1,0 +1,111 @@
+# Minimal SB3 training run with simulator domain randomization on.
+# Used for manual / CI checks, e.g.:
+#   python applications/rl/train_sb3.py \
+#     --experiment-config tests/fixtures/hover_sb3_dr_train_smoke.yaml \
+#     --run-name dr-train-smoke --no-wandb
+
+seed: 42
+num_envs: 1
+total_timesteps: 512
+
+eval:
+  freq: 100000
+  episodes: 1
+  num_envs: 1
+
+vec_env:
+  type: dummy
+  start_method: spawn
+
+env:
+  obs_mode: state
+  episode_seconds: 2.0
+  init_speed_range: [0.5, 1.0]
+  enable_navigable_check: true
+
+  event_sensor_uuid: null
+  event_representation: time_surface
+  event_log_compression: 1.0
+  event_downsample_factor: 1
+  event_ts_decay_ms: 10.0
+
+  task:
+    name: hover_stop
+    config:
+      w_velocity: 2.0
+      w_events: 0.0
+      w_angular: 0.05
+      w_action: 0.01
+      w_survival: 0.5
+      crash_penalty: 100.0
+      success_velocity_threshold: 0.15
+      success_steps_required: 20
+
+  scenes:
+    - name: apartment_1
+      path: data/scene_datasets/habitat-test-scenes/apartment_1.glb
+    - name: apartment_1_alt
+      path: data/scene_datasets/habitat-test-scenes/apartment_1.glb
+
+  sensors:
+    event_camera_1:
+      type: event
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 120
+      zfar: 20.0
+      backend: cuda
+      contrast_threshold_neg: 0.15
+      contrast_threshold_pos: 0.15
+      anti_aliasing: 8
+
+  vehicle:
+    dynamics_model: rotorpy_multirotor_euler
+    vehicle_name: crazyflie
+    control_mode: ctbr
+    ctbr_rate_limits:
+      roll: 7.0
+      pitch: 7.0
+      yaw: 5.0
+
+  simulator:
+    world_rate: 1000
+    control_rate: 100
+    sim_time: 30
+    coord_transform: rotorpy_to_hm3d
+
+    sensor_rates:
+      event_camera_1: 1000
+
+    viz_rates:
+      event_camera_1: 20
+
+    domain_randomization:
+      enabled: true
+      resample_on_reset: true
+      sensors:
+        event_camera_1:
+          contrast_threshold_neg: {range: [0.14, 0.16]}
+
+ppo:
+  learning_rate: 0.0003
+  n_steps: 128
+  batch_size: 64
+  n_epochs: 2
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.003
+  log_std_init: -1.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  device: auto
+
+vecnormalize:
+  normalize_obs: true
+  normalize_reward: true
+
+wandb:
+  log_freq: 100

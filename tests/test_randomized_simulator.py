@@ -57,8 +57,8 @@ class TestDomainRandomizationConfigSample:
         cfg = DomainRandomizationConfig.from_dict(
             {
                 "scenes": [
-                    {"name": "a", "scene_path": "path/a.glb"},
-                    {"name": "b", "scene_path": "path/b.glb"},
+                    {"name": "a", "path": "path/a.glb"},
+                    {"name": "b", "path": "path/b.glb"},
                 ]
             }
         )
@@ -88,24 +88,11 @@ class TestDomainRandomizationConfigSample:
         assert s["hfov"] in (60, 120)
         assert s["contrast_threshold_pos"] == 0.2
 
-    def test_simulator_visual_backend_nested(self):
-        base = _minimal_base_settings()
-        cfg = DomainRandomizationConfig.from_dict(
-            {
-                "simulator": {"sim_time": {"range": [5.0, 6.0]}},
-                "visual_backend": {"seed": {"choices": [1, 2, 3]}},
-            }
-        )
-        rng = np.random.default_rng(99)
-        out = cfg.sample(base, rng)
-        assert 5.0 <= out["simulator"]["sim_time"] <= 6.0
-        assert out["visual_backend"]["seed"] in (1, 2, 3)
-
     def test_base_unchanged_after_sample(self):
         base = _minimal_base_settings()
         orig_scene = base["visual_backend"]["scene"]
         cfg = DomainRandomizationConfig.from_dict(
-            {"scenes": [{"name": "x", "scene_path": "other.glb"}]}
+            {"scenes": [{"name": "x", "path": "other.glb"}]}
         )
         cfg.sample(base, np.random.default_rng(0))
         assert base["visual_backend"]["scene"] == orig_scene
@@ -117,26 +104,18 @@ class TestRandomizedSimulatorMocked:
     @patch(
         "neurosim.sims.synchronous_simulator.randomized_simulator.SynchronousSimulator"
     )
-    def test_build_calls_simulator_with_transformed_settings(self, mock_cls):
+    def test_build_calls_simulator(self, mock_cls):
         mock_inst = MagicMock()
         mock_cls.return_value = mock_inst
-
-        def transform(d: dict) -> dict:
-            d = dict(d)
-            d["dynamics"] = {"patched": True}
-            return d
 
         r = RandomizedSimulator(
             _minimal_base_settings(),
             randomization=None,
             visualizer_disabled=True,
-            settings_transform=transform,
         )
         assert mock_cls.call_count == 1
         call_kw = mock_cls.call_args
         assert call_kw[1]["visualizer_disabled"] is True
-        settings_passed = call_kw[0][0]
-        assert settings_passed["dynamics"] == {"patched": True}
         r.close()
         mock_inst.close.assert_called()
 
@@ -146,7 +125,7 @@ class TestRandomizedSimulatorMocked:
     def test_randomize_rebuilds_with_sampled_settings(self, mock_cls):
         mock_cls.return_value = MagicMock()
         dr = {
-            "scenes": [{"name": "a", "scene_path": "picked.glb"}],
+            "scenes": [{"name": "a", "path": "picked.glb"}],
             "sensors": {"event_camera_1": {"hfov": {"choices": [77]}}},
         }
         r = RandomizedSimulator(
@@ -180,8 +159,8 @@ class TestRandomizedSimulatorMocked:
         r.close()
 
 
-def test_preflight_randomize_matches_train_sb3_seed_pattern():
-    """Same RNG pattern as train_sb3.make_env: default_rng(seed + env_idx)."""
+def test_preflight_randomize_distinct_seeds():
+    """Different seeds produce different sampled settings."""
     dr = {
         "sensors": {
             "event_camera_1": {

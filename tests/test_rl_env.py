@@ -4,25 +4,14 @@ All tests use the real Habitat backend (apartment_1 scene) since RL training
 always runs with Habitat as the visual backend.
 """
 
+import copy
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
-import yaml
 
 from neurosim.rl import NeurosimRLEnv
 from neurosim.rl.safety import HabitatSafetyChecker
-
-SETTINGS = "configs/apartment_1-settings.yaml"
-
-
-def _test_settings() -> dict:
-    with open(SETTINGS, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    cfg["visual_backend"]["sensors"]["event_camera_1"]["backend"] = "cuda"
-    cfg["visual_backend"]["sensors"].pop("optical_flow_1", None)
-    cfg["simulator"]["sensor_rates"].pop("optical_flow_1", None)
-    cfg["simulator"]["viz_rates"].pop("optical_flow_1", None)
-    return cfg
 
 
 def _test_env_config(
@@ -32,15 +21,13 @@ def _test_env_config(
     event_downsample_factor: int = 1,
 ) -> dict:
     return {
-        "settings": _test_settings(),
         "obs_mode": obs_mode,
         "episode_seconds": episode_seconds,
         "event_sensor_uuid": None,
-        "event_clip": 10.0,
         "event_downsample_factor": event_downsample_factor,
         "init_speed_range": [0.5, 1.0],
         "event_representation": "time_surface",
-        "event_log_compression": None,
+        "event_log_compression": 1.0,
         "event_ts_decay_ms": 10.0,
         "enable_navigable_check": True,
         "enable_visualization": False,
@@ -67,18 +54,185 @@ def _test_env_config(
                 "pitch": 7.0,
                 "yaw": 5.0,
             },
+        },
+        "scenes": [
+            {
+                "name": "apartment_1",
+                "path": "data/scene_datasets/habitat-test-scenes/apartment_1.glb",
+            },
+        ],
+        "sensors": {
+            "event_camera_1": {
+                "type": "event",
+                "position": [0.0, 0.0, 0.05],
+                "orientation": [0.0, 0.0, 0.0],
+                "width": 640,
+                "height": 480,
+                "hfov": 90,
+                "zfar": 20.0,
+                "backend": "cuda",
+                "contrast_threshold_neg": 0.15,
+                "contrast_threshold_pos": 0.15,
+                "anti_aliasing": 8,
+            },
+        },
+        "simulator": {
+            "world_rate": 1000,
+            "control_rate": 100,
+            "sim_time": 30,
+            "coord_transform": "rotorpy_to_hm3d",
+            "sensor_rates": {"event_camera_1": 1000},
+            "viz_rates": {"event_camera_1": 20},
+        },
+    }
+
+
+def _config_with_simulator_domain_randomization(
+    *,
+    enabled: bool,
+    resample_on_reset: bool,
+    sensors: dict | None = None,
+) -> dict:
+    cfg = copy.deepcopy(
+        _test_env_config(obs_mode="state", episode_seconds=0.05),
+    )
+    sim = cfg.setdefault("simulator", {})
+    dr = {
+        "enabled": enabled,
+        "resample_on_reset": resample_on_reset,
+    }
+    if sensors is not None:
+        dr["sensors"] = sensors
+    sim["domain_randomization"] = dr
+    return cfg
+
+
+class TestNeurosimRLEnvDomainRandomization:
+    """NeurosimRLEnv wiring for :class:`~neurosim.sims.synchronous_simulator.randomized_simulator.RandomizedSimulator`."""
+
+    def test_dr_disabled_does_not_call_randomize(self):
+        cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
+        env = NeurosimRLEnv(env_config=cfg)
+        try:
+            spy = Mock(wraps=env._rsim.randomize)
+            env._rsim.randomize = spy
+            env.reset(seed=1)
+            env.reset(seed=2)
+            spy.assert_not_called()
+        finally:
+            env.close()
+
+    def test_dr_enabled_first_reset_calls_randomize(self):
+        cfg = _config_with_simulator_domain_randomization(
+            enabled=True,
+            resample_on_reset=False,
+            sensors={
+                "event_camera_1": {
+                    "contrast_threshold_neg": {"range": [0.41, 0.41]},
+                },
+            },
+        )
+        env = NeurosimRLEnv(env_config=cfg)
+        try:
+            spy = Mock(wraps=env._rsim.randomize)
+            env._rsim.randomize = spy
+            env.reset(seed=10)
+            assert spy.call_count == 1
+            env.reset(seed=11)
+            assert spy.call_count == 1
+        finally:
+            env.close()
+
+    def test_dr_resample_on_reset_randomizes_each_episode(self):
+        cfg = _config_with_simulator_domain_randomization(
+            enabled=True,
+            resample_on_reset=True,
+            sensors={
+                "event_camera_1": {
+                    "contrast_threshold_neg": {"range": [0.41, 0.41]},
+                },
+            },
+        )
+        env = NeurosimRLEnv(env_config=cfg)
+        try:
+            spy = Mock(wraps=env._rsim.randomize)
+            env._rsim.randomize = spy
+            env.reset(seed=20)
+            assert spy.call_count == 1
+            env.reset(seed=21)
+            assert spy.call_count == 2
+        finally:
+            env.close()
+
+    def test_simulator_dr_applies_sensor_sampling(self):
+        cfg = _config_with_simulator_domain_randomization(
+            enabled=True,
+            resample_on_reset=False,
+            sensors={
+                "event_camera_1": {
+                    "contrast_threshold_neg": {"range": [0.37, 0.37]},
+                    "hfov": {"choices": [119]},
+                },
+            },
+        )
+        env = NeurosimRLEnv(env_config=cfg)
+        try:
+            env.reset(seed=0)
+            s = env.sim.config.visual_sensors["event_camera_1"]
+            assert abs(float(s["contrast_threshold_neg"]) - 0.37) < 1e-6
+            assert int(s["hfov"]) == 119
+        finally:
+            env.close()
+
+    def test_vehicle_dr_scales_dynamics_when_enabled(self):
+        """Do not hold two Habitat-backed envs open: teardown can abort (IOT) in habitat_sim.close."""
+        baseline_cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
+        baseline = NeurosimRLEnv(env_config=baseline_cfg)
+        try:
+            baseline.reset(seed=5)
+            m0 = float(baseline.sim.dynamics._multirotor.mass)
+        finally:
+            baseline.close()
+
+        dr_cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
+        dr_cfg["vehicle"] = {
+            **dr_cfg["vehicle"],
             "domain_randomization": {
-                "enabled": False,
+                "enabled": True,
                 "scales": {
-                    "mass": [1.0, 1.0],
+                    "mass": [1.25, 1.25],
                     "k_eta": [1.0, 1.0],
                     "k_m": [1.0, 1.0],
                     "rotor_speed_min": [1.0, 1.0],
                     "rotor_speed_max": [1.0, 1.0],
                 },
             },
-        },
-    }
+        }
+        dr_env = NeurosimRLEnv(env_config=dr_cfg)
+        try:
+            dr_env.reset(seed=5)
+            m1 = float(dr_env.sim.dynamics._multirotor.mass)
+            assert abs(m1 / m0 - 1.25) < 1e-5
+        finally:
+            dr_env.close()
+
+    def test_vehicle_config_dict_not_mutated(self):
+        cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
+        scales = {
+            "mass": [1.1, 1.1],
+            "k_eta": [1.0, 1.0],
+            "k_m": [1.0, 1.0],
+            "rotor_speed_min": [1.0, 1.0],
+            "rotor_speed_max": [1.0, 1.0],
+        }
+        cfg["vehicle"]["domain_randomization"] = {"enabled": True, "scales": scales}
+        scales_before = copy.deepcopy(scales)
+        env = NeurosimRLEnv(env_config=cfg)
+        try:
+            env.reset(seed=0)
+            assert cfg["vehicle"]["domain_randomization"]["scales"] == scales_before
+        finally:
+            env.close()
 
 
 @pytest.fixture(scope="module")
@@ -158,6 +312,15 @@ class TestNeurosimRLEnv:
             f"reason={info.get('termination_reason')}, "
             f"x={env.sim.dynamics.state['x']}"
         )
+
+    def test_train_mode_forces_visualization_off(self):
+        cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
+        cfg["enable_visualization"] = True
+        env = NeurosimRLEnv(env_config=cfg, train=True)
+        try:
+            assert env.enable_visualization is False
+        finally:
+            env.close()
 
     def test_downsampled_event_observation_shape(self):
         env = NeurosimRLEnv(
