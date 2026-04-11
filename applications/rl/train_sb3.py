@@ -15,12 +15,22 @@ Notes for vectorized training:
     - `eval_freq` in config is interpreted in environment steps;
         converted to callback frequency so evaluation stays consistent.
     - Training uses subprocess vectorization for heavy simulators (Habitat).
-    - Domain randomization is configured via `env.domain_randomization` in the
-        experiment YAML.  Each vec-env worker is seeded with a different RNG so
-        workers start in distinct randomized configurations.
-    - Set `env.resample_on_reset: true` to re-randomize on every episode reset.
+    - Experiment configs are self-contained: scenes, sensors, the full
+        ``simulator`` block, and domain randomization are in the YAML (no
+        external settings file).  Training passes ``train=True`` into the RL
+        env, which disables Rerun visualization regardless of YAML until
+        short-episode logging is sorted out; use ``run_policy.py --visualize``
+        for rollout logging.
+    - Each vec-env worker is seeded with ``seed + env_idx`` so workers get
+        distinct randomized configurations when DR is enabled.
+    - Set ``simulator.domain_randomization.resample_on_reset: true`` to
+        re-randomize on every episode reset.  Optional vehicle dynamics DR lives
+        under ``vehicle.domain_randomization``.
+    - Eval uses ``SubprocVecEnv`` (spawn) so Habitat teardown does not share a
+        process with the training ``DummyVecEnv`` when ``num_envs == 1``.
 """
 
+import logging
 import yaml
 import argparse
 import numpy as np
@@ -37,6 +47,8 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from neurosim.rl import CombinedEventStateExtractor, EventCnnExtractor, NeurosimRLEnv
+
+logger = logging.getLogger(__name__)
 
 
 def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
@@ -68,33 +80,23 @@ def make_env(
     env_config: dict[str, Any],
     seed: int | None = None,
     env_idx: int = 0,
+    *,
+    train: bool = True,
 ):
     """Factory callable for DummyVecEnv / SubprocVecEnv.
 
-    When domain randomization is configured, each worker pre-randomizes its
-    simulator with ``seed + env_idx`` so that parallel workers start in
-    distinct configurations.
+    Each worker resets with ``seed + env_idx`` so that parallel workers
+    get distinct initial randomizations (when DR is enabled in the config).
+
+    ``train`` is forwarded to :class:`~neurosim.rl.env.NeurosimRLEnv`; when
+    true, Rerun visualization is forced off regardless of YAML.
     """
 
     def _init():
         import copy
 
-        from neurosim.sims.synchronous_simulator import RandomizedSimulator
-
         cfg = copy.deepcopy(env_config)
-
-        has_dr = bool(cfg.get("domain_randomization"))
-        if has_dr and seed is not None:
-            rng = np.random.default_rng(seed + env_idx)
-            rsim = RandomizedSimulator(
-                base_settings=cfg["settings"],
-                randomization=cfg.get("domain_randomization"),
-            )
-            rsim.randomize(rng)
-            cfg["settings"] = rsim.last_sampled_settings
-            rsim.close()
-
-        env = NeurosimRLEnv(env_config=cfg)
+        env = NeurosimRLEnv(env_config=cfg, train=train)
         env = Monitor(env)
         if seed is not None:
             env.reset(seed=seed + env_idx)
@@ -232,15 +234,14 @@ def main():
     vec_env_type = str(exp["vec_env"]["type"])
     vec_env_start_method = str(exp["vec_env"]["start_method"])
 
-    # Training should never stream visualization.
-    env_config = {**exp["env"], "enable_visualization": False}
+    env_config = dict(exp["env"])
 
     # Training env (use multiprocessing for heavy simulators when num_envs > 1).
     # Each worker gets a distinct seed so domain randomization produces
     # different initial simulator configurations across workers.
     base_seed = int(exp["seed"])
     train_env_fns = [
-        make_env(env_config, seed=base_seed, env_idx=env_idx)
+        make_env(env_config, seed=base_seed, env_idx=env_idx, train=True)
         for env_idx in range(num_envs)
     ]
     train_vec = build_train_vec_env(
@@ -267,11 +268,14 @@ def main():
     if eval_num_envs <= 0:
         raise ValueError("eval_num_envs must be >= 1")
 
-    eval_vec = DummyVecEnv(
+    # Run eval in a subprocess so Habitat/OpenGL is not in the same process as a
+    # training DummyVecEnv (avoids double GL context and Magnum teardown aborts).
+    eval_vec = SubprocVecEnv(
         [
-            make_env(env_config, seed=base_seed + 1000, env_idx=env_idx)
+            make_env(env_config, seed=base_seed + 1000, env_idx=env_idx, train=True)
             for env_idx in range(eval_num_envs)
-        ]
+        ],
+        start_method="spawn",
     )
     if bool(exp["vecnormalize"]["normalize_obs"]) or bool(
         exp["vecnormalize"]["normalize_reward"]
@@ -341,8 +345,16 @@ def main():
         train_vec.save(str(output / "vecnormalize.pkl"))
 
     print(f"Training complete. Artifacts saved to {output}")
-    train_vec.close()
-    eval_vec.close()
+
+    try:
+        eval_vec.close()
+    except Exception as exc:
+        logger.warning("eval_vec.close() failed: %s", exc)
+
+    try:
+        train_vec.close()
+    except Exception as exc:
+        logger.warning("train_vec.close() failed: %s", exc)
 
     if run is not None:
         wandb.finish()
