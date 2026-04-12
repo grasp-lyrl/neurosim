@@ -254,6 +254,7 @@ class HabitatWrapper(VisualBackendProtocol):
             height=sensor_cfg["height"],
             contrast_threshold_neg=contrast_threshold_neg,
             contrast_threshold_pos=contrast_threshold_pos,
+            device=f"cuda:{int(self.settings['gpu_id'])}",
         )
 
         return color_sensor_spec, event_simulator
@@ -729,7 +730,7 @@ class HabitatWrapper(VisualBackendProtocol):
         # Drop references to old GPU-side processors before allocating the new
         # scene + sensors (reduces peak VRAM during reconfigure).
         gc.collect()
-        if torch.cuda.is_available():
+        with torch.cuda.device(f"cuda:{int(self.settings['gpu_id'])}"):
             torch.cuda.empty_cache()
 
         self._cfg = self._make_cfg()
