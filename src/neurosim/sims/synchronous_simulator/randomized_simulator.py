@@ -3,8 +3,9 @@
 Provides :class:`RandomizedSimulator`, a thin wrapper that holds a *base*
 settings dict and an optional randomization specification.  When
 :meth:`randomize` is called it deep-copies the base settings, samples every
-randomizable parameter, and rebuilds the inner
-:class:`SynchronousSimulator`.  When no randomization config is supplied the
+randomizable parameter, and applies them via
+:meth:`~neurosim.sims.synchronous_simulator.simulator.SynchronousSimulator.reconfigure`
+(reusing the visual backend context).  When no randomization config is supplied the
 wrapper is a transparent pass-through.
 
 The randomization config uses an explicit ``range`` / ``choices`` syntax.
@@ -128,7 +129,7 @@ class RandomizedSimulator:
     access to it -- zero overhead, fully transparent.
 
     When a randomization config is provided, calling :meth:`randomize` samples
-    new settings and rebuilds the simulator.
+    new settings and reconfigures the inner simulator.
 
     Parameters
     ----------
