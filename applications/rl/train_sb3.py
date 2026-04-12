@@ -29,6 +29,15 @@ Notes for vectorized training:
         ``scales``).
     - Eval uses ``SubprocVecEnv`` (spawn) so Habitat teardown does not share a
         process with the training ``DummyVecEnv`` when ``num_envs == 1``.
+
+Multi-GPU simulation:
+    - ``gpu_ids`` (list of ints, default ``[0]``) distributes Habitat simulator
+        instances across GPUs via round-robin: worker *i* uses
+        ``gpu_ids[i % len(gpu_ids)]``.  A single 4090 supports ~8-10 sim
+        instances; add more GPU IDs to scale beyond that.
+    - PPO stays on a single device (``ppo.device``); only the simulation
+        backend is multi-GPU.  Observations cross process boundaries as CPU
+        arrays (handled by ``SubprocVecEnv``), so no cross-GPU tensor issues.
 """
 
 import yaml
@@ -80,6 +89,7 @@ def make_env(
     env_idx: int = 0,
     *,
     train: bool = True,
+    gpu_id: int = 0,
 ):
     """Factory callable for DummyVecEnv / SubprocVecEnv.
 
@@ -88,12 +98,16 @@ def make_env(
 
     ``train`` is forwarded to :class:`~neurosim.rl.env.NeurosimRLEnv`; when
     true, Rerun visualization is forced off regardless of YAML.
+
+    ``gpu_id`` assigns the Habitat simulator to a specific GPU, enabling
+    multi-GPU simulation when workers are distributed across devices.
     """
 
     def _init():
         import copy
 
         cfg = copy.deepcopy(env_config)
+        cfg.setdefault("visual_backend", {})["gpu_id"] = gpu_id
         env = NeurosimRLEnv(env_config=cfg, train=train)
         env = Monitor(env)
         if seed is not None:
@@ -264,12 +278,23 @@ def main():
 
     env_config = dict(exp["env"])
 
+    # GPU assignment: round-robin simulation instances across available GPUs.
+    gpu_ids = list(exp.get("gpu_ids", [0]))
+    if not gpu_ids:
+        gpu_ids = [0]
+
     # Training env (use multiprocessing for heavy simulators when num_envs > 1).
     # Each worker gets a distinct seed so domain randomization produces
     # different initial simulator configurations across workers.
     base_seed = int(exp["seed"])
     train_env_fns = [
-        make_env(env_config, seed=base_seed, env_idx=env_idx, train=True)
+        make_env(
+            env_config,
+            seed=base_seed,
+            env_idx=env_idx,
+            train=True,
+            gpu_id=gpu_ids[env_idx % len(gpu_ids)],
+        )
         for env_idx in range(num_envs)
     ]
     train_vec = build_train_vec_env(
@@ -296,7 +321,13 @@ def main():
     # training DummyVecEnv (avoids double GL context and Magnum teardown aborts).
     eval_vec = SubprocVecEnv(
         [
-            make_env(env_config, seed=base_seed + 1000, env_idx=env_idx, train=True)
+            make_env(
+                env_config,
+                seed=base_seed + 1000,
+                env_idx=env_idx,
+                train=True,
+                gpu_id=gpu_ids[env_idx % len(gpu_ids)],
+            )
             for env_idx in range(eval_num_envs)
         ],
         start_method="spawn",

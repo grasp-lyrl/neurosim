@@ -299,10 +299,12 @@ class HabitatWrapper(VisualBackendProtocol):
         else:
             R_local = np.eye(3, dtype=np.float32)
 
+        gpu_id = self.settings.get("gpu_id", 0)
         self._flow_computers[sensor_name] = OpticalFlowComputer(
             width=sensor_cfg["width"],
             height=sensor_cfg["height"],
             hfov=sensor_cfg["hfov"],
+            device=f"cuda:{gpu_id}",
             sensor_local_pose=(p_local, R_local),
         )
 
@@ -405,9 +407,11 @@ class HabitatWrapper(VisualBackendProtocol):
         sigma = sensor_cfg.get("sigma", 1.0)
         return_magnitude = sensor_cfg.get("return_magnitude", False)
 
+        gpu_id = self.settings.get("gpu_id", 0)
         self._edge_detectors[sensor_name] = EdgeDetector(
             width=sensor_cfg["width"],
             height=sensor_cfg["height"],
+            device=f"cuda:{gpu_id}",
             algorithm=algorithm,
             low_threshold=low_threshold,
             high_threshold=high_threshold,
