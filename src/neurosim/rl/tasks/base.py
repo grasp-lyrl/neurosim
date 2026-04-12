@@ -1,8 +1,11 @@
 """Task interfaces for Neurosim RL environments."""
 
-import numpy as np
+import math
 from typing import Any
 from abc import ABC, abstractmethod
+
+import torch
+import numpy as np
 
 
 class EventRepresentationManager:
@@ -20,6 +23,7 @@ class EventRepresentationManager:
         downsample_factor: int,
         event_log_compression: float,
         ts_tau_seconds: float,
+        event_device: str | torch.device,
     ):
         self.representation = representation
         self.raw_height = int(raw_height)
@@ -28,21 +32,27 @@ class EventRepresentationManager:
         self.event_log_compression = float(event_log_compression)
         self.ts_tau_seconds = float(ts_tau_seconds)
 
-        self.raw = np.zeros((2, self.raw_height, self.raw_width), dtype=np.float32)
+        self._device = torch.device(event_device)
+
+        self._raw = torch.zeros(
+            (2, self.raw_height, self.raw_width),
+            dtype=torch.float32,
+            device=self._device,
+        )
         self.step_event_count = 0
         self._last_update_time_s: float | None = None
 
     def reset_episode(self) -> None:
-        self.raw.fill(0.0)
+        self._raw.zero_()
         self.step_event_count = 0
         self._last_update_time_s = None
 
     def begin_step(self) -> None:
         self.step_event_count = 0
         if self.representation != "time_surface":
-            self.raw.fill(0.0)
+            self._raw.zero_()
 
-    def _downsample(self, event_rep: np.ndarray) -> np.ndarray:
+    def _downsample_torch(self, event_rep: torch.Tensor) -> torch.Tensor:
         if self.downsample_factor == 1:
             return event_rep
 
@@ -50,16 +60,14 @@ class EventRepresentationManager:
         h = (event_rep.shape[1] // factor) * factor
         w = (event_rep.shape[2] // factor) * factor
         cropped = event_rep[:, :h, :w]
-        reshaped = cropped.reshape(2, h // factor, factor, w // factor, factor)
-        return reshaped.mean(axis=(2, 4), dtype=np.float32)
+        reshaped = cropped.view(2, h // factor, factor, w // factor, factor)
+        return reshaped.mean(dim=(2, 4), dtype=torch.float32)
 
-    def _normalize(self, event_rep: np.ndarray) -> np.ndarray:
+    def _normalize_torch(self, event_rep: torch.Tensor) -> torch.Tensor:
         k = self.event_log_compression
-        event_rep = np.log1p(k * event_rep) / np.log1p(
-            k * self._EVENT_LOG_COUNT_REFERENCE
-        )
-        np.clip(event_rep, 0.0, 1.0, out=event_rep)
-        return event_rep
+        ref = self._EVENT_LOG_COUNT_REFERENCE
+        out = torch.log1p(k * event_rep) / math.log1p(k * ref)
+        return torch.clamp(out, 0.0, 1.0)
 
     def accumulate(self, events: Any | None) -> None:
         if events is None:
@@ -68,51 +76,59 @@ class EventRepresentationManager:
         x, y, t, p = events.x, events.y, events.t, events.p
 
         if hasattr(x, "detach"):
-            x = x.detach().cpu().numpy()
-            y = y.detach().cpu().numpy()
-            t = t.detach().cpu().numpy()
-            p = p.detach().cpu().numpy()
+            x_t = x.detach().to(
+                dtype=torch.long, device=self._device, non_blocking=True
+            )
+            y_t = y.detach().to(
+                dtype=torch.long, device=self._device, non_blocking=True
+            )
+            t_t = t.detach().to(device=self._device, non_blocking=True)
+            p_t = p.detach().to(
+                dtype=torch.long, device=self._device, non_blocking=True
+            )
+        else:
+            x_t = torch.as_tensor(np.asarray(x), dtype=torch.long, device=self._device)
+            y_t = torch.as_tensor(np.asarray(y), dtype=torch.long, device=self._device)
+            t_t = torch.as_tensor(np.asarray(t), device=self._device)
+            p_t = torch.as_tensor(np.asarray(p), dtype=torch.long, device=self._device)
 
-        if x.size == 0:
+        if x_t.numel() == 0:
             return
 
-        self.step_event_count += int(x.size)
-
-        x = x.astype(np.int64, copy=False)
-        y = y.astype(np.int64, copy=False)
-        t = (t * 1e-6).astype(np.float64, copy=False)
-        p = p.astype(np.int64, copy=False)
+        self.step_event_count += int(x_t.numel())
 
         if self.representation == "histogram":
-            flat_idx = p * (self.raw_height * self.raw_width) + y * self.raw_width + x
-            counts = np.bincount(
-                flat_idx, minlength=2 * self.raw_height * self.raw_width
-            ).astype(np.float32)
-            self.raw += counts.reshape(2, self.raw_height, self.raw_width)
+            hw = self.raw_height * self.raw_width
+            flat_idx = p_t * hw + y_t * self.raw_width + x_t
+            counts = torch.bincount(flat_idx, minlength=2 * hw).to(
+                dtype=torch.float32, device=self._device
+            )
+            self._raw += counts.view(2, self.raw_height, self.raw_width)
             return
 
         if self.representation == "event_frame":
-            self.raw[p, y, x] = 1.0
+            self._raw[p_t, y_t, x_t] = 1.0
             return
 
         if self.representation == "time_surface":
-            latest_time_s = float(t[-1])
+            latest_time_s = float((t_t[-1].float() * 1e-6).item())
             if self._last_update_time_s is not None:
                 dt_seconds = latest_time_s - self._last_update_time_s
                 if dt_seconds > 0.0:
-                    decay = np.float32(np.exp(-dt_seconds / self.ts_tau_seconds))
-                    self.raw *= decay
+                    decay = math.exp(-dt_seconds / self.ts_tau_seconds)
+                    self._raw.mul_(decay)
             self._last_update_time_s = latest_time_s
-            self.raw[p, y, x] += 1.0
+            self._raw[p_t, y_t, x_t] += 1.0
             return
 
         raise ValueError(f"Unsupported event_representation: {self.representation}")
 
     def observation(self) -> np.ndarray:
+        buf = self._raw
         if self.representation == "histogram":
-            self.raw = self._normalize(self.raw)
-        obs = self._downsample(self.raw)
-        return obs.astype(np.float32, copy=True)
+            buf = self._normalize_torch(self._raw)
+        obs = self._downsample_torch(buf)
+        return obs.detach().cpu().numpy().astype(np.float32, copy=False)
 
     def to_rgb(self, event_rep: np.ndarray) -> np.ndarray:
         """Pack event polarity channels into an RGB uint8 image (R=neg, B=pos, G=0)."""

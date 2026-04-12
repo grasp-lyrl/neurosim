@@ -270,6 +270,7 @@ class NeurosimRLEnv(gym.Env):
             downsample_factor=self.event_downsample_factor,
             event_log_compression=self.event_log_compression,
             ts_tau_seconds=self._event_ts_tau_seconds,
+            event_device=f"cuda:{int(self.sim.settings['visual_backend']['gpu_id'])}",
         )
 
         self._vehicle = build_vehicle(
