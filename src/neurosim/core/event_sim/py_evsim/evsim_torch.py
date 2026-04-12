@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 from neurosim.core.event_sim.types import Events
 
@@ -38,20 +39,34 @@ def esim(new_image, new_time, intensity_state_ub, intensity_state_lb):
         current_image[~mask] - MINIMUM_CONTRAST_THRESHOLD_NEG,
     )
 
-    events_t = torch.full_like(
-        events_yx[0], new_time, dtype=torch.uint64, device="cuda"
-    )
-    events_p = torch.zeros_like(events_yx[0], dtype=torch.uint8, device="cuda")
+    dev = new_image.device
+    events_t = torch.full_like(events_yx[0], new_time, dtype=torch.uint64, device=dev)
+    events_p = torch.zeros_like(events_yx[0], dtype=torch.uint8, device=dev)
     events_p[mask_pos[events_yx]] = 1
 
     return events_yx[1], events_yx[0], events_t, events_p  # x, y, t, p
 
 
 class EventSimulator:
-    def __init__(self, W, H, start_time=0, first_image=None):
+    def __init__(
+        self,
+        W,
+        H,
+        start_time=0,
+        first_image=None,
+        device: str | torch.device | None = None,
+    ):
         self.H = H
         self.W = W
         self.last_time = int(start_time)  # in us
+        if device is None:
+            self._device = (
+                torch.device("cuda", 0)
+                if torch.cuda.is_available()
+                else torch.device("cpu")
+            )
+        else:
+            self._device = torch.device(device)
         self.intensity_state_ub = None
         self.intensity_state_lb = None
         if first_image is not None:
@@ -63,7 +78,13 @@ class EventSimulator:
             "[evsim-torch] Initialized event camera sim with sensor size: ",
             first_image.shape,
         )
-        log_image = torch.log(first_image)
+        if isinstance(first_image, np.ndarray):
+            img = torch.from_numpy(first_image).to(
+                self._device, dtype=torch.float32, non_blocking=True
+            )
+        else:
+            img = first_image.to(self._device, dtype=torch.float32, non_blocking=True)
+        log_image = torch.log(img)
         self.intensity_state_ub = log_image + MINIMUM_CONTRAST_THRESHOLD_POS
         self.intensity_state_lb = log_image - MINIMUM_CONTRAST_THRESHOLD_NEG
 
@@ -88,6 +109,13 @@ class EventSimulator:
             self.init(image)
             self.last_time = timestamp_us
             return None
+
+        if isinstance(image, np.ndarray):
+            image = torch.from_numpy(image).to(
+                self._device, dtype=torch.float32, non_blocking=True
+            )
+        else:
+            image = image.to(self._device, dtype=torch.float32, non_blocking=True)
 
         raw_events = esim(
             image,
