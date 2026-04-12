@@ -3,12 +3,13 @@
 # (contrast + hfov). ``resample_every`` rebuilds the sim every N completed episodes.
 
 seed: 42
-num_envs: 8
+num_envs: 16
 total_timesteps: 3000000
-gpu_ids: [0]  # simulation GPUs; workers are round-robin assigned across these
+n_gpus: 2
 
 eval:
-  freq: 2048
+  # Total env-steps between evals (SB3 passes eval_freq // num_envs per vec step).
+  freq: 32768
   episodes: 5
   num_envs: 1
 

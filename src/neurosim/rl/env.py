@@ -24,8 +24,11 @@ everything tunable for a run is in YAML. The RL policy supplies control via
 """
 
 import copy
+import time
+import logging
 import numpy as np
 from typing import Any
+from pathlib import Path
 
 import gymnasium as gym
 from gymnasium import spaces
@@ -78,6 +81,9 @@ class NeurosimRLEnv(gym.Env):
 
     def __init__(self, env_config: dict[str, Any], *, train: bool = False):
         super().__init__()
+
+        # Worker setup --------------------------------------------------------------------
+        self._worker_log_setup(env_config)
 
         # Observation mode -----------------------------------------------------------------
         self.obs_mode = env_config["obs_mode"]
@@ -160,6 +166,23 @@ class NeurosimRLEnv(gym.Env):
     # ------------------------------------------------------------------
     # Settings builder
     # ------------------------------------------------------------------
+
+    def _worker_log_setup(self, env_config: dict[str, Any]) -> None:
+        # Optional per-worker disk log (injected by applications/rl/train_sb3.make_env)
+        self._worker_log: logging.Logger | None = None
+
+        wdir = env_config.pop("_neurosim_rl_worker_log_dir", None)
+        wrole = str(env_config.pop("_neurosim_rl_worker_log_role", "train"))
+        widx = int(env_config.pop("_neurosim_rl_env_idx", 0))
+
+        if wdir:
+            from neurosim.rl.disk_logging import attach_worker_env_logger
+
+            vb = env_config.get("visual_backend") or {}
+            gid = int(vb.get("gpu_id", _VISUAL_BACKEND_DEFAULTS["gpu_id"]))
+            self._worker_log = attach_worker_env_logger(
+                Path(wdir), role=wrole, env_idx=widx, gpu_id=gid
+            )
 
     @staticmethod
     def _build_simulator_settings(env_config: dict[str, Any]) -> dict[str, Any]:
@@ -397,8 +420,20 @@ class NeurosimRLEnv(gym.Env):
         rng = np.random.default_rng(seed)
 
         if self._should_domain_randomize_now():
+            if self._worker_log is not None:
+                self._worker_log.info(
+                    f"domain_randomization_start episode_count={self._episode_count}",
+                )
+            t0 = time.perf_counter()
+
             self._rsim.randomize(rng)
             self._sync_from_simulator()
+
+            if self._worker_log is not None:
+                self._worker_log.info(
+                    f"domain_randomization_done episode_count={self._episode_count} "
+                    f"elapsed_s={time.perf_counter() - t0:.3f}",
+                )
             self._visualizer_initialized = False
 
         self._vehicle.randomize(self._episode_count, rng)
@@ -487,5 +522,9 @@ class NeurosimRLEnv(gym.Env):
         return observation, float(reward), terminated, truncated, info
 
     def close(self):
+        if self._worker_log is not None:
+            self._worker_log.info("worker_close")
+            self._worker_log = None
+
         if hasattr(self, "_rsim"):
             self._rsim.close()

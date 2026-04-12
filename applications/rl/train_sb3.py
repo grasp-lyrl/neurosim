@@ -31,13 +31,15 @@ Notes for vectorized training:
         process with the training ``DummyVecEnv`` when ``num_envs == 1``.
 
 Multi-GPU simulation:
-    - ``gpu_ids`` (list of ints, default ``[0]``) distributes Habitat simulator
-        instances across GPUs via round-robin: worker *i* uses
-        ``gpu_ids[i % len(gpu_ids)]``.  A single 4090 supports ~8-10 sim
-        instances; add more GPU IDs to scale beyond that.
-    - PPO stays on a single device (``ppo.device``); only the simulation
-        backend is multi-GPU.  Observations cross process boundaries as CPU
-        arrays (handled by ``SubprocVecEnv``), so no cross-GPU tensor issues.
+    - ``n_gpus`` (int, default ``1``) uses physical GPU ids ``0 .. n_gpus-1``.
+    - Worker placement uses a fixed skew (see :func:`sim_gpu_assignments`): with
+      ``n`` envs and ``g > 1`` GPUs, ``max(0, n // g - 4)`` simulators sit on GPU
+      0 and the remaining envs are split evenly across GPUs ``1 .. g - 1`` (so the
+      ``4`` workers “moved off” the fair per-GPU share are absorbed by the other
+      GPUs).  For ``g == 1`` every worker uses GPU 0.
+
+Disk logs for each run: ``outputs/rl/<run>/logs/run_setup.yaml`` (layout),
+``training.log`` (rollout timing), ``workers/{train,eval}_env_*.log`` (DR).
 """
 
 import yaml
@@ -56,6 +58,11 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from neurosim.rl import CombinedEventStateExtractor, EventCnnExtractor, NeurosimRLEnv
+from neurosim.rl.disk_logging import (
+    configure_training_disk_logger,
+    gpu_assignment_summary,
+    write_run_setup,
+)
 
 
 def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
@@ -83,6 +90,30 @@ def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
     return cfg
 
 
+def sim_gpu_assignments(num_envs: int, n_gpus: int) -> list[int]:
+    """Map each vec-env index to a GPU id in ``0 .. n_gpus - 1``.
+
+    For ``n`` parallel envs and ``g`` GPUs with ``g >= 2``:
+
+    - ``max(0, n // g - 2)`` envs are assigned to GPU ``0`` (roughly four fewer
+      than an even ``n / g`` share, so PPO can keep GPU 0 busier with the policy).
+    - The remaining ``n - count0`` envs are round-robined over GPUs ``1 .. g - 1``.
+
+    For ``g <= 1`` or ``n <= 0``, every env uses GPU ``0``.
+    """
+    n, g = num_envs, int(n_gpus)
+    if g == 1 or n <= 0:
+        return [0] * n
+
+    count0 = max(0, n // g - 2)
+    assign: list[int] = [0] * count0
+
+    rest = n - count0
+    for i in range(rest):
+        assign.append(1 + (i % (g - 1)))
+    return assign
+
+
 def make_env(
     env_config: dict[str, Any],
     seed: int | None = None,
@@ -90,6 +121,8 @@ def make_env(
     *,
     train: bool = True,
     gpu_id: int = 0,
+    worker_log_dir: Path | None = None,
+    worker_log_role: str = "train",
 ):
     """Factory callable for DummyVecEnv / SubprocVecEnv.
 
@@ -101,6 +134,9 @@ def make_env(
 
     ``gpu_id`` assigns the Habitat simulator to a specific GPU, enabling
     multi-GPU simulation when workers are distributed across devices.
+
+    ``worker_log_dir`` / ``worker_log_role`` enable per-env disk logs under
+    ``<worker_log_dir>/workers/{role}_env_<idx>.log``.
     """
 
     def _init():
@@ -108,6 +144,10 @@ def make_env(
 
         cfg = copy.deepcopy(env_config)
         cfg.setdefault("visual_backend", {})["gpu_id"] = gpu_id
+        if worker_log_dir is not None:
+            cfg["_neurosim_rl_worker_log_dir"] = str(worker_log_dir)
+            cfg["_neurosim_rl_worker_log_role"] = worker_log_role
+            cfg["_neurosim_rl_env_idx"] = env_idx
         env = NeurosimRLEnv(env_config=cfg, train=train)
         env = Monitor(env)
         if seed is not None:
@@ -262,6 +302,14 @@ def main():
     output = Path("outputs/rl") / run_name
     output.mkdir(parents=True, exist_ok=True)
 
+    # Training disk logger -------------------------------------------------------------------
+    log_dir = output / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    train_disk_logger = configure_training_disk_logger(log_dir / "training.log")
+    train_disk_logger.info(
+        "run_start run_name=%s experiment_config=%s", run_name, args.experiment_config
+    )
+
     run = None
     if not args.no_wandb:
         run = wandb.init(
@@ -278,10 +326,44 @@ def main():
 
     env_config = dict(exp["env"])
 
-    # GPU assignment: round-robin simulation instances across available GPUs.
-    gpu_ids = list(exp.get("gpu_ids", [0]))
-    if not gpu_ids:
-        gpu_ids = [0]
+    n_gpus = int(exp.get("n_gpus", 1))
+    train_gpu_assign = sim_gpu_assignments(num_envs, n_gpus)
+
+    eval_num_envs = int(exp["eval"]["num_envs"])
+    eval_gpu_assign = sim_gpu_assignments(eval_num_envs, n_gpus)
+    eval_freq_passed = max(int(exp["eval"]["freq"]) // num_envs, 1)
+
+    write_run_setup(
+        log_dir,
+        {
+            "run_name": run_name,
+            "experiment_config": str(args.experiment_config),
+            "seed": int(exp["seed"]),
+            "num_envs": num_envs,
+            "n_gpus": n_gpus,
+            "train_gpu_assignment": gpu_assignment_summary(train_gpu_assign),
+            "eval": {
+                "num_envs": eval_num_envs,
+                **gpu_assignment_summary(eval_gpu_assign),
+                "freq_yaml_total_timesteps": int(exp["eval"]["freq"]),
+                "eval_callback_freq_per_vec_step": eval_freq_passed,
+            },
+            "ppo": {
+                "n_steps": int(exp["ppo"]["n_steps"]),
+                "batch_size": int(exp["ppo"]["batch_size"]),
+                "n_epochs": int(exp["ppo"]["n_epochs"]),
+                "device": str(exp["ppo"]["device"]),
+            },
+            "env": {
+                "obs_mode": str(exp["env"]["obs_mode"]),
+                "episode_seconds": float(exp["env"]["episode_seconds"]),
+            },
+            "simulator_domain_randomization": exp["env"]
+            .get("simulator", {})
+            .get("domain_randomization"),
+            "logs_dir": str(log_dir.resolve()),
+        },
+    )
 
     # Training env (use multiprocessing for heavy simulators when num_envs > 1).
     # Each worker gets a distinct seed so domain randomization produces
@@ -293,7 +375,9 @@ def main():
             seed=base_seed,
             env_idx=env_idx,
             train=True,
-            gpu_id=gpu_ids[env_idx % len(gpu_ids)],
+            gpu_id=train_gpu_assign[env_idx],
+            worker_log_dir=log_dir,
+            worker_log_role="train",
         )
         for env_idx in range(num_envs)
     ]
@@ -313,10 +397,6 @@ def main():
     )
 
     # Eval env (separate instance, shared normalization stats)
-    eval_num_envs = int(exp["eval"]["num_envs"])
-    if eval_num_envs <= 0:
-        raise ValueError("eval_num_envs must be >= 1")
-
     # Run eval in a subprocess so Habitat/OpenGL is not in the same process as a
     # training DummyVecEnv (avoids double GL context and Magnum teardown aborts).
     eval_vec = SubprocVecEnv(
@@ -326,7 +406,9 @@ def main():
                 seed=base_seed + 1000,
                 env_idx=env_idx,
                 train=True,
-                gpu_id=gpu_ids[env_idx % len(gpu_ids)],
+                gpu_id=eval_gpu_assign[env_idx],
+                worker_log_dir=log_dir,
+                worker_log_role="eval",
             )
             for env_idx in range(eval_num_envs)
         ],
@@ -370,7 +452,7 @@ def main():
         eval_vec,
         best_model_save_path=str(output),
         log_path=str(output),
-        eval_freq=max(int(exp["eval"]["freq"]) // num_envs, 1),
+        eval_freq=eval_freq_passed,
         n_eval_episodes=int(exp["eval"]["episodes"]),
         deterministic=True,
     )
@@ -381,7 +463,7 @@ def main():
             WandbCallback(
                 gradient_save_freq=int(exp["wandb"]["log_freq"]),
                 model_save_path=str(output / "wandb_models"),
-                model_save_freq=max(int(exp["eval"]["freq"]) // num_envs, 1),
+                model_save_freq=eval_freq_passed,
                 verbose=2,
             )
         )
@@ -389,6 +471,9 @@ def main():
     model.learn(
         total_timesteps=int(exp["total_timesteps"]),
         callback=learn_callbacks,
+    )
+    train_disk_logger.info(
+        "training_complete total_timesteps=%s", int(exp["total_timesteps"])
     )
 
     model.save(str(output / "final_model"))

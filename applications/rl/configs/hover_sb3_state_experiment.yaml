@@ -5,10 +5,10 @@
 seed: 42
 num_envs: 1
 total_timesteps: 10000000
-gpu_ids: [0]  # simulation GPUs; workers are round-robin assigned across these
+n_gpus: 1
 
 eval:
-  freq: 2048
+  freq: 32768
   episodes: 5
   num_envs: 1
 
