@@ -70,6 +70,7 @@ class SynchronousSimulator:
 
         # Initializes the visual backend and binds visual sensor executors
         self._init_visual_backend()
+        self._init_visual_sensors()
 
         # Initialize dynamics, controller, trajectory
         self._init_dynamics()
@@ -221,6 +222,7 @@ class SynchronousSimulator:
     def _init_visual_backend(self) -> None:
         self.visual_backend = create_visual_backend(self.settings["visual_backend"])
 
+    def _init_visual_sensors(self) -> None:
         # Bind executors for visual sensors
         for uuid, sensor_cfg in self.config.visual_sensors.items():
             sensor_type = sensor_cfg.get("type")
@@ -500,6 +502,47 @@ class SynchronousSimulator:
             if valid_latencies
             else 0,
         }
+
+    def reconfigure(self, new_settings: dict) -> None:
+        """Reconfigure the simulator with new settings, reusing the GL context.
+
+        Order is important: ``SimulationConfig`` (and thus ``sensor_manager``)
+        must be created *before* :meth:`_init_visual_sensors`, and
+        ``visual_backend.reconfigure`` (which calls ``hsim.Simulator.reconfigure``)
+        must run *before* :meth:`_init_trajectory`, which reads the pathfinder from
+        the reconfigured Habitat instance.  Do not reorder these steps or
+        executors will be bound to the wrong manager / stale pathfinder.
+        """
+        self.settings = new_settings
+        vb_settings = self.settings["visual_backend"]
+
+        self.config = SimulationConfig(
+            **self.settings["simulator"],
+            visual_sensors=vb_settings.get("sensors", {}),
+        )
+
+        self.coord_trans = CoordinateTransform(self.config.coord_transform)
+
+        self.time = 0.0
+        self.simsteps = 0
+
+        self.visual_backend.reconfigure(vb_settings)
+        self._init_visual_sensors()
+
+        self._init_dynamics()
+        self._init_controller()
+        self._init_trajectory()
+
+        self._init_additional_sensors()
+
+        if self.visualizer is not None:
+            use_gpu = self.visualizer.use_gpu
+            device = self.visualizer.device
+            self.visualizer = RerunVisualizer(
+                self.config, use_gpu=use_gpu, device=device
+            )
+
+        logger.info("Simulator reconfigured successfully")
 
     def close(self) -> None:
         """Clean up simulator resources."""

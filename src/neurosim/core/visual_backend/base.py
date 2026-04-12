@@ -110,6 +110,14 @@ class VisualBackendProtocol(Protocol):
         """
         ...
 
+    def reconfigure(self, new_settings: dict[str, Any]) -> None:
+        """Reconfigure the backend with new settings, reusing the GL context.
+
+        Args:
+            new_settings: Updated configuration dictionary.
+        """
+        ...
+
     def close(self) -> None:
         """Clean up and close the backend."""
         ...

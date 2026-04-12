@@ -178,23 +178,26 @@ class RandomizedSimulator:
         )
 
     def randomize(self, rng: np.random.Generator) -> None:
-        """Sample new settings from the randomization config and rebuild.
+        """Sample new settings and reconfigure the existing simulator.
 
-        If no randomization config was provided this is equivalent to
-        :meth:`build` (rebuilds from base settings).
+        Reuses the OpenGL / EGL context created during :meth:`build` by
+        calling ``SynchronousSimulator.reconfigure`` instead of tearing
+        down and recreating the simulator.  If the simulator has not been
+        built yet, falls back to a full build.
         """
-        if self.sim is not None:
-            self.sim.close()
-
         if self._rand_cfg is not None:
             settings = self._rand_cfg.sample(self._base_settings, rng)
         else:
             settings = copy.deepcopy(self._base_settings)
 
         self._last_sampled_settings = settings
-        self.sim = SynchronousSimulator(
-            settings, visualizer_disabled=self._viz_disabled
-        )
+
+        if self.sim is not None:
+            self.sim.reconfigure(settings)
+        else:
+            self.sim = SynchronousSimulator(
+                settings, visualizer_disabled=self._viz_disabled
+            )
 
     @property
     def last_sampled_settings(self) -> dict[str, Any] | None:
