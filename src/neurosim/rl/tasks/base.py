@@ -75,31 +75,25 @@ class EventRepresentationManager:
 
         x, y, t, p = events.x, events.y, events.t, events.p
 
-        if hasattr(x, "detach"):
-            x_t = x.detach().to(
-                dtype=torch.long, device=self._device, non_blocking=True
-            )
-            y_t = y.detach().to(
-                dtype=torch.long, device=self._device, non_blocking=True
-            )
-            t_t = t.detach().to(device=self._device, non_blocking=True)
-            p_t = p.detach().to(
-                dtype=torch.long, device=self._device, non_blocking=True
-            )
-        else:
-            x_t = torch.as_tensor(np.asarray(x), dtype=torch.long, device=self._device)
-            y_t = torch.as_tensor(np.asarray(y), dtype=torch.long, device=self._device)
-            t_t = torch.as_tensor(np.asarray(t), device=self._device)
-            p_t = torch.as_tensor(np.asarray(p), dtype=torch.long, device=self._device)
+        assert x.device == self._device
+        assert y.device == self._device
+        assert t.device == self._device
+        assert p.device == self._device
 
-        if x_t.numel() == 0:
+        #! Convert from uint16 to int32
+        x = x.to(dtype=torch.int32, non_blocking=True)
+        y = y.to(dtype=torch.int32, non_blocking=True)
+        #! t is uint64, so no need to convert
+        p = p.to(dtype=torch.int32, non_blocking=True)
+
+        if x.numel() == 0:
             return
 
-        self.step_event_count += int(x_t.numel())
+        self.step_event_count += int(x.numel())
 
         if self.representation == "histogram":
             hw = self.raw_height * self.raw_width
-            flat_idx = p_t * hw + y_t * self.raw_width + x_t
+            flat_idx = p * hw + y * self.raw_width + x
             counts = torch.bincount(flat_idx, minlength=2 * hw).to(
                 dtype=torch.float32, device=self._device
             )
@@ -107,18 +101,18 @@ class EventRepresentationManager:
             return
 
         if self.representation == "event_frame":
-            self._raw[p_t, y_t, x_t] = 1.0
+            self._raw[p, y, x] = 1.0
             return
 
         if self.representation == "time_surface":
-            latest_time_s = float((t_t[-1].float() * 1e-6).item())
+            latest_time_s = float((t[-1].float() * 1e-6).item())
             if self._last_update_time_s is not None:
                 dt_seconds = latest_time_s - self._last_update_time_s
                 if dt_seconds > 0.0:
                     decay = math.exp(-dt_seconds / self.ts_tau_seconds)
                     self._raw.mul_(decay)
             self._last_update_time_s = latest_time_s
-            self._raw[p_t, y_t, x_t] += 1.0
+            self._raw[p, y, x] += 1.0
             return
 
         raise ValueError(f"Unsupported event_representation: {self.representation}")

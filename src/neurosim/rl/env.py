@@ -272,6 +272,10 @@ class NeurosimRLEnv(gym.Env):
             ts_tau_seconds=self._event_ts_tau_seconds,
             event_device=f"cuda:{int(self.sim.settings['visual_backend']['gpu_id'])}",
         )
+        if self._worker_log is not None:
+            self._worker_log.info(
+                f"event_manager initialized on device={self._event_manager._device}",
+            )
 
         self._vehicle = build_vehicle(
             sim=self.sim,

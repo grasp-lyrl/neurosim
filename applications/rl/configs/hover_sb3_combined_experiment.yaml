@@ -108,9 +108,9 @@ env:
 
 ppo:
   learning_rate: 0.0003
-  n_steps: 512
+  n_steps: 1024
   batch_size: 128
-  n_epochs: 8
+  n_epochs: 4
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
