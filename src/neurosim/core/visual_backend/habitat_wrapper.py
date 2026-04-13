@@ -5,6 +5,7 @@ This module provides a wrapper around the Habitat simulator with
 event camera simulation support.
 """
 
+import gc
 import cv2
 import torch
 import random
@@ -253,6 +254,7 @@ class HabitatWrapper(VisualBackendProtocol):
             height=sensor_cfg["height"],
             contrast_threshold_neg=contrast_threshold_neg,
             contrast_threshold_pos=contrast_threshold_pos,
+            device=f"cuda:{int(self.settings['gpu_id'])}",
         )
 
         return color_sensor_spec, event_simulator
@@ -299,10 +301,12 @@ class HabitatWrapper(VisualBackendProtocol):
         else:
             R_local = np.eye(3, dtype=np.float32)
 
+        gpu_id = self.settings.get("gpu_id", 0)
         self._flow_computers[sensor_name] = OpticalFlowComputer(
             width=sensor_cfg["width"],
             height=sensor_cfg["height"],
             hfov=sensor_cfg["hfov"],
+            device=f"cuda:{gpu_id}",
             sensor_local_pose=(p_local, R_local),
         )
 
@@ -405,9 +409,11 @@ class HabitatWrapper(VisualBackendProtocol):
         sigma = sensor_cfg.get("sigma", 1.0)
         return_magnitude = sensor_cfg.get("return_magnitude", False)
 
+        gpu_id = self.settings.get("gpu_id", 0)
         self._edge_detectors[sensor_name] = EdgeDetector(
             width=sensor_cfg["width"],
             height=sensor_cfg["height"],
+            device=f"cuda:{gpu_id}",
             algorithm=algorithm,
             low_threshold=low_threshold,
             high_threshold=high_threshold,
@@ -704,6 +710,41 @@ class HabitatWrapper(VisualBackendProtocol):
         cv2.circle(navmesh_rgb, (px, py), radius=2, color=(255, 0, 0), thickness=-1)
 
         return navmesh_rgb
+
+    def reconfigure(self, new_settings: dict[str, Any]) -> None:
+        """Reconfigure the simulator with new settings, reusing the GL context.
+
+        Rebuilds the Habitat configuration from *new_settings*, calls
+        ``hsim.Simulator.reconfigure`` (which swaps the scene and sensors
+        without tearing down the OpenGL / EGL context), recomputes the
+        navmesh, and re-initialises the agent and any neurosim-side sensor
+        processors (event simulators, optical-flow computers, etc.).
+        """
+        self.settings = new_settings
+
+        self._event_simulators.clear()
+        self._flow_computers.clear()
+        self._corner_detectors.clear()
+        self._edge_detectors.clear()
+
+        # Drop references to old GPU-side processors before allocating the new
+        # scene + sensors (reduces peak VRAM during reconfigure).
+        gc.collect()
+        with torch.cuda.device(f"cuda:{int(self.settings['gpu_id'])}"):
+            torch.cuda.empty_cache()
+
+        self._cfg = self._make_cfg()
+        self._sim.reconfigure(self._cfg)
+
+        self._scene_bounds = self._sim.pathfinder.get_bounds()
+        self._set_seed(self.settings.get("seed", 324))
+        self._recompute_navmesh()
+        self.agent = self._sim.get_agent(self.settings["default_agent"])
+
+        logger.info(
+            "Habitat simulator reconfigured with scene: %s",
+            self.settings["scene"],
+        )
 
     def close(self) -> None:
         """Close the simulator."""

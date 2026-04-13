@@ -5,9 +5,10 @@
 seed: 42
 num_envs: 1
 total_timesteps: 10000000
+n_gpus: 1
 
 eval:
-  freq: 2048
+  freq: 32768
   episodes: 5
   num_envs: 1
 
@@ -118,6 +119,3 @@ ppo:
 vecnormalize:
   normalize_obs: true
   normalize_reward: true
-
-wandb:
-  log_freq: 100

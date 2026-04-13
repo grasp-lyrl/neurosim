@@ -16,6 +16,7 @@ Usage:
         EventSimulatorType.CUDA,
         width=640,
         height=480,
+        device="cuda:0",
         start_time=0,
     )
 
@@ -24,6 +25,7 @@ Usage:
         "cuda",
         width=640,
         height=480,
+        device="cpu",
         start_time=0,
     )
 """
@@ -194,6 +196,7 @@ def create_event_simulator(
     backend: Union[EventSimulatorType, str],
     width: int,
     height: int,
+    device: str,
     start_time: int = 0,
     first_image: Optional[Any] = None,
     contrast_threshold_neg: float = 0.35,
@@ -206,6 +209,8 @@ def create_event_simulator(
         backend: The backend to use (EventSimulatorType or string: "cuda", "torch", "airsim")
         width: Image width
         height: Image height
+        device: Device string (e.g. ``\"cuda:1\"``, ``\"cpu\"``). Passed to GPU
+            backends; AirSim ignores it.
         start_time: Initial timestamp in microseconds
         first_image: Optional first image to initialize the simulator
         contrast_threshold_neg: Negative contrast threshold (default: 0.35)
@@ -240,6 +245,7 @@ def create_event_simulator(
                 height=height,
                 contrast_threshold_neg=contrast_threshold_neg,
                 contrast_threshold_pos=contrast_threshold_pos,
+                device=device,
                 **kwargs,
             )
             if first_image is not None:
@@ -260,7 +266,7 @@ def create_event_simulator(
             H=height,
             start_time=start_time,
             first_image=first_image,
-            **kwargs,
+            device=device,
         )
 
     elif backend == EventSimulatorType.AIRSIM:
@@ -282,6 +288,7 @@ def create_event_simulator(
             first_image=first_image,
             contrast_threshold_neg=contrast_threshold_neg,
             contrast_threshold_pos=contrast_threshold_pos,
+            device=device,
             **kwargs,
         )
 

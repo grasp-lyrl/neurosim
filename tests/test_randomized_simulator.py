@@ -123,7 +123,8 @@ class TestRandomizedSimulatorMocked:
         "neurosim.sims.synchronous_simulator.randomized_simulator.SynchronousSimulator"
     )
     def test_randomize_rebuilds_with_sampled_settings(self, mock_cls):
-        mock_cls.return_value = MagicMock()
+        mock_inst = MagicMock()
+        mock_cls.return_value = mock_inst
         dr = {
             "scenes": [{"name": "a", "path": "picked.glb"}],
             "sensors": {"event_camera_1": {"hfov": {"choices": [77]}}},
@@ -135,8 +136,9 @@ class TestRandomizedSimulatorMocked:
         )
         assert mock_cls.call_count == 1
         r.randomize(np.random.default_rng(0))
-        assert mock_cls.call_count == 2
-        last_settings = mock_cls.call_args_list[-1][0][0]
+        assert mock_cls.call_count == 1
+        mock_inst.reconfigure.assert_called_once()
+        last_settings = mock_inst.reconfigure.call_args[0][0]
         assert last_settings["visual_backend"]["scene"] == "picked.glb"
         assert (
             last_settings["visual_backend"]["sensors"]["event_camera_1"]["hfov"] == 77
@@ -147,15 +149,24 @@ class TestRandomizedSimulatorMocked:
         "neurosim.sims.synchronous_simulator.randomized_simulator.SynchronousSimulator"
     )
     def test_randomize_without_config_same_as_rebuild_from_base(self, mock_cls):
-        mock_cls.return_value = MagicMock()
+        mock_inst = MagicMock()
+        mock_cls.return_value = mock_inst
+        base = _minimal_base_settings()
         r = RandomizedSimulator(
-            _minimal_base_settings(),
+            base,
             randomization=None,
             visualizer_disabled=True,
         )
         mock_cls.reset_mock()
         r.randomize(np.random.default_rng(5))
-        assert mock_cls.call_count == 1
+        assert mock_cls.call_count == 0
+        mock_inst.reconfigure.assert_called_once()
+        applied = mock_inst.reconfigure.call_args[0][0]
+        assert applied["visual_backend"]["scene"] == base["visual_backend"]["scene"]
+        assert (
+            applied["visual_backend"]["sensors"]["event_camera_1"]["hfov"]
+            == base["visual_backend"]["sensors"]["event_camera_1"]["hfov"]
+        )
         r.close()
 
 
