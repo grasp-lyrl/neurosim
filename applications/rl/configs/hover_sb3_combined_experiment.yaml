@@ -108,7 +108,7 @@ env:
 
 ppo:
   learning_rate: 0.0003
-  n_steps: 1024
+  n_steps: 768
   batch_size: 128
   n_epochs: 4
   gamma: 0.99
@@ -123,6 +123,3 @@ ppo:
 vecnormalize:
   normalize_obs: true
   normalize_reward: true
-
-wandb:
-  log_freq: 100

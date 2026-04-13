@@ -120,5 +120,3 @@ vecnormalize:
   normalize_obs: true
   normalize_reward: true
 
-wandb:
-  log_freq: 100

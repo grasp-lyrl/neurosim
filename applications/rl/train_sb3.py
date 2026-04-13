@@ -81,7 +81,6 @@ def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
         "ppo",
         "vecnormalize",
         "vec_env",
-        "wandb",
     ]
     missing = [k for k in required_keys if k not in cfg]
     if missing:
@@ -461,7 +460,7 @@ def main():
     if not args.no_wandb:
         learn_callbacks.append(
             WandbCallback(
-                gradient_save_freq=int(exp["wandb"]["log_freq"]),
+                gradient_save_freq=0,
                 model_save_path=str(output / "wandb_models"),
                 model_save_freq=eval_freq_passed,
                 verbose=2,
