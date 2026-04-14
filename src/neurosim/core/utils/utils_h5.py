@@ -109,10 +109,31 @@ class H5Logger:
         logger.info("═══════════════════════════════════════════════════════")
 
     def log(self, measurements: dict[str, Any], time: float, step: int) -> None:
-        """Log measurements to HDF5."""
+        """Log measurements to HDF5.
+
+        If deepcopy_data is False, the caller must ensure that the data in measurements
+        is not modified before the writer process has a chance to read it.
+
+        Event data is always copied because we reuse buffers in the event implementation.
+        """
         data = {"_sim_time": time, "_sim_step": step}
         for uuid, val in measurements.items():
-            data[uuid] = dcopy(val) if self.deepcopy_data else val
+            stype = self.sensor_types.get(uuid)
+            if stype in self.IGNORED_SENSOR_TYPES:
+                continue
+
+            if self.deepcopy_data:
+                data[uuid] = dcopy(val)
+                continue
+
+            #! For event data, we always deepcopy, because the event implementation in Neurosim in most* cases
+            #! reuses the same buffers. It only provides slices, with the philosophy that users should copy
+            #! if they want to keep the data.
+            if stype == "event":
+                data[uuid] = self._torch_to_numpy(val)
+            else:
+                data[uuid] = val
+
         self.queue.put(data)
 
     def close(self) -> None:
@@ -130,8 +151,16 @@ class H5Logger:
             return data.cpu().numpy()
         elif isinstance(data, dict):
             return {k: H5Logger._torch_to_numpy(v) for k, v in data.items()}
-        elif isinstance(data, (list, tuple)):
-            return type(data)(H5Logger._torch_to_numpy(x) for x in data)
+        elif isinstance(data, list):
+            return [H5Logger._torch_to_numpy(x) for x in data]
+        elif isinstance(data, tuple):
+            converted = [H5Logger._torch_to_numpy(x) for x in data]
+            # Preserve tuple subclasses (e.g. namedtuples like Events(x, y, t, p)).
+            try:
+                return type(data)(*converted)
+            except TypeError:
+                return tuple(converted)
+
         # FeatureDetectionResult → plain dict (serialisable across the
         # process boundary without pickling the dataclass definition).
         elif isinstance(data, FeatureDetectionResult):
