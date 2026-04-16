@@ -42,6 +42,12 @@ class DynamicObstaclesConfig:
 
     Then reference objects by their short YCB name, e.g. ``"011_banana"`` or
     ``"003_cracker_box"`` – the manager resolves them via substring matching.
+
+    ``azimuth_range_deg`` is relative to the drone's heading, not an absolute
+    world-space angle. ``0`` means straight ahead, positive angles move around
+    the drone's right-hand side in the XZ plane, and values near ``±180`` place
+    the obstacle behind the drone. The default range keeps spawns in a forward
+    cone instead of anywhere around the full circle.
     """
 
     enabled: bool = False
@@ -49,7 +55,7 @@ class DynamicObstaclesConfig:
     max_concurrent: int = 4
     throw_speed_range_mps: tuple[float, float] = (4.0, 9.0)
     angular_speed_range_radps: tuple[float, float] = (0.0, 2.0)
-    azimuth_range_deg: tuple[float, float] = (0.0, 360.0)
+    azimuth_range_deg: tuple[float, float] = (-45.0, 45.0)
     radial_distance_range_m: tuple[float, float] = (2.5, 5.0)
     relative_height_range_m: tuple[float, float] = (-0.5, 1.5)
     aim_noise_std_m: float = 0.15
@@ -88,7 +94,7 @@ class DynamicObstaclesConfig:
             angular_speed_range_radps=tuple(
                 data.get("angular_speed_range_radps", [0.0, 2.0])
             ),
-            azimuth_range_deg=tuple(data.get("azimuth_range_deg", [0.0, 360.0])),
+            azimuth_range_deg=tuple(data.get("azimuth_range_deg", [-45.0, 45.0])),
             radial_distance_range_m=tuple(
                 data.get("radial_distance_range_m", [2.5, 5.0])
             ),
@@ -125,10 +131,13 @@ class DynamicObstacleManager:
         cfg: DynamicObstaclesConfig,
         sim: Any,
         hsim_module: Any,
+        agent_dimensions: tuple[float, float] = (0.0, 0.0),
     ):
         self.cfg = cfg
         self._sim = sim
         self._hsim = hsim_module
+        self._agent_height = float(agent_dimensions[0])
+        self._agent_radius = float(agent_dimensions[1])
         self._rigid_obj_mgr = self._sim.get_rigid_object_manager()
         self._obj_attr_mgr = self._sim.get_object_template_manager()
 
@@ -171,6 +180,9 @@ class DynamicObstacleManager:
         if not self.cfg.enabled:
             return
 
+        #! drone_position is modified inplace.
+        drone_position[1] += self._agent_height
+
         if (
             sim_time - self._last_spawn_time >= self.cfg.spawn_interval_s
             and len(self._active) < self.cfg.max_concurrent
@@ -181,15 +193,13 @@ class DynamicObstacleManager:
         self._update_kinematic(sim_time)
         self._despawn_expired(sim_time)
 
-    def has_agent_collision(
-        self, agent_position: np.ndarray, agent_radius: float
-    ) -> bool:
+    def has_agent_collision(self, agent_position: np.ndarray) -> bool:
         """Check sphere-sphere collision between the agent and any active obstacle."""
-        agent_position = np.asarray(agent_position, dtype=np.float32)
         for item in self._active.values():
             obstacle_pos = np.asarray(item.obj.translation, dtype=np.float32)
+            obstacle_pos[1] -= self._agent_height  # Adjust for agent height
             dist = float(np.linalg.norm(agent_position - obstacle_pos))
-            if dist <= agent_radius + item.collision_radius:
+            if dist <= self._agent_radius + item.collision_radius:
                 return True
         return False
 
@@ -479,9 +489,9 @@ class DynamicObstacleManager:
         """
         w, x, y, z = float(q[0]), float(q[1]), float(q[2]), float(q[3])
         # Forward (-Z) rotated by quaternion, projected to XZ plane:
-        fwd_x = 2.0 * (x * z + w * y)
-        fwd_z = w * w - x * x - y * y + z * z  # note: this is -forward_z
-        return float(np.arctan2(fwd_x, -fwd_z))
+        fwd_x = -2.0 * (x * z + w * y)
+        fwd_z = -1.0 + 2.0 * (x * x + y * y)
+        return float(np.arctan2(fwd_z, fwd_x))
 
     def _sample_spawn_position(
         self, drone_position: np.ndarray, drone_quaternion: np.ndarray
@@ -489,7 +499,8 @@ class DynamicObstacleManager:
         drone_position = np.asarray(drone_position, dtype=np.float32)
         drone_yaw = self._yaw_from_quaternion(drone_quaternion)
 
-        # Azimuth is sampled relative to the drone's facing direction
+        # Azimuth is sampled relative to the drone's facing direction.
+        # 0 deg is straight ahead; 90 deg is to the right; 180 deg is behind.
         azimuth = drone_yaw + np.deg2rad(
             self._rng.uniform(
                 self.cfg.azimuth_range_deg[0], self.cfg.azimuth_range_deg[1]

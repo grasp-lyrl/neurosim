@@ -77,7 +77,15 @@ class HabitatWrapper(VisualBackendProtocol):
                 self.settings["dynamic_obstacles"]
             )
             self._dynamic_obstacles: DynamicObstacleManager | None = (
-                DynamicObstacleManager(dyn_cfg, self._sim, hsim)
+                DynamicObstacleManager(
+                    dyn_cfg,
+                    self._sim,
+                    hsim,
+                    agent_dimensions=(
+                        self.settings["agent_height"],
+                        self.settings["agent_radius"],
+                    ),
+                )
             )
         else:
             self._dynamic_obstacles = None
@@ -782,7 +790,15 @@ class HabitatWrapper(VisualBackendProtocol):
             dyn_cfg = DynamicObstaclesConfig.from_dict(
                 self.settings["dynamic_obstacles"]
             )
-            self._dynamic_obstacles = DynamicObstacleManager(dyn_cfg, self._sim, hsim)
+            self._dynamic_obstacles = DynamicObstacleManager(
+                dyn_cfg,
+                self._sim,
+                hsim,
+                agent_dimensions=(
+                    self.settings["agent_height"],
+                    self.settings["agent_radius"],
+                ),
+            )
         else:
             self._dynamic_obstacles = None
 

@@ -57,6 +57,7 @@ def _base_settings() -> dict:
                 "max_concurrent": 2,
                 "throw_speed_range_mps": [4.0, 6.0],
                 "angular_speed_range_radps": [0.0, 1.0],
+                "azimuth_range_deg": [-45.0, 45.0],
                 "radial_distance_range_m": [1.5, 2.5],
                 "relative_height_range_m": [0.0, 1.0],
                 "aim_noise_std_m": 0.05,
@@ -159,14 +160,18 @@ def test_check_not_navigable(checker):
 def _inject_fake_obstacle(sim, position, collision_radius=0.5, obj_id=9999):
     """Place a fake obstacle into the manager's active dict."""
     fake_obj = MagicMock()
-    fake_obj.translation = np.asarray(position, dtype=np.float32)
+    # Active obstacle translations are stored with visual-backend agent-height offset.
+    agent_height = float(sim.visual_backend.settings["agent_height"])
+    pos = np.asarray(position, dtype=np.float32).copy()
+    pos[1] += agent_height
+    fake_obj.translation = pos
     sim.visual_backend._dynamic_obstacles._active[obj_id] = ActiveObstacle(
         object_id=obj_id,
         obj=fake_obj,
         born_time=0.0,
         motion_mode="kinematic_line",
         ttl_s=100.0,
-        spawn_position=np.asarray(position, dtype=np.float32),
+        spawn_position=pos,
         velocity=np.zeros(3, dtype=np.float32),
         gravity_mps2=9.81,
         collision_radius=float(collision_radius),
@@ -215,6 +220,7 @@ def test_check_obstacle_collision_with_spawned_obstacle():
             "max_concurrent": 3,
             "throw_speed_range_mps": [4.0, 6.0],
             "angular_speed_range_radps": [0.0, 1.0],
+            "azimuth_range_deg": [-45.0, 45.0],
             "radial_distance_range_m": [1.5, 2.5],
             "relative_height_range_m": [0.0, 1.0],
             "aim_noise_std_m": 0.05,
@@ -230,6 +236,13 @@ def test_check_obstacle_collision_with_spawned_obstacle():
         }
         sim.reconfigure(cfg)
 
+        assert sim.visual_backend._dynamic_obstacles._agent_height == pytest.approx(
+            cfg["visual_backend"]["agent_height"]
+        )
+        assert sim.visual_backend._dynamic_obstacles._agent_radius == pytest.approx(
+            cfg["visual_backend"]["agent_radius"]
+        )
+
         checker = HabitatSafetyChecker(sim, enable_navigable_check=False)
         ctrl = sim.dynamics._default_control()
 
@@ -242,9 +255,10 @@ def test_check_obstacle_collision_with_spawned_obstacle():
         assert len(active) > 0, "No obstacles spawned after 30 steps"
 
         item = next(iter(active.values()))
-        obstacle_pos = np.asarray(item.obj.translation, dtype=np.float32)
+        obstacle_pos = np.asarray(item.obj.translation, dtype=np.float32).copy()
+        obstacle_pos[1] -= float(cfg["visual_backend"]["agent_height"])
 
-        # Query at the obstacle's own position — must collide.
+        # Query in floor-referenced Habitat coordinates — must collide.
         assert checker.has_obstacle_collision(obstacle_pos) is True
 
         # Query far away — no collision.

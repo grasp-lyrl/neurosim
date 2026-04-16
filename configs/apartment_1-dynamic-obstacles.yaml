@@ -54,7 +54,7 @@ visual_backend:
     throw_speed_range_mps: [4.0, 9.0]
     angular_speed_range_radps: [0.0, 2.0]
     radial_distance_range_m: [2.5, 5.0]
-    relative_height_range_m: [0.0, 1.5]
+    relative_height_range_m: [-0.25, 1.0]
     aim_noise_std_m: 0.15
     templates:
       - handle: "cube"

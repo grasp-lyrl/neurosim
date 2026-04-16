@@ -29,7 +29,6 @@ class HabitatSafetyChecker:
         self._pos_transform = np.asarray(
             sim.coord_trans.pos_transform, dtype=np.float64
         )
-        self._agent_radius = sim.visual_backend.settings["agent_radius"]
         self._dynamic_obstacles = sim.visual_backend._dynamic_obstacles
         self._enable_navigable = enable_navigable_check
 
@@ -65,9 +64,7 @@ class HabitatSafetyChecker:
         """Check sphere-sphere collision with any active dynamic obstacle."""
         if self._dynamic_obstacles is None:
             return False
-        return self._dynamic_obstacles.has_agent_collision(
-            habitat_pos, self._agent_radius
-        )
+        return self._dynamic_obstacles.has_agent_collision(habitat_pos)
 
     def check(self, dynamics_position: np.ndarray) -> tuple[bool, str]:
         hp = self.dynamics_to_habitat(dynamics_position)
