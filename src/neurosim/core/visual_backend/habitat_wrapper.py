@@ -25,6 +25,10 @@ from neurosim.core.visual_backend.corner_detector import (
     FeatureDetectionResult,
 )
 from neurosim.core.visual_backend.edge_detector import EdgeDetector
+from neurosim.core.visual_backend.dynamic_obstacles import (
+    DynamicObstacleManager,
+    DynamicObstaclesConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,24 @@ class HabitatWrapper(VisualBackendProtocol):
         # init the agent to the start position and orientation
         # self.agent = self._init_agent_state(self.settings["default_agent"])
         self.agent = self._sim.get_agent(self.settings["default_agent"])
+
+        if "dynamic_obstacles" in self.settings:
+            dyn_cfg = DynamicObstaclesConfig.from_dict(
+                self.settings["dynamic_obstacles"]
+            )
+            self._dynamic_obstacles: DynamicObstacleManager | None = (
+                DynamicObstacleManager(
+                    dyn_cfg,
+                    self._sim,
+                    hsim,
+                    agent_dimensions=(
+                        self.settings["agent_height"],
+                        self.settings["agent_radius"],
+                    ),
+                )
+            )
+        else:
+            self._dynamic_obstacles = None
 
         logger.info("════════════════════════════════════════════════════════════════")
         logger.info(
@@ -528,6 +550,27 @@ class HabitatWrapper(VisualBackendProtocol):
             reset_sensors=False,
         )
 
+    def update_dynamic_obstacles(
+        self,
+        sim_time: float,
+        dt: float,
+    ) -> None:
+        """Update dynamic obstacle spawning/lifecycle and step physics if needed."""
+        if self._dynamic_obstacles is None or not self._dynamic_obstacles.enabled:
+            return
+
+        agent_state = self.agent.get_state()
+        agent_pos = np.asarray(agent_state.position, dtype=np.float32)
+        agent_quat = np.asarray(agent_state.rotation.components, dtype=np.float32)
+
+        self._dynamic_obstacles.step(sim_time, agent_pos, agent_quat)
+
+        if (
+            self.settings["enable_physics"]
+            and self._dynamic_obstacles.needs_physics_step()
+        ):
+            self._sim.step_physics(float(dt))
+
     def render_events(
         self, uuid: str, time: int, to_numpy: bool = False
     ) -> tuple[Any, ...] | None:
@@ -722,6 +765,9 @@ class HabitatWrapper(VisualBackendProtocol):
         """
         self.settings = new_settings
 
+        if self._dynamic_obstacles is not None:
+            self._dynamic_obstacles.cleanup()
+
         self._event_simulators.clear()
         self._flow_computers.clear()
         self._corner_detectors.clear()
@@ -740,6 +786,21 @@ class HabitatWrapper(VisualBackendProtocol):
         self._set_seed(self.settings.get("seed", 324))
         self._recompute_navmesh()
         self.agent = self._sim.get_agent(self.settings["default_agent"])
+        if "dynamic_obstacles" in self.settings:
+            dyn_cfg = DynamicObstaclesConfig.from_dict(
+                self.settings["dynamic_obstacles"]
+            )
+            self._dynamic_obstacles = DynamicObstacleManager(
+                dyn_cfg,
+                self._sim,
+                hsim,
+                agent_dimensions=(
+                    self.settings["agent_height"],
+                    self.settings["agent_radius"],
+                ),
+            )
+        else:
+            self._dynamic_obstacles = None
 
         logger.info(
             "Habitat simulator reconfigured with scene: %s",
@@ -748,4 +809,6 @@ class HabitatWrapper(VisualBackendProtocol):
 
     def close(self) -> None:
         """Close the simulator."""
+        if self._dynamic_obstacles is not None:
+            self._dynamic_obstacles.cleanup()
         self._sim.close()

@@ -1,0 +1,127 @@
+# Simulator Global Settings
+simulator:
+  world_rate: 1000 # Hz
+  control_rate: 100 # Hz
+  sim_time: 30 # seconds
+  coord_transform: "rotorpy_to_hm3d"
+
+  additional_sensors:
+    imu_1:
+      type: "imu"
+      model: "rotorpy"
+      sampling_rate: 50 # Hz
+
+  sensor_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 1000 # Hz
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
+
+  viz_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 20 # Hz
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
+
+# Visual Backend Settings
+visual_backend:
+  gpu_id: 0
+  scene: "data/scene_datasets/habitat-test-scenes/apartment_1.glb"
+  scene_dataset_config_file: "default"
+  clear_color: [0.0, 0.0, 0.0, 1.0]
+  default_agent: 0
+
+  agent_height: 1.0
+  agent_radius: 0.3
+  agent_max_climb: 1.0
+  agent_max_slope: 90.0
+
+  enable_hbao: false
+  frustum_culling: true
+
+  seed: 324
+  physics_config_file: "data/default.physics_config.json"
+  enable_physics: true
+
+  dynamic_obstacles:
+    enabled: true
+    # YCB dataset required for banana and cracker_box.
+    # Download once with:
+    #   python -m habitat_sim.utils.datasets_download --uids ycb --data-path data/
+    dataset_config_file: "data/objects/ycb/ycb.scene_dataset_config.json"
+    spawn_interval_s: 0.5
+    max_concurrent: 100
+    throw_speed_range_mps: [4.0, 9.0]
+    angular_speed_range_radps: [0.0, 2.0]
+    radial_distance_range_m: [2.5, 5.0]
+    relative_height_range_m: [-0.25, 1.0]
+    aim_noise_std_m: 0.15
+    templates:
+      - handle: "cube"
+        motion_mode: "dynamic_throw"
+        scale: [0.12, 0.12, 0.12]
+        mass: 0.25
+        ttl_s: 2.5
+      - handle: "uvSphereSolid"
+        motion_mode: "dynamic_throw"
+        scale: [0.10, 0.10, 0.10]
+        mass: 0.20
+        ttl_s    : 2.5
+      - handle: "011_banana"
+        motion_mode: "dynamic_throw"
+        ttl_s: 2.5
+      - handle: "003_cracker_box"
+        motion_mode: "dynamic_throw"
+        ttl_s: 2.5
+
+  sensors:
+    event_camera_1:
+      type: "event"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 20.0
+      backend: "cuda"
+      contrast_threshold_neg: 0.15
+      contrast_threshold_pos: 0.15
+      anti_aliasing: 8
+
+    color_camera_1:
+      type: "color"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 20.0
+      anti_aliasing: 8
+
+    depth_camera_1:
+      type: "depth"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 10.0
+
+# Controller settings
+controller:
+  model: "rotorpy_se3"
+  vehicle: "crazyflie"
+
+# Dynamics settings
+dynamics:
+  model: "rotorpy_multirotor_euler"
+  vehicle: "crazyflie"
+
+# Trajectory settings
+trajectory:
+  model: "habitat_random_minsnap"
+  seed: 42
+  target_length: 30.0
+  min_waypoint_distance: 2.0
+  max_waypoints: 100
+  v_avg: 1.0

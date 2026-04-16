@@ -323,6 +323,10 @@ class SynchronousSimulator:
         position, quaternion = self.coord_trans.transform(state["x"], state["q"])
         self.visual_backend.update_agent_state(position, quaternion)
 
+        self.visual_backend.update_dynamic_obstacles(
+            sim_time=self.time, dt=self.config.t_step
+        )
+
     def _render_sensors(self) -> dict:
         """
         Render all sensors that should be sampled at this timestep.

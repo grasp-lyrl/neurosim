@@ -110,6 +110,14 @@ class VisualBackendProtocol(Protocol):
         """
         ...
 
+    def update_dynamic_obstacles(
+        self,
+        sim_time: float,
+        dt: float,
+    ) -> None:
+        """Update dynamic obstacle spawning/lifecycle and step physics if needed."""
+        ...
+
     def reconfigure(self, new_settings: dict[str, Any]) -> None:
         """Reconfigure the backend with new settings, reusing the GL context.
 

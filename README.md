@@ -30,9 +30,9 @@
 
 - [ ] Hardware-in-the-loop (HIL) support for real robot testing
 - [ ] 📚 Detailed documentation and tutorials
-- [ ] Independently moving objects in the scene
-- `03/30/26`: Reinforcement Learning (RL) support
-- `02/16/26`: Neurosim paper released on arXiv ([2602.15018](https://arxiv.org/abs/2602.15018))
+- `04/16/26`: Added dynamic obstacles thrown at the agent.
+- `03/30/26`: Reinforcement Learning (RL) support added.
+- `02/16/26`: Neurosim paper released on arXiv ([2602.15018](https://arxiv.org/abs/2602.15018)).
 - `02/15/26`: [neurosim_cu_esim](https://github.com/grasp-lyrl/neurosim_cu_esim) now standalone for faster event simulation.
 - `02/06/26`: Initial release of Neurosim!
 

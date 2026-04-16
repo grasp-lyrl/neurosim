@@ -33,7 +33,7 @@ from pathlib import Path
 import gymnasium as gym
 from gymnasium import spaces
 
-from neurosim.rl.safety import HabitatSafetyChecker, build_safety_checker
+from neurosim.rl.safety import HabitatSafetyChecker
 from neurosim.rl.tasks import EventRepresentationManager, RLTask, build_task
 from neurosim.rl.vehicles import build_vehicle
 from neurosim.sims.synchronous_simulator import RandomizedSimulator
@@ -245,7 +245,7 @@ class NeurosimRLEnv(gym.Env):
 
     def _sync_from_simulator(self) -> None:
         """Re-derive spaces, vehicle, safety checker, etc. from the current simulator."""
-        self._safety = build_safety_checker(
+        self._safety = HabitatSafetyChecker(
             self.sim,
             enable_navigable_check=self._enable_navigable_check,
         )
