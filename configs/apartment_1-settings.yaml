@@ -54,6 +54,29 @@ visual_backend:
   physics_config_file: "data/default.physics_config.json"
   enable_physics: true # Replace with false if `built_with_bullet` is False
 
+  dynamic_obstacles:
+    enabled: false
+    spawn_interval_s: 1.0
+    max_concurrent: 100
+    throw_speed_range_mps: [4.0, 9.0]
+    angular_speed_range_radps: [0.0, 2.0]
+    radial_distance_range_m: [2.5, 5.0]
+    relative_height_range_m: [-0.5, 1.5]
+    aim_noise_std_m: 0.15
+    templates:
+      - handle: "cube"
+        motion_mode: "dynamic_throw"
+        scale: [0.12, 0.12, 0.12]
+        mass: 0.25
+        ttl_s: 10.0
+      - handle: "uvSphereSolid"
+        motion_mode: "kinematic_parabola"
+        scale: [0.10, 0.10, 0.10]
+        mass: 0.20
+        ttl_s: 10.0
+        kinematic_speed_mps: 6.0
+        parabola_gravity_mps2: 9.81
+
   sensors:
     event_camera_1:
       type: "event"

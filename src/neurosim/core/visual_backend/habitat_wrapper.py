@@ -25,6 +25,10 @@ from neurosim.core.visual_backend.corner_detector import (
     FeatureDetectionResult,
 )
 from neurosim.core.visual_backend.edge_detector import EdgeDetector
+from neurosim.core.visual_backend.dynamic_obstacles import (
+    DynamicObstacleManager,
+    DynamicObstaclesConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,11 @@ class HabitatWrapper(VisualBackendProtocol):
         # init the agent to the start position and orientation
         # self.agent = self._init_agent_state(self.settings["default_agent"])
         self.agent = self._sim.get_agent(self.settings["default_agent"])
+
+        dyn_cfg = DynamicObstaclesConfig.from_dict(
+            self.settings.get("dynamic_obstacles")
+        )
+        self._dynamic_obstacles = DynamicObstacleManager(dyn_cfg, self._sim, hsim)
 
         logger.info("════════════════════════════════════════════════════════════════")
         logger.info(
@@ -528,6 +537,39 @@ class HabitatWrapper(VisualBackendProtocol):
             reset_sensors=False,
         )
 
+    def step_physics(self, dt: float) -> None:
+        """Step Habitat physics simulation by one time increment."""
+        if self.settings.get("enable_physics", False):
+            self._sim.step_physics(float(dt))
+
+    def step_dynamic_obstacles(
+        self,
+        sim_time: float,
+        simsteps: int,
+        drone_position: np.ndarray,
+        dt: float,
+    ) -> None:
+        """Update dynamic obstacle spawning/lifecycle for this simulation step."""
+        del drone_position
+        agent_pos = np.asarray(self.agent.get_state().position, dtype=np.float32)
+        self._dynamic_obstacles.step(sim_time, simsteps, agent_pos, dt)
+
+    def dynamic_obstacles_need_physics_step(self) -> bool:
+        """Whether dynamic obstacle simulation currently requires physics stepping."""
+        return self._dynamic_obstacles.needs_physics_step()
+
+    def get_dynamic_obstacles_state(self) -> list[dict[str, Any]]:
+        """Return current active dynamic obstacle snapshot."""
+        return self._dynamic_obstacles.get_state()
+
+    def has_drone_obstacle_collision(self) -> bool:
+        """Minimal collision API for downstream task logic.
+
+        Placeholder for now; robust collision semantics will be added in a
+        future revision when the drone has an explicit rigid-body proxy.
+        """
+        return self._dynamic_obstacles.has_drone_collision()
+
     def render_events(
         self, uuid: str, time: int, to_numpy: bool = False
     ) -> tuple[Any, ...] | None:
@@ -722,6 +764,9 @@ class HabitatWrapper(VisualBackendProtocol):
         """
         self.settings = new_settings
 
+        if hasattr(self, "_dynamic_obstacles"):
+            self._dynamic_obstacles.cleanup()
+
         self._event_simulators.clear()
         self._flow_computers.clear()
         self._corner_detectors.clear()
@@ -740,6 +785,10 @@ class HabitatWrapper(VisualBackendProtocol):
         self._set_seed(self.settings.get("seed", 324))
         self._recompute_navmesh()
         self.agent = self._sim.get_agent(self.settings["default_agent"])
+        dyn_cfg = DynamicObstaclesConfig.from_dict(
+            self.settings.get("dynamic_obstacles")
+        )
+        self._dynamic_obstacles = DynamicObstacleManager(dyn_cfg, self._sim, hsim)
 
         logger.info(
             "Habitat simulator reconfigured with scene: %s",
@@ -748,4 +797,6 @@ class HabitatWrapper(VisualBackendProtocol):
 
     def close(self) -> None:
         """Close the simulator."""
+        if hasattr(self, "_dynamic_obstacles"):
+            self._dynamic_obstacles.cleanup()
         self._sim.close()

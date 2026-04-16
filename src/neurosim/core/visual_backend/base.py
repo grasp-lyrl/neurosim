@@ -110,6 +110,32 @@ class VisualBackendProtocol(Protocol):
         """
         ...
 
+    def step_physics(self, dt: float) -> None:
+        """Advance backend physics simulation by ``dt`` seconds."""
+        ...
+
+    def step_dynamic_obstacles(
+        self,
+        sim_time: float,
+        simsteps: int,
+        drone_position: np.ndarray,
+        dt: float,
+    ) -> None:
+        """Advance dynamic obstacle spawning and lifecycle logic."""
+        ...
+
+    def dynamic_obstacles_need_physics_step(self) -> bool:
+        """Whether dynamic obstacle simulation currently requires physics stepping."""
+        ...
+
+    def get_dynamic_obstacles_state(self) -> list[dict[str, Any]]:
+        """Get a snapshot of currently active dynamic obstacle state."""
+        ...
+
+    def has_drone_obstacle_collision(self) -> bool:
+        """Return whether a drone-obstacle collision has been detected."""
+        ...
+
     def reconfigure(self, new_settings: dict[str, Any]) -> None:
         """Reconfigure the backend with new settings, reusing the GL context.
 

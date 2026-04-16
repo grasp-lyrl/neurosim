@@ -323,6 +323,21 @@ class SynchronousSimulator:
         position, quaternion = self.coord_trans.transform(state["x"], state["q"])
         self.visual_backend.update_agent_state(position, quaternion)
 
+        if hasattr(self.visual_backend, "step_dynamic_obstacles"):
+            self.visual_backend.step_dynamic_obstacles(
+                sim_time=self.time,
+                simsteps=self.simsteps,
+                drone_position=np.asarray(position, dtype=np.float32),
+                dt=self.config.t_step,
+            )
+
+        if (
+            hasattr(self.visual_backend, "step_physics")
+            and hasattr(self.visual_backend, "dynamic_obstacles_need_physics_step")
+            and self.visual_backend.dynamic_obstacles_need_physics_step()
+        ):
+            self.visual_backend.step_physics(self.config.t_step)
+
     def _render_sensors(self) -> dict:
         """
         Render all sensors that should be sampled at this timestep.
@@ -543,6 +558,22 @@ class SynchronousSimulator:
             )
 
         logger.info("Simulator reconfigured successfully")
+
+    def has_obstacle_collision(self) -> bool:
+        """Return collision status between drone and dynamic obstacles.
+
+        This API is intentionally minimal for now; richer collision metadata
+        can be layered on top without changing the call sites.
+        """
+        if hasattr(self.visual_backend, "has_drone_obstacle_collision"):
+            return self.visual_backend.has_drone_obstacle_collision()
+        return False
+
+    def get_obstacle_states(self) -> list[dict]:
+        """Get active dynamic obstacle states for debugging/task hooks."""
+        if hasattr(self.visual_backend, "get_dynamic_obstacles_state"):
+            return self.visual_backend.get_dynamic_obstacles_state()
+        return []
 
     def close(self) -> None:
         """Clean up simulator resources."""
