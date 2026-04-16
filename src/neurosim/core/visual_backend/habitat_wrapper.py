@@ -72,10 +72,15 @@ class HabitatWrapper(VisualBackendProtocol):
         # self.agent = self._init_agent_state(self.settings["default_agent"])
         self.agent = self._sim.get_agent(self.settings["default_agent"])
 
-        dyn_cfg = DynamicObstaclesConfig.from_dict(
-            self.settings.get("dynamic_obstacles")
-        )
-        self._dynamic_obstacles = DynamicObstacleManager(dyn_cfg, self._sim, hsim)
+        if "dynamic_obstacles" in self.settings:
+            dyn_cfg = DynamicObstaclesConfig.from_dict(
+                self.settings["dynamic_obstacles"]
+            )
+            self._dynamic_obstacles: DynamicObstacleManager | None = (
+                DynamicObstacleManager(dyn_cfg, self._sim, hsim)
+            )
+        else:
+            self._dynamic_obstacles = None
 
         logger.info("════════════════════════════════════════════════════════════════")
         logger.info(
@@ -537,38 +542,26 @@ class HabitatWrapper(VisualBackendProtocol):
             reset_sensors=False,
         )
 
-    def step_physics(self, dt: float) -> None:
-        """Step Habitat physics simulation by one time increment."""
-        if self.settings.get("enable_physics", False):
-            self._sim.step_physics(float(dt))
-
-    def step_dynamic_obstacles(
+    def update_dynamic_obstacles(
         self,
         sim_time: float,
-        simsteps: int,
-        drone_position: np.ndarray,
         dt: float,
     ) -> None:
-        """Update dynamic obstacle spawning/lifecycle for this simulation step."""
-        del drone_position
-        agent_pos = np.asarray(self.agent.get_state().position, dtype=np.float32)
-        self._dynamic_obstacles.step(sim_time, simsteps, agent_pos, dt)
+        """Update dynamic obstacle spawning/lifecycle and step physics if needed."""
+        if self._dynamic_obstacles is None or not self._dynamic_obstacles.enabled:
+            return
 
-    def dynamic_obstacles_need_physics_step(self) -> bool:
-        """Whether dynamic obstacle simulation currently requires physics stepping."""
-        return self._dynamic_obstacles.needs_physics_step()
+        agent_state = self.agent.get_state()
+        agent_pos = np.asarray(agent_state.position, dtype=np.float32)
+        agent_quat = np.asarray(agent_state.rotation.components, dtype=np.float32)
 
-    def get_dynamic_obstacles_state(self) -> list[dict[str, Any]]:
-        """Return current active dynamic obstacle snapshot."""
-        return self._dynamic_obstacles.get_state()
+        self._dynamic_obstacles.step(sim_time, agent_pos, agent_quat)
 
-    def has_drone_obstacle_collision(self) -> bool:
-        """Minimal collision API for downstream task logic.
-
-        Placeholder for now; robust collision semantics will be added in a
-        future revision when the drone has an explicit rigid-body proxy.
-        """
-        return self._dynamic_obstacles.has_drone_collision()
+        if (
+            self.settings["enable_physics"]
+            and self._dynamic_obstacles.needs_physics_step()
+        ):
+            self._sim.step_physics(float(dt))
 
     def render_events(
         self, uuid: str, time: int, to_numpy: bool = False
@@ -764,7 +757,7 @@ class HabitatWrapper(VisualBackendProtocol):
         """
         self.settings = new_settings
 
-        if hasattr(self, "_dynamic_obstacles"):
+        if self._dynamic_obstacles is not None:
             self._dynamic_obstacles.cleanup()
 
         self._event_simulators.clear()
@@ -785,10 +778,13 @@ class HabitatWrapper(VisualBackendProtocol):
         self._set_seed(self.settings.get("seed", 324))
         self._recompute_navmesh()
         self.agent = self._sim.get_agent(self.settings["default_agent"])
-        dyn_cfg = DynamicObstaclesConfig.from_dict(
-            self.settings.get("dynamic_obstacles")
-        )
-        self._dynamic_obstacles = DynamicObstacleManager(dyn_cfg, self._sim, hsim)
+        if "dynamic_obstacles" in self.settings:
+            dyn_cfg = DynamicObstaclesConfig.from_dict(
+                self.settings["dynamic_obstacles"]
+            )
+            self._dynamic_obstacles = DynamicObstacleManager(dyn_cfg, self._sim, hsim)
+        else:
+            self._dynamic_obstacles = None
 
         logger.info(
             "Habitat simulator reconfigured with scene: %s",
@@ -797,6 +793,6 @@ class HabitatWrapper(VisualBackendProtocol):
 
     def close(self) -> None:
         """Close the simulator."""
-        if hasattr(self, "_dynamic_obstacles"):
+        if self._dynamic_obstacles is not None:
             self._dynamic_obstacles.cleanup()
         self._sim.close()
