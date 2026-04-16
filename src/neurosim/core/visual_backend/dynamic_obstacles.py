@@ -28,7 +28,21 @@ class DynamicObstacleTemplate:
 
 @dataclass(slots=True)
 class DynamicObstaclesConfig:
-    """Runtime configuration for dynamic obstacle spawning."""
+    """Runtime configuration for dynamic obstacle spawning.
+
+    ``dataset_config_file``: optional path to a Habitat scene-dataset config
+    (e.g. ``data/objects/ycb/ycb.scene_dataset_config.json``).  When set the
+    manager loads that dataset into the ``MetadataMediator`` before resolving
+    template handles, enabling real-world objects such as YCB bananas,
+    cracker boxes, soup cans, etc. in addition to the built-in Habitat
+    primitives (cube, sphere, capsule …).
+
+    Download YCB assets with:
+        python -m habitat_sim.utils.datasets_download --uids ycb --data-path data/
+
+    Then reference objects by their short YCB name, e.g. ``"011_banana"`` or
+    ``"003_cracker_box"`` – the manager resolves them via substring matching.
+    """
 
     enabled: bool = False
     spawn_interval_s: float = 2.0
@@ -40,6 +54,7 @@ class DynamicObstaclesConfig:
     relative_height_range_m: tuple[float, float] = (-0.5, 1.5)
     aim_noise_std_m: float = 0.15
     seed: int | None = None
+    dataset_config_file: str | None = None
     templates: list[DynamicObstacleTemplate] = field(default_factory=list)
 
     @classmethod
@@ -82,6 +97,7 @@ class DynamicObstaclesConfig:
             ),
             aim_noise_std_m=float(data.get("aim_noise_std_m", 0.15)),
             seed=data.get("seed"),
+            dataset_config_file=data.get("dataset_config_file"),
             templates=templates,
         )
 
@@ -98,6 +114,7 @@ class ActiveObstacle:
     spawn_position: np.ndarray
     velocity: np.ndarray
     gravity_mps2: float
+    collision_radius: float
 
 
 class DynamicObstacleManager:
@@ -123,6 +140,7 @@ class DynamicObstacleManager:
         self._resolved_templates: list[DynamicObstacleTemplate] = []
 
         if self.cfg.enabled:
+            self._load_dataset_config()
             self._prepare_templates()
             if not self._resolved_templates:
                 logger.warning(
@@ -147,11 +165,9 @@ class DynamicObstacleManager:
     def step(
         self,
         sim_time: float,
-        simsteps: int,
         drone_position: np.ndarray,
-        dt: float,
+        drone_quaternion: np.ndarray,
     ) -> None:
-        del simsteps, dt
         if not self.cfg.enabled:
             return
 
@@ -159,11 +175,23 @@ class DynamicObstacleManager:
             sim_time - self._last_spawn_time >= self.cfg.spawn_interval_s
             and len(self._active) < self.cfg.max_concurrent
         ):
-            self._spawn_one(sim_time, drone_position)
+            self._spawn_one(sim_time, drone_position, drone_quaternion)
             self._last_spawn_time = sim_time
 
         self._update_kinematic(sim_time)
         self._despawn_expired(sim_time)
+
+    def has_agent_collision(
+        self, agent_position: np.ndarray, agent_radius: float
+    ) -> bool:
+        """Check sphere-sphere collision between the agent and any active obstacle."""
+        agent_position = np.asarray(agent_position, dtype=np.float32)
+        for item in self._active.values():
+            obstacle_pos = np.asarray(item.obj.translation, dtype=np.float32)
+            dist = float(np.linalg.norm(agent_position - obstacle_pos))
+            if dist <= agent_radius + item.collision_radius:
+                return True
+        return False
 
     def cleanup(self) -> None:
         """Remove active obstacles and temp template registrations."""
@@ -180,25 +208,39 @@ class DynamicObstacleManager:
         self._registered_template_handles.clear()
         self._resolved_templates.clear()
 
-    def get_state(self) -> list[dict[str, Any]]:
-        """Return a lightweight snapshot of active obstacle states."""
-        state = []
-        for item in self._active.values():
-            state.append(
-                {
-                    "object_id": item.object_id,
-                    "motion_mode": item.motion_mode,
-                    "born_time": item.born_time,
-                    "ttl_s": item.ttl_s,
-                    "position": np.asarray(item.obj.translation, dtype=np.float32),
-                    "velocity": item.velocity.copy(),
-                }
-            )
-        return state
+    def _load_dataset_config(self) -> None:
+        """Load an external Habitat scene-dataset config into the MetadataMediator.
 
-    def has_drone_collision(self) -> bool:
-        """Placeholder collision API for future RL integration."""
-        return False
+        This makes objects from datasets like YCB (bananas, cracker boxes, cans …)
+        available to the object template manager so their handles can be resolved
+        by ``_prepare_templates``.
+
+        Set ``dataset_config_file`` in the dynamic-obstacles config block, e.g.::
+
+            dataset_config_file: "data/objects/ycb/ycb.scene_dataset_config.json"
+
+        Download YCB assets once with:
+            python -m habitat_sim.utils.datasets_download --uids ycb --data-path data/
+        """
+        if not self.cfg.dataset_config_file:
+            return
+        try:
+            self._sim.metadata_mediator.active_dataset = self.cfg.dataset_config_file
+            # active_dataset replaces the underlying C++ managers; refresh the
+            # Python references so _prepare_templates sees the new handles.
+            self._obj_attr_mgr = self._sim.get_object_template_manager()
+            self._rigid_obj_mgr = self._sim.get_rigid_object_manager()
+            logger.info(
+                "Loaded dynamic-obstacle dataset config: %s",
+                self.cfg.dataset_config_file,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to load dataset config '%s' for dynamic obstacles; "
+                "only built-in primitive handles will be available.",
+                self.cfg.dataset_config_file,
+                exc_info=True,
+            )
 
     def _prepare_templates(self) -> None:
         available_handles = []
@@ -300,7 +342,12 @@ class DynamicObstacleManager:
             )
             return None
 
-    def _spawn_one(self, sim_time: float, drone_position: np.ndarray) -> None:
+    def _spawn_one(
+        self,
+        sim_time: float,
+        drone_position: np.ndarray,
+        drone_quaternion: np.ndarray,
+    ) -> None:
         if not self._resolved_templates:
             return
 
@@ -315,7 +362,7 @@ class DynamicObstacleManager:
             )
             return
 
-        spawn_position = self._sample_spawn_position(drone_position)
+        spawn_position = self._sample_spawn_position(drone_position, drone_quaternion)
         target = np.asarray(drone_position, dtype=np.float32).copy()
         target += self._rng.normal(0.0, self.cfg.aim_noise_std_m, size=3).astype(
             np.float32
@@ -356,6 +403,13 @@ class DynamicObstacleManager:
 
         obj.translation = spawn_position.astype(np.float32)
 
+        # Compute collision radius from the object's AABB bounding sphere.
+        bb = obj.root_scene_node.cumulative_bb
+        half_extents = (
+            np.array(bb.max, dtype=np.float32) - np.array(bb.min, dtype=np.float32)
+        ) / 2.0
+        collision_radius = float(np.linalg.norm(half_extents))
+
         motion_mode = template.motion_mode
         if motion_mode == "dynamic_throw":
             obj.motion_type = self._hsim.physics.MotionType.DYNAMIC
@@ -383,6 +437,7 @@ class DynamicObstacleManager:
             spawn_position=spawn_position.astype(np.float32),
             velocity=linear_velocity.astype(np.float32),
             gravity_mps2=gravity,
+            collision_radius=collision_radius,
         )
 
     def _compute_ballistic_velocity(
@@ -413,9 +468,29 @@ class DynamicObstacleManager:
 
         return np.array([vx, vy, vz], dtype=np.float32)
 
-    def _sample_spawn_position(self, drone_position: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _yaw_from_quaternion(q: np.ndarray) -> float:
+        """Extract yaw (rotation about Y-up axis) from a Habitat quaternion.
+
+        Habitat uses Hamilton convention [w, x, y, z] with Y-up.
+        The agent forward direction is -Z in local frame, so the yaw in
+        the XZ plane is atan2(forward_x, -forward_z) after rotating -Z
+        by the quaternion.
+        """
+        w, x, y, z = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+        # Forward (-Z) rotated by quaternion, projected to XZ plane:
+        fwd_x = 2.0 * (x * z + w * y)
+        fwd_z = w * w - x * x - y * y + z * z  # note: this is -forward_z
+        return float(np.arctan2(fwd_x, -fwd_z))
+
+    def _sample_spawn_position(
+        self, drone_position: np.ndarray, drone_quaternion: np.ndarray
+    ) -> np.ndarray:
         drone_position = np.asarray(drone_position, dtype=np.float32)
-        azimuth = np.deg2rad(
+        drone_yaw = self._yaw_from_quaternion(drone_quaternion)
+
+        # Azimuth is sampled relative to the drone's facing direction
+        azimuth = drone_yaw + np.deg2rad(
             self._rng.uniform(
                 self.cfg.azimuth_range_deg[0], self.cfg.azimuth_range_deg[1]
             )
