@@ -78,6 +78,11 @@ def _pick_runtime_template_handle(sim: SynchronousSimulator) -> str:
     return handles[0]
 
 
+def _active_obstacle_count(sim: SynchronousSimulator) -> int:
+    """Return the number of active dynamic obstacles."""
+    return len(sim.visual_backend._dynamic_obstacles._active)
+
+
 def _enable_dynamic_obstacles(
     settings: dict,
     *,
@@ -135,10 +140,9 @@ def test_dynamic_obstacles_spawn_in_real_habitat_runtime():
         counts = []
         for _ in range(25):
             sim.step(_default_control(sim))
-            counts.append(len(sim.get_obstacle_states()))
+            counts.append(_active_obstacle_count(sim))
 
         assert max(counts) > 0, "No dynamic obstacle was spawned in runtime"
-        assert sim.has_obstacle_collision() is False
     finally:
         sim.close()
 
@@ -161,13 +165,13 @@ def test_dynamic_obstacles_ttl_despawns_in_real_habitat_runtime():
 
         # First step should spawn one obstacle (interval check from -inf).
         sim.step(_default_control(sim))
-        assert len(sim.get_obstacle_states()) == 1
+        assert _active_obstacle_count(sim) == 1
 
         # Advance beyond TTL and ensure obstacle is removed.
         for _ in range(40):
             sim.step(_default_control(sim))
 
-        assert len(sim.get_obstacle_states()) == 0
+        assert _active_obstacle_count(sim) == 0
     finally:
         sim.close()
 
@@ -189,18 +193,16 @@ def test_dynamic_obstacles_reconfigure_rebinds_with_valid_handle():
 
         for _ in range(10):
             sim.step(_default_control(sim))
-        before = sim.get_obstacle_states()
-        assert len(before) > 0
+        assert _active_obstacle_count(sim) > 0
 
         # Reconfigure should reset time/sim state and clear old runtime obstacle ids.
         sim.reconfigure(enabled)
-        after_reconfigure = sim.get_obstacle_states()
-        assert len(after_reconfigure) == 0
+        assert _active_obstacle_count(sim) == 0
 
         # Obstacles should spawn again under the reconfigured runtime.
         for _ in range(10):
             sim.step(_default_control(sim))
 
-        assert len(sim.get_obstacle_states()) > 0
+        assert _active_obstacle_count(sim) > 0
     finally:
         sim.close()

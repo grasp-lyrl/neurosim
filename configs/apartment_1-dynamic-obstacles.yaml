@@ -11,37 +11,26 @@ simulator:
       model: "rotorpy"
       sampling_rate: 50 # Hz
 
-  # Sensor sampling rates - how often sensors are rendered/sampled
-  # Event camera accumulates at this rate, other sensors capture at this rate
   sensor_rates:
     imu_1: 50 # Hz
-    event_camera_1: 1000 # Hz - high-frequency event accumulation
+    event_camera_1: 1000 # Hz
     color_camera_1: 20 # Hz
     depth_camera_1: 20 # Hz
-    # navmesh_1: 10 # Hz
 
-  # Visualization rates (optional) - how often to display sensor data
-  # Must be <= sampling_rate for each sensor
-  # If omitted, defaults to sampling_rate (display every sample)
   viz_rates:
     imu_1: 50 # Hz
-    event_camera_1: 20 # Hz - visualize every 5th accumulation
+    event_camera_1: 20 # Hz
     color_camera_1: 20 # Hz
     depth_camera_1: 20 # Hz
-    # navmesh_1: 10 # Hz
 
 # Visual Backend Settings
 visual_backend:
   gpu_id: 0
   scene: "data/scene_datasets/habitat-test-scenes/apartment_1.glb"
   scene_dataset_config_file: "default"
-  clear_color: [0.0, 0.0, 0.0, 1.0] # BLACK in RGBA (assuming mn.Color4.from_linear_rgb_int(0))
+  clear_color: [0.0, 0.0, 0.0, 1.0]
   default_agent: 0
 
-  # navmesh_settings:
-  # TODO: Move these to a navmesh handler settings section
-  # TODO: to be more maintainable. Also get the agent radius
-  # TODO: from the vehicle model.
   agent_height: 1.0
   agent_radius: 0.3
   agent_max_climb: 1.0
@@ -52,7 +41,38 @@ visual_backend:
 
   seed: 324
   physics_config_file: "data/default.physics_config.json"
-  enable_physics: true # Replace with false if `built_with_bullet` is False
+  enable_physics: true
+
+  dynamic_obstacles:
+    enabled: true
+    # YCB dataset required for banana and cracker_box.
+    # Download once with:
+    #   python -m habitat_sim.utils.datasets_download --uids ycb --data-path data/
+    dataset_config_file: "data/objects/ycb/ycb.scene_dataset_config.json"
+    spawn_interval_s: 0.5
+    max_concurrent: 100
+    throw_speed_range_mps: [4.0, 9.0]
+    angular_speed_range_radps: [0.0, 2.0]
+    radial_distance_range_m: [2.5, 5.0]
+    relative_height_range_m: [0.0, 1.5]
+    aim_noise_std_m: 0.15
+    templates:
+      - handle: "cube"
+        motion_mode: "dynamic_throw"
+        scale: [0.12, 0.12, 0.12]
+        mass: 0.25
+        ttl_s: 2.5
+      - handle: "uvSphereSolid"
+        motion_mode: "dynamic_throw"
+        scale: [0.10, 0.10, 0.10]
+        mass: 0.20
+        ttl_s    : 2.5
+      - handle: "011_banana"
+        motion_mode: "dynamic_throw"
+        ttl_s: 2.5
+      - handle: "003_cracker_box"
+        motion_mode: "dynamic_throw"
+        ttl_s: 2.5
 
   sensors:
     event_camera_1:
@@ -86,10 +106,6 @@ visual_backend:
       height: 480
       hfov: 90
       zfar: 10.0
-
-    # navmesh_1:
-    #   type: "navmesh"
-    #   meters_per_pixel: 0.1  # Higher resolution for better detail
 
 # Controller settings
 controller:
