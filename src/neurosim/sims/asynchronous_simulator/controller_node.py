@@ -8,25 +8,34 @@ This node handles:
 - Publishing control commands
 """
 
-import zmq
 import yaml
 import time
 import logging
-import asyncio
-import numpy as np
 from pathlib import Path
 from collections import defaultdict
 
-from neurosim.cortex.utils import ZMQNODE
+import cortex
+from cortex.core.node import Node
+from cortex.discovery.daemon import DEFAULT_DISCOVERY_ADDRESS
+from cortex.messages.standard import DictMessage, MultiArrayMessage
+
 from neurosim.core.visual_backend import HabitatWrapper
 from neurosim.core.control import create_controller
 from neurosim.core.trajectory import create_trajectory
 from neurosim.core.coord_trans import CoordinateTransform
+from neurosim.sims.asynchronous_simulator.cortex_io import (
+    CONTROL_TOPIC,
+    STATE_TOPIC,
+    SUBSCRIBE_DEFAULTS,
+    ensure_discovery_daemon,
+    sensor_topics_from_settings,
+    state_from_message,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class ControllerNode(ZMQNODE):
+class ControllerNode(Node):
     """
     Async Controller Node.
 
@@ -37,18 +46,18 @@ class ControllerNode(ZMQNODE):
     def __init__(
         self,
         settings_path: Path | str,
-        ipc_pub_addr: str = "ipc:///tmp/neurosim_ctrl_pub",
-        ipc_sub_addr: str = "ipc:///tmp/neurosim_sim_pub",
+        discovery_address: str = DEFAULT_DISCOVERY_ADDRESS,
     ):
         """
         Initialize the Controller Node.
 
         Args:
             settings_path: Path to the settings YAML file
-            ipc_pub_addr: ZMQ address for publishing control commands
-            ipc_sub_addr: ZMQ address for subscribing to state
+            discovery_address: Cortex discovery daemon address
         """
-        super().__init__()
+        ensure_discovery_daemon(discovery_address)
+        super().__init__("neurosim_controller", discovery_address=discovery_address)
+        self._cpu_clock_start_time = None
 
         self.settings_path = Path(settings_path)
         if not self.settings_path.exists():
@@ -62,10 +71,6 @@ class ControllerNode(ZMQNODE):
         sim_cfg = self.settings.get("simulator", {})
         self.control_rate = sim_cfg["control_rate"]
         coord_transform = sim_cfg.get("coord_transform", "rotorpy_to_hm3d")
-
-        # IPC addresses
-        self.ipc_pub_addr = ipc_pub_addr
-        self.ipc_sub_addr = ipc_sub_addr
 
         # State tracking
         self.state = None
@@ -86,7 +91,7 @@ class ControllerNode(ZMQNODE):
         # Initialize components
         self._init_controller()
         self._init_trajectory()
-        self._init_sockets()
+        self._init_cortex_io()
         self._init_executors()
 
         # Stats tracking
@@ -95,8 +100,7 @@ class ControllerNode(ZMQNODE):
         logger.info("═══════════════════════════════════════════════════════════")
         logger.info("✅ ControllerNode initialized successfully")
         logger.info(f"   Control rate: {self.control_rate} Hz")
-        logger.info(f"   Publishing to: {self.ipc_pub_addr}")
-        logger.info(f"   Subscribing to: {self.ipc_sub_addr}")
+        logger.info(f"   Discovery: {self.discovery_address}")
         logger.info("═══════════════════════════════════════════════════════════")
 
     def _init_controller(self) -> None:
@@ -115,82 +119,48 @@ class ControllerNode(ZMQNODE):
         self.trajectory = create_trajectory(**traj_kwargs)
         logger.info(f"Trajectory initialized: {self.trajectory.__class__.__name__}")
 
-    def _init_sockets(self) -> None:
-        """Initialize ZMQ sockets."""
-        # Publisher socket for control commands
-        self.socket_pub = self.create_socket(
-            zmq.PUB,
-            self.ipc_pub_addr,
-            setsockopt={
-                zmq.SNDHWM: 1000,
-                zmq.LINGER: 0,
-                zmq.IMMEDIATE: 1,
-            },
+    def _init_cortex_io(self) -> None:
+        """Initialize Cortex publishers and subscribers."""
+        self.control_pub = self.create_publisher(
+            CONTROL_TOPIC,
+            DictMessage,
+            queue_size=1000,
+        )
+        if not self.control_pub.is_registered:
+            raise RuntimeError(f"Failed to register Cortex topic: {CONTROL_TOPIC}")
+
+        self.create_subscriber(
+            STATE_TOPIC,
+            DictMessage,
+            callback=self.receive_state,
+            **SUBSCRIBE_DEFAULTS,
         )
 
-        # Subscriber socket for state
-        self.socket_sub_state = self.create_socket(
-            zmq.SUB,
-            self.ipc_sub_addr,
-            setsockopt={
-                zmq.SUBSCRIBE: b"state",
-            },
-        )
-
-        # Optional: subscribe to events for event-based control
-        self.socket_sub_events = self.create_socket(
-            zmq.SUB,
-            self.ipc_sub_addr,
-            setsockopt={
-                zmq.SUBSCRIBE: b"events",
-            },
-        )
+        for topic, _uuid in sensor_topics_from_settings(self.settings)["events"]:
+            self.create_subscriber(
+                topic,
+                MultiArrayMessage,
+                callback=self.receive_events,
+                **SUBSCRIBE_DEFAULTS,
+            )
 
     def _init_executors(self) -> None:
         """Initialize async executors."""
         # Control loop at control rate
-        self.create_constant_rate_executor(
-            self.compute_and_publish_control, self.control_rate
-        )
-
-        # State receiver
-        self.create_async_executor(self.receive_state)
-
-        # Events receiver (optional, for event-based control)
-        self.create_async_executor(self.receive_events)
+        self.create_timer(1.0 / self.control_rate, self.compute_and_publish_control)
 
         # Stats printer
-        self.create_constant_rate_executor(self.print_stats, 1)
+        self.create_timer(1.0, self.print_stats)
 
-    async def receive_state(self) -> None:
+    async def receive_state(self, msg: DictMessage, _header) -> None:
         """Receive state from simulator and update internal state."""
-        _, msg = await self.recv_dict(self.socket_sub_state, copy=False)
-
-        if msg is not None:
-            self.state = {
-                "x": np.array(msg["x"]),
-                "q": np.array(msg["q"]),
-                "v": np.array(msg["v"]),
-                "w": np.array(msg["w"]),
-            }
+        if msg.data is not None:
+            self.state = state_from_message(msg.data)
             self._stats["received_state"] += 1
 
-    async def receive_events(self) -> None:
-        """Receive events from simulator.
-
-        This serves as a proxy to demonstrate event-based control capabilities.
-        Events can be processed here for advanced control algorithms (e.g., event-based
-        visual servoing, direct event feedback, etc.), though currently unused.
-        """
-        topic, events_dict = await self.recv_dict_of_arrays(
-            self.socket_sub_events, copy=False
-        )
-
-        if events_dict is not None:
-            # Events received successfully - can be processed here for event-based control
-            # For example:
-            #   x, y, t, p = events_dict["x"], events_dict["y"], events_dict["t"], events_dict["p"]
-            #   ... process events for control ...
+    async def receive_events(self, msg: MultiArrayMessage, _header) -> None:
+        """Receive event packets (placeholder for event-driven control)."""
+        if msg.arrays is not None:
             self._stats["received_event_packets"] += 1
 
     async def compute_and_publish_control(self) -> None:
@@ -215,7 +185,7 @@ class ControllerNode(ZMQNODE):
             "timestamp": self.time,
         }
 
-        if self.send_dict(self.socket_pub, control_msg, topic="control", copy=False):
+        if self.control_pub.publish(DictMessage(data=control_msg)):
             self._stats["published_control"] += 1
 
     async def print_stats(self) -> None:
@@ -231,6 +201,17 @@ class ControllerNode(ZMQNODE):
         for key, value in sorted(self._stats.items()):
             logger.info(f"  {key}: {value / elapsed:.1f}/s")
         logger.info("─" * 50)
+
+    async def run(self) -> None:
+        """Run the Cortex controller node."""
+        self._cpu_clock_start_time = time.perf_counter()
+        await super().run()
+
+    async def close(self) -> None:
+        """Close Cortex resources and the controller visual backend."""
+        await super().close()
+        if hasattr(self, "_visual_backend"):
+            self._visual_backend.close()
 
 
 async def main():
@@ -250,23 +231,19 @@ async def main():
         help="Path to the settings YAML file.",
     )
     parser.add_argument(
-        "--ipc-pub-addr",
+        "--discovery-address",
         type=str,
-        default="ipc:///tmp/neurosim_ctrl_pub",
-        help="IPC address for publishing control.",
-    )
-    parser.add_argument(
-        "--ipc-sub-addr",
-        type=str,
-        default="ipc:///tmp/neurosim_sim_pub",
-        help="IPC address for subscribing to state.",
+        default=DEFAULT_DISCOVERY_ADDRESS,
+        help=(
+            "Cortex discovery daemon address. Start discovery first with "
+            "`cortex-discovery`."
+        ),
     )
     args = parser.parse_args()
 
     node = ControllerNode(
         settings_path=args.settings,
-        ipc_pub_addr=args.ipc_pub_addr,
-        ipc_sub_addr=args.ipc_sub_addr,
+        discovery_address=args.discovery_address,
     )
 
     try:
@@ -278,4 +255,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    cortex.run(main())
