@@ -29,9 +29,12 @@ from neurosim.core.utils import SimulationConfig, SensorConfig, EventBuffer
 from neurosim.sims.synchronous_simulator import SynchronousSimulator
 from neurosim.sims.asynchronous_simulator.cortex_io import (
     CONTROL_TOPIC,
+    SENSOR_TOPIC_TYPES,
     STATE_TOPIC,
     SUBSCRIBE_DEFAULTS,
     ensure_discovery_daemon,
+    message_type_for_sensor,
+    sensor_frame_id,
     sensor_topic,
 )
 
@@ -78,16 +81,9 @@ class SimulatorNode(Node):
             raise TypeError("settings must be a dict or a path to a YAML file.")
 
         # Initialize simulation configuration (includes sensor manager)
-        sim_cfg = self.settings.get("simulator", {})
         self.config = SimulationConfig(
-            world_rate=sim_cfg["world_rate"],
-            control_rate=sim_cfg["control_rate"],  # sends state at control rate
-            sim_time=sim_cfg["sim_time"],
-            coord_transform=sim_cfg.get("coord_transform", "rotorpy_to_hm3d"),
-            sensor_rates=sim_cfg.get("sensor_rates", {}),
-            viz_rates=sim_cfg.get("viz_rates", {}),  # Optional visualization rates
+            **self.settings.get("simulator", {}),
             visual_sensors=self.settings.get("visual_backend", {}).get("sensors", {}),
-            additional_sensors=sim_cfg.get("additional_sensors", {}),
         )
         self.sensor_manager = self.config.sensor_manager
 
@@ -118,6 +114,7 @@ class SimulatorNode(Node):
 
         # Initializes the visual backend and binds visual sensor executors
         self._init_visual_backend()
+        self._init_visual_sensors()
 
         # Initialize dynamics
         self._init_dynamics()
@@ -143,6 +140,8 @@ class SimulatorNode(Node):
         """Initialize the visual backend (Habitat or CARLA)."""
         self.visual_backend = create_visual_backend(self.settings["visual_backend"])
 
+    def _init_visual_sensors(self) -> None:
+        """Bind visual sensor executors using the synchronous simulator factory."""
         # Bind executors for visual sensors
         for uuid, sensor_cfg in self.config.visual_sensors.items():
             sensor_type = sensor_cfg.get("type")
@@ -155,7 +154,16 @@ class SimulatorNode(Node):
             }
 
             # Add type-specific parameters
-            if sensor_type == "event":
+            if sensor_type in {
+                "event",
+                "color",
+                "semantic",
+                "depth",
+                "optical_flow",
+                "corner",
+                "edge",
+                "grayscale",
+            }:
                 executor_kwargs["time_provider"] = lambda: self.time  # Lazy evaluation
 
             elif sensor_type == "navmesh":
@@ -205,21 +213,13 @@ class SimulatorNode(Node):
         self.sensor_publishers = {}
 
         for _, sensor in self.sensor_manager.sensors.items():
-            sensor_type = sensor.sensor_type
-            if sensor_type == "event":
-                topic = sensor_topic("events", sensor.uuid)
-                msg_type = MultiArrayMessage
-            elif sensor_type == "imu":
-                topic = sensor_topic("imu", sensor.uuid)
-                msg_type = DictMessage
-            elif sensor_type in {"color", "depth"}:
-                topic = sensor_topic(sensor_type, sensor.uuid)
-                msg_type = ArrayMessage
-            else:
+            msg_type = message_type_for_sensor(sensor.sensor_type)
+            topic_type = SENSOR_TOPIC_TYPES.get(sensor.sensor_type)
+            if msg_type is None or topic_type is None:
                 continue
 
             self.sensor_publishers[sensor.uuid] = self.create_publisher(
-                topic,
+                sensor_topic(topic_type, sensor.uuid),
                 msg_type,
                 queue_size=1000,
             )
@@ -249,27 +249,10 @@ class SimulatorNode(Node):
 
         # Create sensor publishing executors at viz rates
         for _, sensor in self.sensor_manager.sensors.items():
-            sensor_type = sensor.sensor_type
-
-            if sensor_type == "event":
+            if sensor.uuid in self.sensor_publishers:
                 self.create_timer(
                     1.0 / sensor.viz_rate,
-                    lambda s=sensor: self.publish_events(s),
-                )
-            elif sensor_type == "imu":
-                self.create_timer(
-                    1.0 / sensor.viz_rate,
-                    lambda s=sensor: self.publish_imu(s),
-                )
-            elif sensor_type == "color":
-                self.create_timer(
-                    1.0 / sensor.viz_rate,
-                    lambda s=sensor: self.publish_color(s),
-                )
-            elif sensor_type == "depth":
-                self.create_timer(
-                    1.0 / sensor.viz_rate,
-                    lambda s=sensor: self.publish_depth(s),
+                    lambda s=sensor: self.publish_sensor(s),
                 )
 
         # Stats printer
@@ -288,6 +271,9 @@ class SimulatorNode(Node):
             self.dynamics.state["x"], self.dynamics.state["q"]
         )
         self.visual_backend.update_agent_state(position, quaternion)
+        self.visual_backend.update_dynamic_obstacles(
+            sim_time=self.time, dt=self.config.t_step
+        )
 
         # Render sensors at their sampling rate (similar to synchronous simulator)
         self._render_sensors()
@@ -324,6 +310,28 @@ class SimulatorNode(Node):
             return measurement.numpy()
         return np.asarray(measurement)
 
+    def _sensor_frame_id(self, uuid: str) -> str:
+        return sensor_frame_id(uuid, self.time, self.simsteps)
+
+    def _corner_to_dict(self, uuid: str, measurement) -> dict:
+        """Serialize FeatureDetectionResult-style corner measurements."""
+        return {
+            "uuid": uuid,
+            "timestamp": self.time,
+            "simsteps": self.simsteps,
+            "keypoints": self._to_numpy(measurement.keypoints),
+            "scores": self._to_numpy(measurement.scores),
+            "descriptors": None
+            if measurement.descriptors is None
+            else self._to_numpy(measurement.descriptors),
+            "sizes": self._to_numpy(measurement.sizes),
+            "angles": self._to_numpy(measurement.angles),
+            "octaves": self._to_numpy(measurement.octaves),
+            "num_keypoints": int(measurement.num_keypoints),
+            "detector_name": measurement.detector_name,
+            "descriptor_name": measurement.descriptor_name,
+        }
+
     async def receive_control(self, msg: DictMessage, _header) -> None:
         """Receive control commands from controller."""
         data = msg.data
@@ -349,59 +357,60 @@ class SimulatorNode(Node):
         if self.state_pub.publish(DictMessage(data=state_msg)):
             self._stats["published_state"] += 1
 
+    async def publish_sensor(self, sensor: SensorConfig) -> None:
+        """Publish the latest measurement for any supported sensor type."""
+        uuid = sensor.uuid
+        sensor_type = sensor.sensor_type
+
+        if sensor_type == "event":
+            events_dict = self.event_buffers[uuid].get_and_clear()
+            if events_dict is None:
+                return
+            message = MultiArrayMessage(
+                arrays=events_dict,
+                frame_id=self._sensor_frame_id(uuid),
+            )
+        else:
+            if uuid not in self.measurements:
+                return
+            measurement = self.measurements[uuid]
+            if sensor_type == "imu":
+                message = DictMessage(
+                    data={
+                        "uuid": uuid,
+                        "accel": self._to_numpy(measurement["accel"]),
+                        "gyro": self._to_numpy(measurement["gyro"]),
+                        "timestamp": self.time,
+                        "simsteps": self.simsteps,
+                    }
+                )
+            elif sensor_type == "corner":
+                message = DictMessage(data=self._corner_to_dict(uuid, measurement))
+            else:
+                message = ArrayMessage(
+                    data=self._to_numpy(measurement),
+                    name=uuid,
+                    frame_id=self._sensor_frame_id(uuid),
+                )
+
+        if self.sensor_publishers[uuid].publish(message):
+            self._stats[f"published_{uuid}"] += 1
+
     async def publish_imu(self, sensor: SensorConfig) -> None:
         """Publish IMU sensor data from stored measurements."""
-        uuid = sensor.uuid
-        if uuid not in self.measurements:
-            return
-
-        imu_data = self.measurements[uuid]
-
-        imu_msg = {
-            "uuid": uuid,
-            "accel": imu_data["accel"].tolist(),
-            "gyro": imu_data["gyro"].tolist(),
-            "timestamp": self.time,
-        }
-
-        if self.sensor_publishers[uuid].publish(DictMessage(data=imu_msg)):
-            self._stats[f"published_{uuid}"] += 1
+        await self.publish_sensor(sensor)
 
     async def publish_color(self, sensor: SensorConfig) -> None:
         """Publish color camera data from stored measurements."""
-        uuid = sensor.uuid
-        if uuid not in self.measurements:
-            return
-
-        if self.sensor_publishers[uuid].publish(
-            ArrayMessage(data=self._to_numpy(self.measurements[uuid]), name=uuid)
-        ):
-            self._stats[f"published_{uuid}"] += 1
+        await self.publish_sensor(sensor)
 
     async def publish_depth(self, sensor: SensorConfig) -> None:
         """Publish depth camera data from stored measurements."""
-        uuid = sensor.uuid
-        if uuid not in self.measurements:
-            return
-
-        if self.sensor_publishers[uuid].publish(
-            ArrayMessage(data=self._to_numpy(self.measurements[uuid]), name=uuid)
-        ):
-            self._stats[f"published_{uuid}"] += 1
+        await self.publish_sensor(sensor)
 
     async def publish_events(self, sensor: SensorConfig) -> None:
         """Publish event camera data from pre-allocated buffer."""
-        uuid = sensor.uuid
-
-        # Get events and clear buffer atomically
-        events_dict = self.event_buffers[uuid].get_and_clear()
-        if events_dict is None:
-            return
-
-        if self.sensor_publishers[uuid].publish(
-            MultiArrayMessage(arrays=events_dict, frame_id=uuid)
-        ):
-            self._stats[f"published_{uuid}"] += 1
+        await self.publish_sensor(sensor)
 
     async def print_stats(self) -> None:
         """Print statistics."""

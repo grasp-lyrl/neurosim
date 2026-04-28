@@ -5,8 +5,6 @@ parity test). Heavy tests use a session-scoped Cortex discovery daemon and
 module-scoped real nodes; they skip when data assets are missing.
 """
 
-from __future__ import annotations
-
 import subprocess
 import time
 from pathlib import Path
@@ -15,7 +13,7 @@ import numpy as np
 import pytest
 import yaml
 
-from cortex.messages.standard import DictMessage
+from cortex.messages.standard import ArrayMessage, DictMessage, MultiArrayMessage
 from cortex.utils.loop import run
 
 from neurosim.rl.env import NeurosimRLEnv
@@ -28,6 +26,7 @@ from neurosim.sims.asynchronous_simulator.controller_node import ControllerNode
 from neurosim.sims.asynchronous_simulator.cortex_io import (
     CONTROL_TOPIC,
     STATE_TOPIC,
+    message_type_for_sensor,
     sensor_topic,
     sensor_topics_from_settings,
 )
@@ -123,6 +122,50 @@ def test_sensor_topics_from_apartment_settings(real_simulator_node):
     assert sensor_topic("events", "event_camera_1") == "events/event_camera_1"
 
 
+def test_sensor_topics_cover_all_sync_visual_sensor_types():
+    sensors = {
+        "event_1": {"type": "event"},
+        "color_1": {"type": "color"},
+        "semantic_1": {"type": "semantic"},
+        "depth_1": {"type": "depth"},
+        "navmesh_1": {"type": "navmesh"},
+        "flow_1": {"type": "optical_flow"},
+        "corner_1": {"type": "corner"},
+        "edge_1": {"type": "edge"},
+        "gray_1": {"type": "grayscale"},
+    }
+    settings = {
+        "visual_backend": {"sensors": sensors},
+        "simulator": {"additional_sensors": {"imu_1": {"type": "imu"}}},
+    }
+
+    topics = sensor_topics_from_settings(settings)
+    assert ("events/event_1", "event_1") in topics["events"]
+    assert ("color/color_1", "color_1") in topics["color"]
+    assert ("semantic/semantic_1", "semantic_1") in topics["semantic"]
+    assert ("depth/depth_1", "depth_1") in topics["depth"]
+    assert ("navmesh/navmesh_1", "navmesh_1") in topics["navmesh"]
+    assert ("optical_flow/flow_1", "flow_1") in topics["optical_flow"]
+    assert ("corner/corner_1", "corner_1") in topics["corner"]
+    assert ("edge/edge_1", "edge_1") in topics["edge"]
+    assert ("grayscale/gray_1", "gray_1") in topics["grayscale"]
+    assert ("imu/imu_1", "imu_1") in topics["imu"]
+
+    assert message_type_for_sensor("event") is MultiArrayMessage
+    assert message_type_for_sensor("imu") is DictMessage
+    assert message_type_for_sensor("corner") is DictMessage
+    for sensor_type in (
+        "color",
+        "semantic",
+        "depth",
+        "navmesh",
+        "optical_flow",
+        "edge",
+        "grayscale",
+    ):
+        assert message_type_for_sensor(sensor_type) is ArrayMessage
+
+
 def test_simulator_node_real_step_advances_time_and_finite_state(real_simulator_node):
     node = real_simulator_node
     t0, s0 = node.time, node.simsteps
@@ -131,6 +174,23 @@ def test_simulator_node_real_step_advances_time_and_finite_state(real_simulator_
     assert node.simsteps == s0 + 1
     for key in ("x", "q", "v", "w"):
         assert np.isfinite(node.dynamics.state[key]).all()
+
+
+def test_simulator_step_updates_dynamic_obstacles(real_simulator_node, monkeypatch):
+    node = real_simulator_node
+    calls = []
+
+    def update_dynamic_obstacles(sim_time, dt):
+        calls.append((sim_time, dt))
+
+    monkeypatch.setattr(
+        node.visual_backend, "update_dynamic_obstacles", update_dynamic_obstacles
+    )
+    run(node.simulate_step())
+
+    assert calls
+    assert calls[-1][0] == node.time
+    assert calls[-1][1] == node.config.t_step
 
 
 def test_simulator_publish_state_uses_real_dynamics(real_simulator_node):

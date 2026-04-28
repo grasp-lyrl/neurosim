@@ -9,6 +9,7 @@ from cortex.discovery.protocol import (
     DiscoveryRequest,
     DiscoveryStatus,
 )
+from cortex.messages.standard import ArrayMessage, DictMessage, MultiArrayMessage
 
 STATE_TOPIC = "state"
 CONTROL_TOPIC = "control"
@@ -17,7 +18,13 @@ SENSOR_TOPIC_TYPES = {
     "event": "events",
     "imu": "imu",
     "color": "color",
+    "semantic": "semantic",
     "depth": "depth",
+    "navmesh": "navmesh",
+    "optical_flow": "optical_flow",
+    "corner": "corner",
+    "edge": "edge",
+    "grayscale": "grayscale",
 }
 
 SUBSCRIBE_DEFAULTS = {
@@ -27,8 +34,44 @@ SUBSCRIBE_DEFAULTS = {
 }
 
 
+def message_type_for_sensor(sensor_type: str):
+    """Return the Cortex message type used for a supported sensor stream."""
+    if sensor_type == "event":
+        return MultiArrayMessage
+    if sensor_type in {"imu", "corner"}:
+        return DictMessage
+    if sensor_type in {
+        "color",
+        "semantic",
+        "depth",
+        "navmesh",
+        "optical_flow",
+        "edge",
+        "grayscale",
+    }:
+        return ArrayMessage
+    return None
+
+
 def sensor_topic(topic_type: str, uuid: str) -> str:
     return f"{topic_type}/{uuid}"
+
+
+def sensor_frame_id(uuid: str, timestamp: float, simsteps: int) -> str:
+    """Pack small sensor metadata into standard Cortex message metadata."""
+    return f"{uuid}|{timestamp:.9f}|{simsteps}"
+
+
+def sensor_metadata_from_frame_id(frame_id: str) -> tuple[str | None, float, int]:
+    """Unpack metadata from :func:`sensor_frame_id` with best-effort fallback."""
+    parts = frame_id.split("|")
+    if len(parts) != 3:
+        return None, 0.0, 0
+    uuid, timestamp, simsteps = parts
+    try:
+        return uuid, float(timestamp), int(simsteps)
+    except ValueError:
+        return uuid, 0.0, 0
 
 
 def ensure_discovery_daemon(discovery_address: str = DEFAULT_DISCOVERY_ADDRESS) -> None:
@@ -67,7 +110,7 @@ def sensor_topics_from_settings(settings: dict) -> dict[str, list[tuple[str, str
     visual_sensors = settings.get("visual_backend", {}).get("sensors", {})
     additional_sensors = settings.get("simulator", {}).get("additional_sensors", {})
     topics: dict[str, list[tuple[str, str]]] = {
-        k: [] for k in ("events", "imu", "color", "depth")
+        topic_type: [] for topic_type in SENSOR_TOPIC_TYPES.values()
     }
     for uuid, sensor_cfg in {**visual_sensors, **additional_sensors}.items():
         topic_type = SENSOR_TOPIC_TYPES.get(sensor_cfg.get("type"))

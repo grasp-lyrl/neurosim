@@ -19,11 +19,14 @@ from cortex.core.node import Node
 from cortex.discovery.daemon import DEFAULT_DISCOVERY_ADDRESS
 from cortex.messages.standard import ArrayMessage, DictMessage, MultiArrayMessage
 
-from neurosim.core.utils import EventVisualizationState
+from neurosim.core.utils import RerunVisualizer, SimulationConfig
+from neurosim.core.visual_backend.corner_detector import FeatureDetectionResult
 from neurosim.sims.asynchronous_simulator.cortex_io import (
     STATE_TOPIC,
     SUBSCRIBE_DEFAULTS,
     ensure_discovery_daemon,
+    message_type_for_sensor,
+    sensor_metadata_from_frame_id,
     sensor_topics_from_settings,
     state_from_message,
 )
@@ -69,9 +72,11 @@ class VisualizerNode(Node):
         self._cpu_clock_start_time = None
 
         self.settings = self._load_settings(settings)
-        self.visual_sensor_settings = self.settings.get("visual_backend", {}).get(
-            "sensors", {}
+        self.config = SimulationConfig(
+            **self.settings.get("simulator", {}),
+            visual_sensors=self.settings.get("visual_backend", {}).get("sensors", {}),
         )
+        self.sensor_manager = self.config.sensor_manager
 
         # Initialize Rerun with appropriate mode
         rr.init("neurosim_async")
@@ -94,6 +99,8 @@ class VisualizerNode(Node):
 
         rr.set_time("sim_time", timestamp=0)
         self.keep_latest = keep_latest
+        self.visualizer = RerunVisualizer(self.config, use_gpu=False, device="cpu")
+        self.visualizer.enabled = True
 
         # Initialize Cortex subscriptions and timers
         self._init_cortex_io()
@@ -101,10 +108,6 @@ class VisualizerNode(Node):
 
         # Stats tracking
         self._stats = defaultdict(int)
-
-        # Event visualization states - one per event sensor
-        # Using CPU-based buffers (use_gpu=False) since we're working with numpy arrays
-        self.event_viz_states: dict[str, EventVisualizationState] = {}
 
         logger.info("═══════════════════════════════════════════════════════════")
         logger.info("✅ VisualizerNode initialized successfully")
@@ -133,17 +136,13 @@ class VisualizerNode(Node):
             **SUBSCRIBE_DEFAULTS,
         )
         topics = sensor_topics_from_settings(self.settings)
-        for kind, msg_type, factory in (
-            ("events", MultiArrayMessage, self._event_callback),
-            ("imu", DictMessage, self._imu_callback),
-            ("color", ArrayMessage, self._color_callback),
-            ("depth", ArrayMessage, self._depth_callback),
-        ):
-            for topic, uuid in topics[kind]:
+        for topic_pairs in topics.values():
+            for topic, uuid in topic_pairs:
+                sensor_type = self.sensor_manager.sensors[uuid].sensor_type
                 self.create_subscriber(
                     topic,
-                    msg_type,
-                    callback=factory(topic, uuid),
+                    message_type_for_sensor(sensor_type),
+                    callback=self._sensor_callback(sensor_type, topic, uuid),
                     **SUBSCRIBE_DEFAULTS,
                 )
 
@@ -152,29 +151,36 @@ class VisualizerNode(Node):
         # Stats printer
         self.create_timer(1.0, self.print_stats)
 
-    def _event_callback(self, topic: str, uuid: str):
-        async def callback(msg: MultiArrayMessage, header) -> None:
-            await self.receive_events(topic, uuid, msg, header)
+    def _sensor_callback(self, sensor_type: str, topic: str, uuid: str):
+        handlers = {
+            "event": self.receive_events,
+            "imu": self.receive_imu,
+            "color": self.receive_array,
+            "semantic": self.receive_array,
+            "depth": self.receive_array,
+            "navmesh": self.receive_array,
+            "optical_flow": self.receive_array,
+            "corner": self.receive_corner,
+            "edge": self.receive_array,
+            "grayscale": self.receive_array,
+        }
+        handler = handlers[sensor_type]
+
+        async def callback(msg, header) -> None:
+            await handler(topic, uuid, msg, header)
 
         return callback
 
-    def _imu_callback(self, topic: str, uuid: str):
-        async def callback(msg: DictMessage, header) -> None:
-            await self.receive_imu(topic, uuid, msg, header)
+    def _timestamp_from_frame_id(self, frame_id: str) -> float:
+        _uuid, timestamp, _simsteps = sensor_metadata_from_frame_id(frame_id)
+        return 0.0 if self.keep_latest else timestamp
 
-        return callback
-
-    def _color_callback(self, topic: str, uuid: str):
-        async def callback(msg: ArrayMessage, header) -> None:
-            await self.receive_color(topic, uuid, msg, header)
-
-        return callback
-
-    def _depth_callback(self, topic: str, uuid: str):
-        async def callback(msg: ArrayMessage, header) -> None:
-            await self.receive_depth(topic, uuid, msg, header)
-
-        return callback
+    def _log_measurement(self, uuid: str, measurement, timestamp: float) -> None:
+        self.visualizer.log_measurements(
+            {uuid: measurement},
+            0.0 if self.keep_latest else timestamp,
+            0,  # Messages are already published at viz rate; force logging.
+        )
 
     async def receive_state(self, msg: DictMessage, _header) -> None:
         """Receive and visualize state."""
@@ -184,23 +190,8 @@ class VisualizerNode(Node):
             self._stats["received_state"] += 1
 
             # Visualize with Rerun
-            if not self.keep_latest:
-                rr.set_time("sim_time", timestamp=timestamp)
-            rr.log(
-                "navigation/pose",
-                rr.Transform3D(
-                    translation=state["x"],
-                    rotation=rr.Quaternion(xyzw=state["q"]),
-                    relation=rr.TransformRelation.ParentFromChild,
-                ),
-                rr.TransformAxes3D(
-                    1.0
-                ),  # Separate archetype for axis visualization in 0.28.1+
-            )
-            rr.log(
-                "navigation/trajectory",
-                rr.Points3D(positions=state["x"][None, :]),
-            )
+            rr.set_time("sim_time", timestamp=0.0 if self.keep_latest else timestamp)
+            self.visualizer.log_state(state)
 
     async def receive_events(
         self, topic: str, uuid: str, msg: MultiArrayMessage, _header
@@ -209,32 +200,11 @@ class VisualizerNode(Node):
         events_dict = msg.arrays
         if events_dict is not None:
             self._stats["received_" + topic] += 1
-
-            # Initialize visualization state for this sensor if needed
-            if topic not in self.event_viz_states:
-                sensor_cfg = self.visual_sensor_settings.get(uuid, {})
-                self.event_viz_states[topic] = EventVisualizationState(
-                    uuid=topic,
-                    width=sensor_cfg.get("width", 640),
-                    height=sensor_cfg.get("height", 480),
-                    device="cpu",
-                    use_gpu=False,  # Use CPU since we're receiving numpy arrays
-                )
-
-            # Convert dict format to tuple format expected by accumulate
-            # accumulate expects: (x, y, t, p)
-            # We receive: {'x': array, 'y': array, 'p': array}
-            # Accumulate events in the visualization state
-            self.event_viz_states[topic].accumulate(
-                (events_dict["x"], events_dict["y"], None, events_dict["p"])
+            self._log_measurement(
+                uuid,
+                (events_dict["x"], events_dict["y"], None, events_dict["p"]),
+                self._timestamp_from_frame_id(msg.frame_id),
             )
-
-            # Visualize: get the accumulated image and reset
-            rr.log(
-                topic,
-                rr.Image(self.event_viz_states[topic].get_image()),
-            )
-            self.event_viz_states[topic].reset()
 
     async def receive_imu(
         self, topic: str, _uuid: str, msg: DictMessage, _header
@@ -244,29 +214,45 @@ class VisualizerNode(Node):
             uuid = msg.data["uuid"]
             self._stats["received_" + topic] += 1
             timestamp = msg.data.get("timestamp", 0)
+            self._log_measurement(
+                uuid,
+                {"accel": msg.data["accel"], "gyro": msg.data["gyro"]},
+                timestamp,
+            )
 
-            if not self.keep_latest:
-                rr.set_time("sim_time", timestamp=timestamp)
-            rr.log(f"sensors/{uuid}/accel", rr.Scalars(msg.data["accel"]))
-            rr.log(f"sensors/{uuid}/gyro", rr.Scalars(msg.data["gyro"]))
-
-    async def receive_color(
-        self, topic: str, _uuid: str, msg: ArrayMessage, _header
+    async def receive_array(
+        self, topic: str, uuid: str, msg: ArrayMessage, _header
     ) -> None:
-        """Receive and visualize color images."""
-        color_img = msg.data
-        if color_img is not None:
+        """Receive and visualize array-backed sensors via RerunVisualizer."""
+        if msg.data is not None:
             self._stats["received_" + topic] += 1
-            rr.log(topic, rr.Image(color_img))
+            self._log_measurement(
+                uuid,
+                msg.data,
+                self._timestamp_from_frame_id(msg.frame_id),
+            )
 
-    async def receive_depth(
-        self, topic: str, _uuid: str, msg: ArrayMessage, _header
+    async def receive_corner(
+        self, topic: str, uuid: str, msg: DictMessage, _header
     ) -> None:
-        """Receive and visualize depth images."""
-        depth_img = msg.data
-        if depth_img is not None:
-            self._stats["received_" + topic] += 1
-            rr.log(topic, rr.DepthImage(depth_img))
+        """Receive and visualize corner detector results."""
+        if msg.data is None:
+            return
+
+        self._stats["received_" + topic] += 1
+        data = msg.data
+        measurement = FeatureDetectionResult(
+            keypoints=data["keypoints"],
+            scores=data["scores"],
+            descriptors=data["descriptors"],
+            sizes=data["sizes"],
+            angles=data["angles"],
+            octaves=data["octaves"],
+            num_keypoints=data["num_keypoints"],
+            detector_name=data["detector_name"],
+            descriptor_name=data["descriptor_name"],
+        )
+        self._log_measurement(uuid, measurement, data.get("timestamp", 0.0))
 
     async def print_stats(self) -> None:
         """Print statistics."""
