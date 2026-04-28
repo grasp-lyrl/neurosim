@@ -1,0 +1,61 @@
+# Runtime container for Neurosim + packaged UE5 build.
+#
+# This Dockerfile expects the UE project to have been packaged on a dev machine
+# and the resulting Linux archive to be available under build-context path
+# ./ue_packaged/ (the directory that contains MyProject.sh and Engine/).
+#
+# Build:
+#   docker build -f docker/Dockerfile.unreal -t neurosim-ue:dev .
+#
+# Run (requires nvidia-container-toolkit):
+#   docker run --rm -it --gpus all --ipc=host \
+#       -v /tmp:/tmp \
+#       neurosim-ue:dev
+#
+# ipc=host is required for AF_UNIX SCM_RIGHTS fd passing between the Neurosim
+# Python process and the UE child process.
+
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility
+ENV NVIDIA_VISIBLE_DEVICES=all
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-venv \
+        libvulkan1 vulkan-tools mesa-vulkan-drivers \
+        libx11-6 libxcb1 libxkbcommon0 libxcursor1 libxrandr2 libxi6 \
+        libxext6 libxinerama1 libxxf86vm1 \
+        libasound2 libnss3 libgl1 libglu1-mesa \
+        libfontconfig1 libfreetype6 \
+        libsm6 libice6 \
+        ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# NVIDIA Vulkan ICD discovery. The nvidia-container-runtime injects the driver
+# libs at run time; we install the json loader here so Vulkan can find them.
+COPY docker/10_nvidia.json /usr/share/vulkan/icd.d/10_nvidia.json
+
+# Python environment for Neurosim.
+WORKDIR /opt/neurosim
+COPY requirements.txt /opt/neurosim/requirements.txt
+RUN python3 -m pip install --no-cache-dir --upgrade pip \
+    && python3 -m pip install --no-cache-dir -r requirements.txt
+
+# Packaged UE build. The COPY will fail loudly if the build hasn't been staged
+# under ./ue_packaged/ — that's intentional: there's no good default here.
+COPY ue_packaged/ /opt/ue5/
+RUN chmod +x /opt/ue5/*.sh 2>/dev/null || true
+
+# Neurosim source tree.
+COPY src/ /opt/neurosim/src/
+COPY setup.py /opt/neurosim/setup.py
+COPY README.md /opt/neurosim/README.md
+ENV PYTHONPATH=/opt/neurosim/src
+
+# Sanity check on vulkan at build time.
+RUN vulkaninfo --summary || echo "WARN: vulkaninfo failed during build (expected on non-GPU builder)"
+
+ENV NEUROSIM_UE_EXE=/opt/ue5/NeurosimSim.sh
+
+CMD ["python3", "-c", "from neurosim.core.visual_backend.factory import create_visual_backend; print('neurosim-ue container ready')"]

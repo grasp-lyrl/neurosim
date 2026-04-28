@@ -1,0 +1,26 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "0.1.0",
+    "FriendlyName": "Neurosim Bridge",
+    "Description": "Control plane + GPU-resident render-target exporter for the Neurosim Python simulator.",
+    "Category": "Simulation",
+    "CreatedBy": "Neurosim",
+    "CreatedByURL": "",
+    "DocsURL": "",
+    "MarketplaceURL": "",
+    "SupportURL": "",
+    "EnabledByDefault": true,
+    "CanContainContent": true,
+    "IsBetaVersion": true,
+    "IsExperimentalVersion": false,
+    "Installed": false,
+    "Modules": [
+        {
+            "Name": "NeurosimBridge",
+            "Type": "Runtime",
+            "LoadingPhase": "PostEngineInit",
+            "PlatformAllowList": [ "Linux" ]
+        }
+    ]
+}

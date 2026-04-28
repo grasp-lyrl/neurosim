@@ -36,5 +36,11 @@ def create_visual_backend(settings: dict[str, Any]) -> VisualBackendProtocol:
         logger.info("Creating Habitat visual backend (indoor scenes)")
         return HabitatWrapper(settings)
 
+    elif backend_type == "unreal":
+        from .unreal_wrapper import UnrealWrapper
+
+        logger.info("Creating Unreal Engine 5 visual backend")
+        return UnrealWrapper(settings)
+
     else:
         raise ValueError(f"Unknown visual backend type: '{backend_type}'. ")
