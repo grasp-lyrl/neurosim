@@ -7,21 +7,34 @@ This node handles:
 - Visualizing data with Rerun
 """
 
-import zmq
+import yaml
 import time
 import logging
-import asyncio
-import numpy as np
 import rerun as rr
+from pathlib import Path
 from collections import defaultdict
 
-from neurosim.cortex.utils import ZMQNODE
-from neurosim.core.utils import EventVisualizationState
+import cortex
+from cortex.core.node import Node
+from cortex.discovery.daemon import DEFAULT_DISCOVERY_ADDRESS
+from cortex.messages.standard import ArrayMessage, DictMessage, MultiArrayMessage
+
+from neurosim.core.utils import RerunVisualizer, SimulationConfig
+from neurosim.core.visual_backend.corner_detector import FeatureDetectionResult
+from neurosim.sims.asynchronous_simulator.cortex_io import (
+    STATE_TOPIC,
+    SUBSCRIBE_DEFAULTS,
+    ensure_discovery_daemon,
+    message_type_for_sensor,
+    sensor_metadata_from_frame_id,
+    sensor_topics_from_settings,
+    state_from_message,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class VisualizerNode(ZMQNODE):
+class VisualizerNode(Node):
     """
     Async Visualizer Node.
 
@@ -30,7 +43,8 @@ class VisualizerNode(ZMQNODE):
 
     def __init__(
         self,
-        ipc_sub_addr: str = "ipc:///tmp/neurosim_sim_pub",
+        settings: Path | str | dict,
+        discovery_address: str = DEFAULT_DISCOVERY_ADDRESS,
         memory_limit: str = "10%",
         keep_latest: bool = True,
         mode: str = "spawn",
@@ -44,7 +58,8 @@ class VisualizerNode(ZMQNODE):
           see what data is being sent to the training process. Very cool.
 
         Args:
-            ipc_sub_addr: ZMQ address for subscribing to simulator data
+            settings: Settings dictionary or path used to derive explicit sensor topics
+            discovery_address: Cortex discovery daemon address
             memory_limit: Memory limit for Rerun process (e.g., "10%", "2GB")
             keep_latest: If True, always keep latest timestamp in Rerun. Saves memory. Disregards sim time.
                          Helpful for simulations which keep on loading different scenes and resetting time.
@@ -52,10 +67,16 @@ class VisualizerNode(ZMQNODE):
                   - "spawn": Spawn local viewer (default)
                   - "serve": Start gRPC server for remote viewing (run on server)
         """
-        super().__init__()
+        ensure_discovery_daemon(discovery_address)
+        super().__init__("neurosim_visualizer", discovery_address=discovery_address)
+        self._cpu_clock_start_time = None
 
-        # IPC address
-        self.ipc_sub_addr = ipc_sub_addr
+        self.settings = self._load_settings(settings)
+        self.config = SimulationConfig(
+            **self.settings.get("simulator", {}),
+            visual_sensors=self.settings.get("visual_backend", {}).get("sensors", {}),
+        )
+        self.sensor_manager = self.config.sensor_manager
 
         # Initialize Rerun with appropriate mode
         rr.init("neurosim_async")
@@ -78,168 +99,160 @@ class VisualizerNode(ZMQNODE):
 
         rr.set_time("sim_time", timestamp=0)
         self.keep_latest = keep_latest
+        self.visualizer = RerunVisualizer(self.config, use_gpu=False, device="cpu")
+        self.visualizer.enabled = True
 
-        # Initialize sockets and executors
-        self._init_sockets()
+        # Initialize Cortex subscriptions and timers
+        self._init_cortex_io()
         self._init_executors()
 
         # Stats tracking
         self._stats = defaultdict(int)
 
-        # Event visualization states - one per event sensor
-        # Using CPU-based buffers (use_gpu=False) since we're working with numpy arrays
-        self.event_viz_states: dict[str, EventVisualizationState] = {}
-
         logger.info("═══════════════════════════════════════════════════════════")
         logger.info("✅ VisualizerNode initialized successfully")
-        logger.info(f"   Subscribing to: {self.ipc_sub_addr}")
+        logger.info(f"   Discovery: {self.discovery_address}")
         logger.info("═══════════════════════════════════════════════════════════")
 
-    def _init_sockets(self) -> None:
-        """Initialize ZMQ sockets."""
-        # Subscribe to state
-        self.socket_sub_state = self.create_socket(
-            zmq.SUB,
-            self.ipc_sub_addr,
-            setsockopt={zmq.SUBSCRIBE: b"state"},
-        )
+    @staticmethod
+    def _load_settings(settings: Path | str | dict) -> dict:
+        """Load settings from a dict or YAML file path."""
+        if isinstance(settings, dict):
+            return settings
 
-        # Subscribe to events (using prefix to catch all event sensors)
-        self.socket_sub_events = self.create_socket(
-            zmq.SUB,
-            self.ipc_sub_addr,
-            setsockopt={zmq.SUBSCRIBE: b"events"},
-        )
+        settings_path = Path(settings)
+        if not settings_path.exists():
+            raise FileNotFoundError(f"Settings file not found: {settings_path}")
 
-        # Subscribe to IMU
-        self.socket_sub_imu = self.create_socket(
-            zmq.SUB,
-            self.ipc_sub_addr,
-            setsockopt={zmq.SUBSCRIBE: b"imu"},
-        )
+        with open(settings_path, "r") as f:
+            return yaml.safe_load(f)
 
-        # Subscribe to color cameras (using prefix subscription)
-        self.socket_sub_color = self.create_socket(
-            zmq.SUB,
-            self.ipc_sub_addr,
-            setsockopt={zmq.SUBSCRIBE: b"color"},
+    def _init_cortex_io(self) -> None:
+        """Initialize explicit Cortex subscriptions."""
+        self.create_subscriber(
+            STATE_TOPIC,
+            DictMessage,
+            callback=self.receive_state,
+            **SUBSCRIBE_DEFAULTS,
         )
-
-        # Subscribe to depth cameras
-        self.socket_sub_depth = self.create_socket(
-            zmq.SUB,
-            self.ipc_sub_addr,
-            setsockopt={zmq.SUBSCRIBE: b"depth"},
-        )
+        topics = sensor_topics_from_settings(self.settings)
+        for topic_pairs in topics.values():
+            for topic, uuid in topic_pairs:
+                sensor_type = self.sensor_manager.sensors[uuid].sensor_type
+                self.create_subscriber(
+                    topic,
+                    message_type_for_sensor(sensor_type),
+                    callback=self._sensor_callback(sensor_type, topic, uuid),
+                    **SUBSCRIBE_DEFAULTS,
+                )
 
     def _init_executors(self) -> None:
         """Initialize async executors."""
-        # Receivers for each data type
-        self.create_async_executor(self.receive_state)
-        self.create_async_executor(self.receive_events)
-        self.create_async_executor(self.receive_imu)
-        self.create_async_executor(self.receive_color)
-        self.create_async_executor(self.receive_depth)
-
         # Stats printer
-        self.create_constant_rate_executor(self.print_stats, 1)
+        self.create_timer(1.0, self.print_stats)
 
-    async def receive_state(self) -> None:
+    def _sensor_callback(self, sensor_type: str, topic: str, uuid: str):
+        handlers = {
+            "event": self.receive_events,
+            "imu": self.receive_imu,
+            "color": self.receive_array,
+            "semantic": self.receive_array,
+            "depth": self.receive_array,
+            "navmesh": self.receive_array,
+            "optical_flow": self.receive_array,
+            "corner": self.receive_corner,
+            "edge": self.receive_array,
+            "grayscale": self.receive_array,
+        }
+        handler = handlers[sensor_type]
+
+        async def callback(msg, header) -> None:
+            await handler(topic, uuid, msg, header)
+
+        return callback
+
+    def _timestamp_from_frame_id(self, frame_id: str) -> float:
+        _uuid, timestamp, _simsteps = sensor_metadata_from_frame_id(frame_id)
+        return 0.0 if self.keep_latest else timestamp
+
+    def _log_measurement(self, uuid: str, measurement, timestamp: float) -> None:
+        self.visualizer.log_measurements(
+            {uuid: measurement},
+            0.0 if self.keep_latest else timestamp,
+            0,  # Messages are already published at viz rate; force logging.
+        )
+
+    async def receive_state(self, msg: DictMessage, _header) -> None:
         """Receive and visualize state."""
-        _, msg = await self.recv_dict(self.socket_sub_state, copy=False)
-
-        if msg is not None:
-            state = {
-                "x": np.array(msg["x"]),
-                "q": np.array(msg["q"]),
-                "v": np.array(msg["v"]),
-                "w": np.array(msg["w"]),
-            }
-            timestamp = msg.get("timestamp", 0)
+        if msg.data is not None:
+            state = state_from_message(msg.data)
+            timestamp = msg.data.get("timestamp", 0)
             self._stats["received_state"] += 1
 
             # Visualize with Rerun
-            if not self.keep_latest:
-                rr.set_time("sim_time", timestamp=timestamp)
-            rr.log(
-                "navigation/pose",
-                rr.Transform3D(
-                    translation=state["x"],
-                    rotation=rr.Quaternion(xyzw=state["q"]),
-                    relation=rr.TransformRelation.ParentFromChild,
-                ),
-                rr.TransformAxes3D(
-                    1.0
-                ),  # Separate archetype for axis visualization in 0.28.1+
-            )
-            rr.log(
-                "navigation/trajectory",
-                rr.Points3D(positions=state["x"][None, :]),
-            )
+            rr.set_time("sim_time", timestamp=0.0 if self.keep_latest else timestamp)
+            self.visualizer.log_state(state)
 
-    async def receive_events(self) -> None:
-        """Receive and visualize events as dict of arrays."""
-        topic, events_dict = await self.recv_dict_of_arrays(
-            self.socket_sub_events, copy=False
-        )
-
-        if events_dict is not None and topic is not None:
+    async def receive_events(
+        self, topic: str, uuid: str, msg: MultiArrayMessage, _header
+    ) -> None:
+        """Receive and visualize events as a Cortex multi-array message."""
+        events_dict = msg.arrays
+        if events_dict is not None:
             self._stats["received_" + topic] += 1
-
-            # Initialize visualization state for this sensor if needed
-            if topic not in self.event_viz_states:
-                self.event_viz_states[topic] = EventVisualizationState(
-                    uuid=topic,
-                    width=640,
-                    height=480,
-                    device="cpu",
-                    use_gpu=False,  # Use CPU since we're receiving numpy arrays
-                )
-
-            # Convert dict format to tuple format expected by accumulate
-            # accumulate expects: (x, y, t, p)
-            # We receive: {'x': array, 'y': array, 'p': array}
-            # Accumulate events in the visualization state
-            self.event_viz_states[topic].accumulate(
-                (events_dict["x"], events_dict["y"], None, events_dict["p"])
+            self._log_measurement(
+                uuid,
+                (events_dict["x"], events_dict["y"], None, events_dict["p"]),
+                self._timestamp_from_frame_id(msg.frame_id),
             )
 
-            # Visualize: get the accumulated image and reset
-            rr.log(
-                topic,
-                rr.Image(self.event_viz_states[topic].get_image()),
-            )
-            self.event_viz_states[topic].reset()
-
-    async def receive_imu(self) -> None:
+    async def receive_imu(
+        self, topic: str, _uuid: str, msg: DictMessage, _header
+    ) -> None:
         """Receive and visualize IMU data."""
-        topic, msg = await self.recv_dict(self.socket_sub_imu, copy=False)
-
-        if msg is not None:
-            uuid = msg["uuid"]
+        if msg.data is not None:
+            uuid = msg.data["uuid"]
             self._stats["received_" + topic] += 1
-            timestamp = msg.get("timestamp", 0)
+            timestamp = msg.data.get("timestamp", 0)
+            self._log_measurement(
+                uuid,
+                {"accel": msg.data["accel"], "gyro": msg.data["gyro"]},
+                timestamp,
+            )
 
-            if not self.keep_latest:
-                rr.set_time("sim_time", timestamp=timestamp)
-            rr.log(f"sensors/{uuid}/accel", rr.Scalars(msg["accel"]))
-            rr.log(f"sensors/{uuid}/gyro", rr.Scalars(msg["gyro"]))
-
-    async def receive_color(self) -> None:
-        """Receive and visualize color images."""
-        topic, color_img = await self.recv_array(self.socket_sub_color, copy=False)
-
-        if color_img is not None and topic is not None:
+    async def receive_array(
+        self, topic: str, uuid: str, msg: ArrayMessage, _header
+    ) -> None:
+        """Receive and visualize array-backed sensors via RerunVisualizer."""
+        if msg.data is not None:
             self._stats["received_" + topic] += 1
-            rr.log(topic, rr.Image(color_img))
+            self._log_measurement(
+                uuid,
+                msg.data,
+                self._timestamp_from_frame_id(msg.frame_id),
+            )
 
-    async def receive_depth(self) -> None:
-        """Receive and visualize depth images."""
-        topic, depth_img = await self.recv_array(self.socket_sub_depth, copy=False)
+    async def receive_corner(
+        self, topic: str, uuid: str, msg: DictMessage, _header
+    ) -> None:
+        """Receive and visualize corner detector results."""
+        if msg.data is None:
+            return
 
-        if depth_img is not None and topic is not None:
-            self._stats["received_" + topic] += 1
-            rr.log(topic, rr.DepthImage(depth_img))
+        self._stats["received_" + topic] += 1
+        data = msg.data
+        measurement = FeatureDetectionResult(
+            keypoints=data["keypoints"],
+            scores=data["scores"],
+            descriptors=data["descriptors"],
+            sizes=data["sizes"],
+            angles=data["angles"],
+            octaves=data["octaves"],
+            num_keypoints=data["num_keypoints"],
+            detector_name=data["detector_name"],
+            descriptor_name=data["descriptor_name"],
+        )
+        self._log_measurement(uuid, measurement, data.get("timestamp", 0.0))
 
     async def print_stats(self) -> None:
         """Print statistics."""
@@ -253,6 +266,11 @@ class VisualizerNode(ZMQNODE):
             logger.info(f"  {key}: {value / elapsed:.1f}/s")
         logger.info("─" * 50)
 
+    async def run(self) -> None:
+        """Run the Cortex visualizer node."""
+        self._cpu_clock_start_time = time.perf_counter()
+        await super().run()
+
 
 async def main():
     """Main entry point for visualizer node."""
@@ -265,10 +283,19 @@ async def main():
 
     parser = argparse.ArgumentParser(description="Run the async visualizer node.")
     parser.add_argument(
-        "--ipc-sub-addr",
+        "--settings",
+        type=Path,
+        required=True,
+        help="Path to the settings YAML file used to derive sensor topics.",
+    )
+    parser.add_argument(
+        "--discovery-address",
         type=str,
-        default="ipc:///tmp/neurosim_sim_pub",
-        help="IPC address for subscribing to simulator.",
+        default=DEFAULT_DISCOVERY_ADDRESS,
+        help=(
+            "Cortex discovery daemon address. Start discovery first with "
+            "`cortex-discovery`."
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -286,7 +313,8 @@ async def main():
     args = parser.parse_args()
 
     node = VisualizerNode(
-        ipc_sub_addr=args.ipc_sub_addr,
+        settings=args.settings,
+        discovery_address=args.discovery_address,
         mode=args.mode,
         memory_limit=args.memory_limit,
     )
@@ -300,4 +328,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    cortex.run(main())

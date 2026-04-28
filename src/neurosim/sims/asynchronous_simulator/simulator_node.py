@@ -9,27 +9,39 @@ This node handles:
 - Receiving control commands
 """
 
-import zmq
 import yaml
 import time
 import logging
-import asyncio
 import numpy as np
 from pathlib import Path
 from collections import defaultdict
 
-from neurosim.cortex.utils import ZMQNODE
+import cortex
+from cortex.core.node import Node
+from cortex.discovery.daemon import DEFAULT_DISCOVERY_ADDRESS
+from cortex.messages.standard import ArrayMessage, DictMessage, MultiArrayMessage
+
 from neurosim.core.visual_backend import create_visual_backend
 from neurosim.core.dynamics import create_dynamics
 from neurosim.core.imu_sim import create_imu_sensor
 from neurosim.core.coord_trans import CoordinateTransform
 from neurosim.core.utils import SimulationConfig, SensorConfig, EventBuffer
 from neurosim.sims.synchronous_simulator import SynchronousSimulator
+from neurosim.sims.asynchronous_simulator.cortex_io import (
+    CONTROL_TOPIC,
+    SENSOR_TOPIC_TYPES,
+    STATE_TOPIC,
+    SUBSCRIBE_DEFAULTS,
+    ensure_discovery_daemon,
+    message_type_for_sensor,
+    sensor_frame_id,
+    sensor_topic,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class SimulatorNode(ZMQNODE):
+class SimulatorNode(Node):
     """
     Async Simulator Node.
 
@@ -42,18 +54,18 @@ class SimulatorNode(ZMQNODE):
     def __init__(
         self,
         settings: Path | str | dict,
-        ipc_pub_addr: str = "ipc:///tmp/neurosim_sim_pub",
-        ipc_sub_addr: str = "ipc:///tmp/neurosim_ctrl_pub",
+        discovery_address: str = DEFAULT_DISCOVERY_ADDRESS,
     ):
         """
         Initialize the Simulator Node.
 
         Args:
-            settings_path: Path to the settings YAML file
-            ipc_pub_addr: ZMQ address for publishing state/sensor data
-            ipc_sub_addr: ZMQ address for subscribing to control commands
+            settings: Settings dictionary or path to the settings YAML file
+            discovery_address: Cortex discovery daemon address
         """
-        super().__init__()
+        ensure_discovery_daemon(discovery_address)
+        super().__init__("neurosim_simulator", discovery_address=discovery_address)
+        self._cpu_clock_start_time = None
 
         if isinstance(settings, (str, Path)):
             settings_path = Path(settings)
@@ -69,24 +81,11 @@ class SimulatorNode(ZMQNODE):
             raise TypeError("settings must be a dict or a path to a YAML file.")
 
         # Initialize simulation configuration (includes sensor manager)
-        sim_cfg = self.settings.get("simulator", {})
         self.config = SimulationConfig(
-            world_rate=sim_cfg["world_rate"],
-            control_rate=sim_cfg["control_rate"],  # sends state at control rate
-            sim_time=sim_cfg["sim_time"],
-            coord_transform=sim_cfg.get("coord_transform", "rotorpy_to_hm3d"),
-            sensor_rates=sim_cfg.get("sensor_rates", {}),
-            viz_rates=sim_cfg.get("viz_rates", {}),  # Optional visualization rates
+            **self.settings.get("simulator", {}),
             visual_sensors=self.settings.get("visual_backend", {}).get("sensors", {}),
-            additional_sensors=sim_cfg.get("additional_sensors", {}),
         )
         self.sensor_manager = self.config.sensor_manager
-
-        #################
-        # IPC addresses #
-        #################
-        self.ipc_pub_addr = ipc_pub_addr
-        self.ipc_sub_addr = ipc_sub_addr
 
         ####################
         # Simulation state #
@@ -115,6 +114,7 @@ class SimulatorNode(ZMQNODE):
 
         # Initializes the visual backend and binds visual sensor executors
         self._init_visual_backend()
+        self._init_visual_sensors()
 
         # Initialize dynamics
         self._init_dynamics()
@@ -123,7 +123,7 @@ class SimulatorNode(ZMQNODE):
         self._init_additional_sensors()
 
         # Initialize components
-        self._init_sockets()
+        self._init_cortex_io()
         self._init_executors()
 
         # Stats tracking per sensor UUID
@@ -133,14 +133,15 @@ class SimulatorNode(ZMQNODE):
         logger.info("✅ SimulatorNode initialized successfully")
         logger.info(f"   World rate: {self.config.world_rate} Hz")
         logger.info(f"   Control rate: {self.config.control_rate} Hz")
-        logger.info(f"   Publishing to: {self.ipc_pub_addr}")
-        logger.info(f"   Subscribing to: {self.ipc_sub_addr}")
+        logger.info(f"   Discovery: {self.discovery_address}")
         logger.info("═══════════════════════════════════════════════════════════")
 
     def _init_visual_backend(self) -> None:
         """Initialize the visual backend (Habitat or CARLA)."""
         self.visual_backend = create_visual_backend(self.settings["visual_backend"])
 
+    def _init_visual_sensors(self) -> None:
+        """Bind visual sensor executors using the synchronous simulator factory."""
         # Bind executors for visual sensors
         for uuid, sensor_cfg in self.config.visual_sensors.items():
             sensor_type = sensor_cfg.get("type")
@@ -153,7 +154,16 @@ class SimulatorNode(ZMQNODE):
             }
 
             # Add type-specific parameters
-            if sensor_type == "event":
+            if sensor_type in {
+                "event",
+                "color",
+                "semantic",
+                "depth",
+                "optical_flow",
+                "corner",
+                "edge",
+                "grayscale",
+            }:
                 executor_kwargs["time_provider"] = lambda: self.time  # Lazy evaluation
 
             elif sensor_type == "navmesh":
@@ -195,66 +205,58 @@ class SimulatorNode(ZMQNODE):
 
             self.config.sensor_manager.add_executor(uuid, executor)
 
-    def _init_sockets(self) -> None:
-        """Initialize ZMQ sockets."""
-        # Publisher socket for state and sensor data
-        self.socket_pub = self.create_socket(
-            zmq.PUB,
-            self.ipc_pub_addr,
-            setsockopt={
-                zmq.SNDHWM: 1000,
-                zmq.LINGER: 0,
-                zmq.IMMEDIATE: 1,
-            },
+    def _init_cortex_io(self) -> None:
+        """Initialize Cortex publishers and subscribers."""
+        self.state_pub = self.create_publisher(
+            STATE_TOPIC, DictMessage, queue_size=1000
         )
+        self.sensor_publishers = {}
 
-        # Subscriber socket for control commands
-        self.socket_control = self.create_socket(
-            zmq.SUB,
-            self.ipc_sub_addr,
-            setsockopt={
-                zmq.SUBSCRIBE: b"control",
-            },
+        for _, sensor in self.sensor_manager.sensors.items():
+            msg_type = message_type_for_sensor(sensor.sensor_type)
+            topic_type = SENSOR_TOPIC_TYPES.get(sensor.sensor_type)
+            if msg_type is None or topic_type is None:
+                continue
+
+            self.sensor_publishers[sensor.uuid] = self.create_publisher(
+                sensor_topic(topic_type, sensor.uuid),
+                msg_type,
+                queue_size=1000,
+            )
+
+        publishers = [self.state_pub, *self.sensor_publishers.values()]
+        unregistered = [pub.topic_name for pub in publishers if not pub.is_registered]
+        if unregistered:
+            raise RuntimeError(
+                "Failed to register Cortex simulator topic(s): "
+                + ", ".join(unregistered)
+            )
+
+        self.create_subscriber(
+            CONTROL_TOPIC,
+            DictMessage,
+            callback=self.receive_control,
+            **SUBSCRIBE_DEFAULTS,
         )
 
     def _init_executors(self) -> None:
         """Initialize async executors."""
         # Main simulation loop at world rate
-        self.create_constant_rate_executor(self.simulate_step, self.config.world_rate)
+        self.create_timer(1.0 / self.config.world_rate, self.simulate_step)
 
         # Publish state at control rate
-        self.create_constant_rate_executor(self.publish_state, self.config.control_rate)
+        self.create_timer(1.0 / self.config.control_rate, self.publish_state)
 
         # Create sensor publishing executors at viz rates
         for _, sensor in self.sensor_manager.sensors.items():
-            sensor_type = sensor.sensor_type
-
-            if sensor_type == "event":
-                self.create_constant_rate_executor(
-                    lambda s=sensor: self.publish_events(s),
-                    sensor.viz_rate,
+            if sensor.uuid in self.sensor_publishers:
+                self.create_timer(
+                    1.0 / sensor.viz_rate,
+                    lambda s=sensor: self.publish_sensor(s),
                 )
-            elif sensor_type == "imu":
-                self.create_constant_rate_executor(
-                    lambda s=sensor: self.publish_imu(s),
-                    sensor.viz_rate,
-                )
-            elif sensor_type == "color":
-                self.create_constant_rate_executor(
-                    lambda s=sensor: self.publish_color(s),
-                    sensor.viz_rate,
-                )
-            elif sensor_type == "depth":
-                self.create_constant_rate_executor(
-                    lambda s=sensor: self.publish_depth(s),
-                    sensor.viz_rate,
-                )
-
-        # Subscriber for control
-        self.create_async_executor(self.receive_control)
 
         # Stats printer
-        self.create_constant_rate_executor(self.print_stats, 1)
+        self.create_timer(1.0, self.print_stats)
 
     async def simulate_step(self) -> None:
         """Execute one simulation step: step dynamics AND render sensors at sampling rate."""
@@ -269,6 +271,9 @@ class SimulatorNode(ZMQNODE):
             self.dynamics.state["x"], self.dynamics.state["q"]
         )
         self.visual_backend.update_agent_state(position, quaternion)
+        self.visual_backend.update_dynamic_obstacles(
+            sim_time=self.time, dt=self.config.t_step
+        )
 
         # Render sensors at their sampling rate (similar to synchronous simulator)
         self._render_sensors()
@@ -294,12 +299,44 @@ class SimulatorNode(ZMQNODE):
                     self.measurements[uuid] = sensor_cfg.executor()
                     self._stats[f"rendered_{uuid}"] += 1
 
-    async def receive_control(self) -> None:
-        """Receive control commands from controller."""
-        _, msg = await self.recv_dict(self.socket_control, copy=False)
+    @staticmethod
+    def _to_numpy(measurement) -> np.ndarray:
+        """Convert sensor measurements to numpy before Cortex serialization."""
+        if hasattr(measurement, "detach"):
+            measurement = measurement.detach()
+        if hasattr(measurement, "cpu"):
+            measurement = measurement.cpu()
+        if hasattr(measurement, "numpy"):
+            return measurement.numpy()
+        return np.asarray(measurement)
 
-        if msg and "cmd_motor_speeds" in msg:
-            self.control = {"cmd_motor_speeds": np.array(msg["cmd_motor_speeds"])}
+    def _sensor_frame_id(self, uuid: str) -> str:
+        return sensor_frame_id(uuid, self.time, self.simsteps)
+
+    def _corner_to_dict(self, uuid: str, measurement) -> dict:
+        """Serialize FeatureDetectionResult-style corner measurements."""
+        return {
+            "uuid": uuid,
+            "timestamp": self.time,
+            "simsteps": self.simsteps,
+            "keypoints": self._to_numpy(measurement.keypoints),
+            "scores": self._to_numpy(measurement.scores),
+            "descriptors": None
+            if measurement.descriptors is None
+            else self._to_numpy(measurement.descriptors),
+            "sizes": self._to_numpy(measurement.sizes),
+            "angles": self._to_numpy(measurement.angles),
+            "octaves": self._to_numpy(measurement.octaves),
+            "num_keypoints": int(measurement.num_keypoints),
+            "detector_name": measurement.detector_name,
+            "descriptor_name": measurement.descriptor_name,
+        }
+
+    async def receive_control(self, msg: DictMessage, _header) -> None:
+        """Receive control commands from controller."""
+        data = msg.data
+        if data and "cmd_motor_speeds" in data:
+            self.control = {"cmd_motor_speeds": np.array(data["cmd_motor_speeds"])}
             self._stats["received_controls"] += 1
 
     async def publish_state(self) -> None:
@@ -317,66 +354,63 @@ class SimulatorNode(ZMQNODE):
             "simsteps": self.simsteps,
         }
 
-        if self.send_dict(self.socket_pub, state_msg, topic="state", copy=False):
+        if self.state_pub.publish(DictMessage(data=state_msg)):
             self._stats["published_state"] += 1
+
+    async def publish_sensor(self, sensor: SensorConfig) -> None:
+        """Publish the latest measurement for any supported sensor type."""
+        uuid = sensor.uuid
+        sensor_type = sensor.sensor_type
+
+        if sensor_type == "event":
+            events_dict = self.event_buffers[uuid].get_and_clear()
+            if events_dict is None:
+                return
+            message = MultiArrayMessage(
+                arrays=events_dict,
+                frame_id=self._sensor_frame_id(uuid),
+            )
+        else:
+            if uuid not in self.measurements:
+                return
+            measurement = self.measurements[uuid]
+            if sensor_type == "imu":
+                message = DictMessage(
+                    data={
+                        "uuid": uuid,
+                        "accel": self._to_numpy(measurement["accel"]),
+                        "gyro": self._to_numpy(measurement["gyro"]),
+                        "timestamp": self.time,
+                        "simsteps": self.simsteps,
+                    }
+                )
+            elif sensor_type == "corner":
+                message = DictMessage(data=self._corner_to_dict(uuid, measurement))
+            else:
+                message = ArrayMessage(
+                    data=self._to_numpy(measurement),
+                    name=uuid,
+                    frame_id=self._sensor_frame_id(uuid),
+                )
+
+        if self.sensor_publishers[uuid].publish(message):
+            self._stats[f"published_{uuid}"] += 1
 
     async def publish_imu(self, sensor: SensorConfig) -> None:
         """Publish IMU sensor data from stored measurements."""
-        uuid = sensor.uuid
-        if uuid not in self.measurements:
-            return
-
-        imu_data = self.measurements[uuid]
-
-        imu_msg = {
-            "uuid": uuid,
-            "accel": imu_data["accel"].tolist(),
-            "gyro": imu_data["gyro"].tolist(),
-            "timestamp": self.time,
-        }
-
-        if self.send_dict(self.socket_pub, imu_msg, topic=f"imu/{uuid}", copy=False):
-            self._stats[f"published_{uuid}"] += 1
+        await self.publish_sensor(sensor)
 
     async def publish_color(self, sensor: SensorConfig) -> None:
         """Publish color camera data from stored measurements."""
-        uuid = sensor.uuid
-        if uuid not in self.measurements:
-            return
-
-        if self.send_array(
-            self.socket_pub,
-            self.measurements[uuid].cpu().numpy(),
-            topic=f"color/{uuid}",
-        ):
-            self._stats[f"published_{uuid}"] += 1
+        await self.publish_sensor(sensor)
 
     async def publish_depth(self, sensor: SensorConfig) -> None:
         """Publish depth camera data from stored measurements."""
-        uuid = sensor.uuid
-        if uuid not in self.measurements:
-            return
-
-        if self.send_array(
-            self.socket_pub,
-            self.measurements[uuid].cpu().numpy(),
-            topic=f"depth/{uuid}",
-        ):
-            self._stats[f"published_{uuid}"] += 1
+        await self.publish_sensor(sensor)
 
     async def publish_events(self, sensor: SensorConfig) -> None:
         """Publish event camera data from pre-allocated buffer."""
-        uuid = sensor.uuid
-
-        # Get events and clear buffer atomically
-        events_dict = self.event_buffers[uuid].get_and_clear()
-        if events_dict is None:
-            return
-
-        if self.send_dict_of_arrays(
-            self.socket_pub, events_dict, topic=f"events/{uuid}", copy=True
-        ):
-            self._stats[f"published_{uuid}"] += 1
+        await self.publish_sensor(sensor)
 
     async def print_stats(self) -> None:
         """Print statistics."""
@@ -396,6 +430,17 @@ class SimulatorNode(ZMQNODE):
                 logger.info(f"  {key}: {value / elapsed:.1f}/s")
         logger.info("─" * 50)
 
+    async def run(self) -> None:
+        """Run the Cortex simulator node."""
+        self._cpu_clock_start_time = time.perf_counter()
+        await super().run()
+
+    async def close(self) -> None:
+        """Close Cortex resources and simulator backends."""
+        await super().close()
+        if hasattr(self, "visual_backend"):
+            self.visual_backend.close()
+
 
 async def main():
     """Main entry point for simulator node."""
@@ -414,23 +459,19 @@ async def main():
         help="Path to the settings YAML file.",
     )
     parser.add_argument(
-        "--ipc-pub-addr",
+        "--discovery-address",
         type=str,
-        default="ipc:///tmp/neurosim_sim_pub",
-        help="IPC address for publishing.",
-    )
-    parser.add_argument(
-        "--ipc-sub-addr",
-        type=str,
-        default="ipc:///tmp/neurosim_ctrl_pub",
-        help="IPC address for subscribing to control.",
+        default=DEFAULT_DISCOVERY_ADDRESS,
+        help=(
+            "Cortex discovery daemon address. Start discovery first with "
+            "`cortex-discovery`."
+        ),
     )
     args = parser.parse_args()
 
     node = SimulatorNode(
         settings=args.settings,
-        ipc_pub_addr=args.ipc_pub_addr,
-        ipc_sub_addr=args.ipc_sub_addr,
+        discovery_address=args.discovery_address,
     )
 
     try:
@@ -442,4 +483,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    cortex.run(main())
