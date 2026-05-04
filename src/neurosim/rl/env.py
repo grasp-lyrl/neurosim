@@ -16,11 +16,6 @@ scene/sensor sampling for
 
 Dynamics randomization is optional under ``dynamics.domain_randomization``
 (``enabled``, ``resample_every``, ``scales``); omit the block to disable.
-
-Habitat-oriented defaults live in ``_VISUAL_BACKEND_DEFAULTS`` only;
-everything tunable for a run is in YAML. The RL policy supplies control via
-``sim.step()`` — no ``controller`` or ``trajectory`` entries in settings
-(same idea as omitting trajectory for ``sim.run()``-style workflows).
 """
 
 import copy
@@ -28,6 +23,7 @@ import time
 import logging
 import numpy as np
 from typing import Any
+from scipy.spatial.transform import Rotation
 from pathlib import Path
 
 import gymnasium as gym
@@ -35,7 +31,9 @@ from gymnasium import spaces
 
 from neurosim.rl.safety import HabitatSafetyChecker
 from neurosim.rl.tasks import EventRepresentationManager, RLTask, build_task
+from neurosim.rl.tasks.trajectory_dodge import TrajectoryDodgeTask
 from neurosim.rl.vehicles import build_vehicle
+from neurosim.rl.vehicles.velocity_correction import VelocityCorrectionVehicle
 from neurosim.sims.synchronous_simulator import RandomizedSimulator
 
 # ---------------------------------------------------------------------------
@@ -92,7 +90,7 @@ class NeurosimRLEnv(gym.Env):
 
         # Episode specification ------------------------------------------------------------
         self.episode_seconds = env_config["episode_seconds"]
-        self.init_speed_range = env_config["init_speed_range"]
+        self.init_speed_range = env_config.get("init_speed_range", [0.0, 0.0])
 
         # Event representation -------------------------------------------------------------
         self.event_downsample_factor = env_config.get("event_downsample_factor", 1)
@@ -125,6 +123,7 @@ class NeurosimRLEnv(gym.Env):
         self._task: RLTask = build_task(
             task_name=env_config["task"]["name"], **env_config["task"]["config"]
         )
+        self._is_trajectory_dodge = isinstance(self._task, TrajectoryDodgeTask)
 
         self.crash_penalty = float(self._task.crash_penalty)
         self._prev_action: np.ndarray | None = None
@@ -134,6 +133,15 @@ class NeurosimRLEnv(gym.Env):
 
         self._safety: HabitatSafetyChecker | None = None
         self.event_sensor_uuid = ""
+
+        # Trajectory-dodge specific --------------------------------------------------------
+        self._trajectory = None
+        self._se3_controller = None
+        self._traj_config = env_config.get("trajectory", {})
+        if self._is_trajectory_dodge:
+            from neurosim.core.control import create_controller
+            ctrl_cfg = env_config.get("controller", {"model": "rotorpy_se3", "vehicle": "crazyflie"})
+            self._se3_controller = create_controller(**ctrl_cfg)
 
         # Domain randomization -------------------------------------------------------------
         dr_cfg = env_config.get("simulator", {}).get("domain_randomization", {})
@@ -223,11 +231,21 @@ class NeurosimRLEnv(gym.Env):
         vb_settings["scene"] = scene_path
         vb_settings["sensors"] = sensors
 
+        # Forward dynamic obstacles config to visual backend
+        if "dynamic_obstacles" in env_config:
+            vb_settings["dynamic_obstacles"] = env_config["dynamic_obstacles"]
+
         dynamics_settings: dict[str, Any] = {
             "model": dyn_cfg["model"],
             "vehicle": dyn_cfg["vehicle"],
-            "control_abstraction": dyn_cfg["control_abstraction"],
         }
+        if "control_abstraction" in dyn_cfg:
+            ca = dyn_cfg["control_abstraction"]
+            # velocity_correction is an RL-level abstraction; the SE3
+            # controller produces cmd_motor_speeds for the dynamics.
+            if ca == "velocity_correction":
+                ca = "cmd_motor_speeds"
+            dynamics_settings["control_abstraction"] = ca
 
         return {
             "simulator": sim_settings,
@@ -289,8 +307,9 @@ class NeurosimRLEnv(gym.Env):
             shape=(2, self.event_height, self.event_width),
             dtype=np.float32,
         )
+        state_dim = 9 if self._is_trajectory_dodge else 13
         state_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(13,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32
         )
 
         if self.obs_mode == "events":
@@ -308,7 +327,7 @@ class NeurosimRLEnv(gym.Env):
         return self._rsim.sim
 
     @staticmethod
-    def _state_vector(state: dict[str, np.ndarray]) -> np.ndarray:
+    def _state_vector_hover(state: dict[str, np.ndarray]) -> np.ndarray:
         return np.concatenate(
             [
                 np.asarray(state["x"], dtype=np.float32),
@@ -319,12 +338,41 @@ class NeurosimRLEnv(gym.Env):
             axis=0,
         )
 
+    @staticmethod
+    def _state_vector_traj_dodge(
+        state: dict[str, np.ndarray],
+        desired_position: np.ndarray,
+        desired_velocity: np.ndarray,
+    ) -> np.ndarray:
+        """Build 9-D state vector with all quantities in **body frame**."""
+        q = np.asarray(state["q"], dtype=np.float64)  # [x, y, z, w]
+        R_wb = Rotation.from_quat(q).as_matrix()
+        R_bw = R_wb.T # world2body
+
+        v = np.asarray(state["v"], dtype=np.float64)
+        x = np.asarray(state["x"], dtype=np.float64)
+        v_des = np.asarray(desired_velocity, dtype=np.float64)
+        tracking_err = np.asarray(desired_position, dtype=np.float64) - x
+
+        v_body = (R_bw @ v).astype(np.float32)
+        v_des_body = (R_bw @ v_des).astype(np.float32)
+        tracking_err_body = (R_bw @ tracking_err).astype(np.float32)
+        return np.concatenate([v_body, v_des_body, tracking_err_body], axis=0)
+
     def _compose_observation(
         self,
         event_rep: np.ndarray | None,
         state: dict[str, np.ndarray],
     ) -> np.ndarray | dict[str, np.ndarray]:
-        state_vec = self._state_vector(state)
+        if self._is_trajectory_dodge:
+            state_vec = self._state_vector_traj_dodge(
+                state,
+                self._task._desired_position,
+                self._task._desired_velocity,
+            )
+        else:
+            state_vec = self._state_vector_hover(state)
+
         if self.obs_mode == "state":
             return state_vec
 
@@ -451,17 +499,17 @@ class NeurosimRLEnv(gym.Env):
 
         # Sample a valid navigable starting position in Habitat space,
         # then convert to dynamics frame.
-        hab_start = self._safety.sample_habitat_start()
-        x0 = (self.sim.coord_trans.pos_transform_inv @ hab_start).astype(np.float32)
-
-        # Random initial velocity (random direction, speed from range).
-        speed = rng.uniform(*self.init_speed_range)
-        direction = rng.standard_normal(3).astype(np.float32)
-        direction /= np.linalg.norm(direction) + 1e-8
-        v0 = (direction * speed).astype(np.float32)
-
-        q0 = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
-        w0 = np.zeros(3, dtype=np.float32)
+        if self._is_trajectory_dodge:
+            x0, v0, q0, w0 = self._reset_trajectory_dodge(rng)
+        else:
+            hab_start = self._safety.sample_habitat_start()
+            x0 = (self.sim.coord_trans.pos_transform_inv @ hab_start).astype(np.float32)
+            speed = rng.uniform(*self.init_speed_range)
+            direction = rng.standard_normal(3).astype(np.float32)
+            direction /= np.linalg.norm(direction) + 1e-8
+            v0 = (direction * speed).astype(np.float32)
+            q0 = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+            w0 = np.zeros(3, dtype=np.float32)
 
         self.sim.time = 0.0
         self.sim.simsteps = 0
@@ -475,6 +523,10 @@ class NeurosimRLEnv(gym.Env):
         self._event_manager.reset_episode()
         event_rep = self._event_manager.observation()
 
+        # For trajectory_dodge, set initial desired state on the task
+        if self._is_trajectory_dodge:
+            self._task.set_desired_state(x0, v0)
+
         observation = self._compose_observation(event_rep, self.sim.dynamics.state)
         info: dict[str, Any] = {
             "time": self.sim.time,
@@ -483,8 +535,49 @@ class NeurosimRLEnv(gym.Env):
         self._episode_count += 1
         return observation, info
 
+    def _reset_trajectory_dodge(self, rng: np.random.Generator):
+        """Sample a new MinSnap trajectory and return start state."""
+        from neurosim.core.trajectory.habitat_trajs import generate_interesting_traj
+
+        pathfinder = self.sim.visual_backend._sim.pathfinder
+
+        for attempt in range(10):
+            try:
+                traj_seed = int(rng.integers(0, 2**31))
+                self._trajectory = generate_interesting_traj(
+                    pathfinder=pathfinder,
+                    seed=traj_seed,
+                    target_length=float(self._traj_config.get("target_length", 20.0)),
+                    min_waypoint_distance=float(self._traj_config.get("min_waypoint_distance", 2.0)),
+                    max_waypoints=int(self._traj_config.get("max_waypoints", 100)),
+                    v_avg=float(self._traj_config.get("v_avg", 1.0)),
+                    coord_transform=self.sim.coord_trans.inverse_transform_batch,
+                )
+                break
+            except Exception as e:
+                logging.warning(f"Failed to generate trajectory on attempt {attempt}: {e}")
+                if attempt == 9:
+                    raise RuntimeError("Failed to generate a valid trajectory after 10 attempts") from e
+
+        # Get start state from trajectory
+        flat = self._trajectory.update(0.0)
+        x0 = np.asarray(flat["x"], dtype=np.float32)
+        v0 = np.asarray(flat["x_dot"], dtype=np.float32)
+        
+        yaw0 = float(flat["yaw"])
+        q0 = np.array([0.0, 0.0, np.sin(yaw0 / 2.0), np.cos(yaw0 / 2.0)], dtype=np.float32)
+        w0 = np.zeros(3, dtype=np.float32)
+        return x0, v0, q0, w0
+
     def step(self, action: np.ndarray):
         action = np.asarray(action, dtype=np.float32)
+
+        if self._is_trajectory_dodge:
+            return self._step_trajectory_dodge(action)
+        return self._step_hover(action)
+
+    def _step_hover(self, action: np.ndarray):
+        """Original hover-stop step logic."""
         control = self._vehicle.action_to_control(action)
 
         self._event_manager.begin_step()
@@ -510,8 +603,84 @@ class NeurosimRLEnv(gym.Env):
         truncated = self.sim.time >= self.episode_seconds
 
         is_success = self._check_success(state) if not terminated else False
+        if is_success:
+            terminated = True
+            term_reason = "success"
 
-        if terminated:
+        if terminated and term_reason != "success":
+            reward -= self.crash_penalty
+
+        observation = self._compose_observation(event_rep, state)
+        info: dict[str, Any] = {
+            "time": self.sim.time,
+            "simsteps": self.sim.simsteps,
+            "reward_terms": reward_terms,
+            "is_success": is_success,
+        }
+        if term_reason:
+            info["termination_reason"] = term_reason
+
+        return observation, float(reward), terminated, truncated, info
+
+    def _step_trajectory_dodge(self, action: np.ndarray):
+        """Trajectory-dodge step: query trajectory, apply correction, use SE3."""
+        correction_body = self._vehicle.action_to_correction(action)
+        self._task.set_last_correction(correction_body)
+
+        self._event_manager.begin_step()
+        events_accum = self.obs_mode != "state"
+
+        # Check if trajectory is complete
+        t_final = self._trajectory.t_keyframes[-1]
+        traj_complete = self.sim.time >= t_final
+        self._task.set_trajectory_complete(traj_complete)
+
+        # Rotate body-frame correction to inertial frame
+        q = np.asarray(self.sim.dynamics.state["q"], dtype=np.float64)
+        R_wb = Rotation.from_quat(q).as_matrix()  # body-to-world rotation
+        correction_world = (R_wb @ correction_body).astype(np.float32)
+
+        for _ in range(self.steps_per_action):
+            # Query trajectory for desired state
+            t_query = min(self.sim.time, t_final - 1e-6)
+            flat = self._trajectory.update(t_query)
+
+            # Apply inertial-frame velocity correction to desired velocity
+            modified_flat = dict(flat)
+            modified_flat["x_dot"] = flat["x_dot"] + correction_world
+
+            # Update desired state on task for reward
+            self._task.set_desired_state(flat["x"], flat["x_dot"])
+
+            # SE3 controller computes control from modified desired
+            control = self._se3_controller.update(
+                self.sim.time, self.sim.dynamics.state, modified_flat
+            )
+
+            self.sim.step(control)
+            measurements = self.sim._render_sensors()
+            if events_accum:
+                self._event_manager.accumulate(measurements.get(self.event_sensor_uuid))
+            self._maybe_visualize(measurements)
+
+        event_rep = (
+            None if self.obs_mode == "state" else self._event_manager.observation()
+        )
+        self._maybe_visualize(None, event_rep)
+
+        state = self.sim.dynamics.state
+        reward, reward_terms = self._compute_reward(state, action)
+        self._prev_action = action.copy()
+
+        terminated, term_reason = self._check_terminated(state)
+        truncated = self.sim.time >= self.episode_seconds
+
+        is_success = self._check_success(state) if not terminated else False
+        if is_success:
+            terminated = True
+            term_reason = "success"
+
+        if terminated and term_reason != "success":
             reward -= self.crash_penalty
 
         observation = self._compose_observation(event_rep, state)

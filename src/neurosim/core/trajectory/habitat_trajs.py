@@ -282,13 +282,32 @@ def generate_interesting_traj(
 
     full_path = np.concatenate(full_points_list, axis=0)
 
+    # Truncate path to exactly target_length
+    truncated_path = [full_path[0]]
+    current_dist = 0.0
+    for i in range(1, len(full_path)):
+        segment_len = np.linalg.norm(full_path[i] - full_path[i - 1])
+        if current_dist + segment_len > target_length:
+            # Interpolate exact end point
+            remaining = target_length - current_dist
+            direction = (full_path[i] - full_path[i - 1]) / segment_len
+            final_pt = full_path[i - 1] + direction * remaining
+            truncated_path.append(final_pt)
+            break
+        else:
+            truncated_path.append(full_path[i])
+            current_dist += segment_len
+
+    full_path = np.array(truncated_path)
+
     logger.info(f"Generated raw path with {len(full_path)} points.")
 
     # Remove consecutive duplicates to avoid zero-duration segments in MinSnap
+    # and bypass a bug in RotorPy where filtering points < 0.1m apart breaks time allocation
     if len(full_path) > 1:
         full_path_dedup = [full_path[0]]
         for i in range(1, len(full_path)):
-            if np.linalg.norm(full_path[i] - full_path[i - 1]) > 1e-3:
+            if np.linalg.norm(full_path[i] - full_path_dedup[-1]) > 0.1001:
                 full_path_dedup.append(full_path[i])
         full_path = np.array(full_path_dedup)
 

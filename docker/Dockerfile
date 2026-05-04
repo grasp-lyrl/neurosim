@@ -120,5 +120,5 @@ COPY . /opt/neurosim
 
 # Install neurosim in editable mode into the dedicated conda env.
 RUN conda create -n neurosim python=3.10 cmake=3.14.0 pip==25.1.1 -y \
-    && conda run -n neurosim pip install -e . -v \
+    && conda run -n neurosim pip install --no-build-isolation -e . -v \
     && conda clean -ya

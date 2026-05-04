@@ -27,7 +27,7 @@ docker run --privileged \
         -v /home/${USER}/.Xauthority:/home/${USER}/.Xauthority \
         -v ~/.ssh:/root/.ssh \
         -v "${PWD}":/home/${USER}/neurosim \
-        -it --rm --ipc=host --net=host --gpus all \
+        -it --ipc=host --net=host --gpus all \
         --name "neurosim-${variant}" \
         --workdir /home/${USER} \
         "${image}" \
