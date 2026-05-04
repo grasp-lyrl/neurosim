@@ -22,9 +22,10 @@ Not yet implemented (later phases):
 
 ## Building
 
-You need a source build of UE5 (5.3 or later) on Linux. Binary installs of UE5
-on Linux currently don't include `UnrealBuildTool` in a usable state for
-third-party plugins.
+UE5 5.6.x is the recommended target (5.5 also known to work; 5.7 likely fine
+but not yet verified against this plugin). Either Epic's prebuilt Linux
+Installed Build or a source build works — both ship a usable
+`UnrealBuildTool` and `RunUAT.sh`.
 
 ```bash
 # Clone the plugin into your UE project
@@ -46,10 +47,11 @@ cp -r neurosim/external/neurosim_ue_plugin /path/to/MyProject/Plugins/NeurosimBr
     -noP4 -platform=Linux -clientconfig=Development \
     -cook -allmaps -build -stage -pak -archive \
     -archivedirectory="$(pwd)/Packaged" \
-    -server=false -nullrhi=false
+    -server=false
 ```
 
-Then `Packaged/LinuxNoEditor/MyProject.sh` is the executable Neurosim spawns.
+On 5.6 the staged output lands at `Packaged/Linux/MyProject.sh`. (UE ≤ 5.3
+used `Packaged/LinuxNoEditor/`; the `NoEditor` suffix was dropped in 5.4.)
 
 ## Launching manually (smoke test)
 
