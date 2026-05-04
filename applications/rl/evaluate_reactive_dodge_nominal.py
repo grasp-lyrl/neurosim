@@ -5,45 +5,26 @@ obstacles disabled, zero action should leave the SE3 + minsnap stack tracking
 without scene crashes or tracking failures.
 """
 
-from __future__ import annotations
-
 import argparse
 import copy
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
 
-from neurosim.rl import NeurosimRLEnv
-
-
-def _deep_update(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
-    for key, value in src.items():
-        if isinstance(value, dict) and isinstance(dst.get(key), dict):
-            _deep_update(dst[key], value)
-        else:
-            dst[key] = copy.deepcopy(value)
-    return dst
-
-
-def _load_yaml(path: str | Path) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    if not isinstance(data, dict):
-        raise ValueError(f"Expected YAML mapping in {path}")
-    return data
+from neurosim.core.utils.utils_gen import deep_update, load_yaml
+from neurosim.rl import ReactiveDodgeEnv
 
 
 def load_eval_config(path: str | Path) -> dict[str, Any]:
-    cfg = _load_yaml(path)
+    cfg = load_yaml(path)
     if "experiment_config" in cfg:
         exp_path = Path(cfg["experiment_config"])
         if not exp_path.is_absolute():
             exp_path = Path.cwd() / exp_path
-        exp_cfg = _load_yaml(exp_path)
+        exp_cfg = load_yaml(exp_path)
         cfg["env"] = copy.deepcopy(exp_cfg["env"])
-        _deep_update(cfg, cfg.get("overrides", {}))
+        deep_update(cfg, cfg.get("overrides", {}))
     if "env" not in cfg:
         raise ValueError("Nominal eval config must define env or experiment_config")
     return cfg
@@ -76,7 +57,7 @@ def main() -> None:
         ] = False
     env_cfg["task"]["config"]["require_obstacle_encounter"] = False
 
-    env = NeurosimRLEnv(env_config=env_cfg, train=False)
+    env = ReactiveDodgeEnv(env_config=env_cfg, train=False)
     results: list[dict[str, Any]] = []
     try:
         for ep in range(episodes):

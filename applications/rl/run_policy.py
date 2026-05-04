@@ -13,20 +13,15 @@ import copy
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from neurosim.rl import NeurosimRLEnv
+from neurosim.core.utils.utils_gen import load_yaml
+from neurosim.rl import env_class_for_task
 
 
 def load_rollout_config(config_path: str | Path) -> dict[str, Any]:
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    if not isinstance(cfg, dict):
-        raise ValueError("Rollout config must be a YAML mapping")
+    cfg = load_yaml(config_path)
 
     required_keys = ["env", "policy"]
     missing = [k for k in required_keys if k not in cfg]
@@ -71,8 +66,10 @@ def main():
     if args.visualize:
         base_env_config["enable_visualization"] = True
 
+    env_cls = env_class_for_task(base_env_config["task"]["name"])
+
     def _make_env():
-        return NeurosimRLEnv(env_config=base_env_config, train=False)
+        return env_cls(env_config=base_env_config, train=False)
 
     vec_env = DummyVecEnv([_make_env])
 

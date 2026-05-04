@@ -5,42 +5,25 @@ residual. It is meant for behavior-cloning data or debugging only; obstacle
 state should not be part of the deployed policy observation.
 """
 
-from __future__ import annotations
-
-import argparse
 import copy
-from pathlib import Path
+import argparse
 from typing import Any
+from pathlib import Path
 
 import numpy as np
-import yaml
 
-from neurosim.rl import NeurosimRLEnv
-
-
-def _load_yaml(path: str | Path) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    if not isinstance(data, dict):
-        raise ValueError(f"Expected YAML mapping in {path}")
-    return data
+from neurosim.core.utils.utils_gen import load_yaml
+from neurosim.rl import ReactiveDodgeEnv
 
 
-def _active_obstacles(env: NeurosimRLEnv) -> dict[int, Any]:
-    manager = getattr(env.sim.visual_backend, "_dynamic_obstacles", None)
-    return dict(getattr(manager, "_active", {}) if manager is not None else {})
-
-
-def _oracle_delta_direction(env: NeurosimRLEnv) -> np.ndarray:
-    active = _active_obstacles(env)
+def _oracle_delta_direction(env: ReactiveDodgeEnv) -> np.ndarray:
+    active = env.active_obstacles()
     if not active:
         return np.zeros(3, dtype=np.float32)
 
     state = env.sim.dynamics.state
-    agent_pos = env._safety.dynamics_to_habitat(np.asarray(state["x"]))
-    agent_vel = np.asarray(env._safety._pos_transform, dtype=np.float64) @ np.asarray(
-        state["v"], dtype=np.float64
-    )
+    agent_pos = env.dynamics_to_habitat_pos(np.asarray(state["x"]))
+    agent_vel = env.dynamics_to_habitat_vel(np.asarray(state["v"], dtype=np.float64))
     manager = getattr(env.sim.visual_backend, "_dynamic_obstacles", None)
     agent_height = float(getattr(manager, "_agent_height", 0.0))
 
@@ -50,12 +33,10 @@ def _oracle_delta_direction(env: NeurosimRLEnv) -> np.ndarray:
     for item in active.values():
         obstacle_pos = np.asarray(item.obj.translation, dtype=np.float64)
         obstacle_pos[1] -= agent_height
-        obstacle_vel = np.asarray(
-            getattr(item.obj, "linear_velocity", item.velocity), dtype=np.float64
-        )
+        obstacle_vel = env.obstacle_velocity(item)
         rel_pos = obstacle_pos - agent_pos
         rel_vel = obstacle_vel - agent_vel
-        closest, tca = env._constant_velocity_closest_approach(rel_pos, rel_vel, 1.0)
+        closest, tca = env.constant_velocity_closest_approach(rel_pos, rel_vel, 1.0)
         score = closest + 0.25 * tca
         if score < best_score:
             best_score = score
@@ -90,10 +71,10 @@ def _oracle_delta_direction(env: NeurosimRLEnv) -> np.ndarray:
     return dodge_dyn.astype(np.float32)
 
 
-def oracle_action(env: NeurosimRLEnv) -> np.ndarray:
+def oracle_action(env: ReactiveDodgeEnv) -> np.ndarray:
     action = np.zeros(env.action_space.shape, dtype=np.float32)
-    context = getattr(env, "_last_task_context", {})
-    if not bool(context.get("obstacle_threat", False)):
+    threats = env.last_threats()
+    if not bool(threats.get("obstacle_threat", False)):
         return action
 
     dodge = _oracle_delta_direction(env)
@@ -125,8 +106,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    cfg = _load_yaml(args.experiment_config)
-    env = NeurosimRLEnv(env_config=copy.deepcopy(cfg["env"]), train=False)
+    cfg = load_yaml(args.experiment_config)
+    env = ReactiveDodgeEnv(env_config=copy.deepcopy(cfg["env"]), train=False)
 
     states: list[np.ndarray] = []
     actions: list[np.ndarray] = []

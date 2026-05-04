@@ -9,8 +9,30 @@ import yaml
 
 pytest.importorskip("magnum", reason="Habitat runtime dependencies not available")
 
-from neurosim.rl.tasks import ReactiveDodgeTask, build_task
+from neurosim.rl.tasks import ReactiveDodgeTask, TaskStep, build_task
 from neurosim.rl.vehicles.ctbr_rotorpy import RateLimits, RotorpyCtbrVehicle
+
+
+def _step(
+    *,
+    state: dict[str, np.ndarray],
+    action: np.ndarray,
+    prev_action: np.ndarray | None = None,
+    sim_time: float = 0.0,
+) -> TaskStep:
+    base = np.concatenate(
+        [state["x"], state["v"], state["q"], state["w"]], dtype=np.float32
+    )
+    return TaskStep(
+        state=state,
+        base_state=base,
+        action=action,
+        prev_action=prev_action,
+        sim_time=sim_time,
+        dt=0.01,
+        event_manager=_EventManager(),
+        obs_mode="state",
+    )
 
 
 def _state() -> dict[str, np.ndarray]:
@@ -72,24 +94,12 @@ def test_reactive_dodge_penalizes_unneeded_correction_more_than_threat_correctio
     task = ReactiveDodgeTask(w_no_threat_correction=1.0)
 
     task.set_context({"flat": _flat(), "obstacle_threat": False})
-    no_threat_reward, _ = task.compute_reward(
-        state=state,
-        action=action,
-        prev_action=None,
-        event_manager=_EventManager(),
-        obs_mode="state",
-    )
+    no_threat = task.compute_reward(_step(state=state, action=action))
 
     task.set_context({"flat": _flat(), "obstacle_threat": True})
-    threat_reward, _ = task.compute_reward(
-        state=state,
-        action=action,
-        prev_action=None,
-        event_manager=_EventManager(),
-        obs_mode="state",
-    )
+    threat = task.compute_reward(_step(state=state, action=action))
 
-    assert no_threat_reward < threat_reward
+    assert no_threat.reward < threat.reward
 
 
 def test_gated_reactive_dodge_action_uses_five_dimensions():
@@ -120,11 +130,7 @@ def test_reactive_dodge_success_requires_meaningful_encounter_and_recovery():
         }
     )
     task.compute_reward(
-        state=state,
-        action=np.zeros(4, dtype=np.float32),
-        prev_action=None,
-        event_manager=_EventManager(),
-        obs_mode="state",
+        _step(state=state, action=np.zeros(4, dtype=np.float32), sim_time=0.0)
     )
     assert not task.check_success(state=state)
 
@@ -136,16 +142,12 @@ def test_reactive_dodge_success_requires_meaningful_encounter_and_recovery():
             "near_miss_ids": (7,),
         }
     )
-    _, terms = task.compute_reward(
-        state=state,
-        action=np.zeros(4, dtype=np.float32),
-        prev_action=None,
-        event_manager=_EventManager(),
-        obs_mode="state",
+    outcome = task.compute_reward(
+        _step(state=state, action=np.zeros(4, dtype=np.float32), sim_time=0.5)
     )
 
-    assert terms["meaningful_encounter_count"] == pytest.approx(1.0)
-    assert terms["dodge_success_count"] == pytest.approx(1.0)
+    assert outcome.terms["meaningful_encounter_count"] == pytest.approx(1.0)
+    assert outcome.terms["dodge_success_count"] == pytest.approx(1.0)
     assert task.check_success(state=state)
 
 
@@ -166,13 +168,7 @@ def test_reactive_dodge_tracking_failure_terminates_after_configured_steps():
     )
 
     for _ in range(2):
-        task.compute_reward(
-            state=state,
-            action=np.zeros(4, dtype=np.float32),
-            prev_action=None,
-            event_manager=_EventManager(),
-            obs_mode="state",
-        )
+        task.compute_reward(_step(state=state, action=np.zeros(4, dtype=np.float32)))
 
     terminated, reason = task.check_terminated(state=state)
     assert terminated
@@ -249,16 +245,14 @@ def test_gated_ctbr_delta_returns_nominal_when_gate_is_zero():
 
 
 def test_constant_velocity_closest_approach_detects_approach_vs_recede():
-    from neurosim.rl.env import NeurosimRLEnv
+    from neurosim.rl.env_reactive_dodge import constant_velocity_closest_approach
 
-    approaching_distance, approaching_tca = (
-        NeurosimRLEnv._constant_velocity_closest_approach(
-            np.array([1.0, 0.0, 0.0]),
-            np.array([-1.0, 0.0, 0.0]),
-            2.0,
-        )
+    approaching_distance, approaching_tca = constant_velocity_closest_approach(
+        np.array([1.0, 0.0, 0.0]),
+        np.array([-1.0, 0.0, 0.0]),
+        2.0,
     )
-    receding_distance, receding_tca = NeurosimRLEnv._constant_velocity_closest_approach(
+    receding_distance, receding_tca = constant_velocity_closest_approach(
         np.array([1.0, 0.0, 0.0]),
         np.array([1.0, 0.0, 0.0]),
         2.0,

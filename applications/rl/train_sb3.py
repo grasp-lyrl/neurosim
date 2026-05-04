@@ -42,7 +42,6 @@ Disk logs for each run: ``outputs/rl/<run>/logs/run_setup.yaml`` (layout),
 ``training.log`` (rollout timing), ``workers/{train,eval}_env_*.log`` (DR).
 """
 
-import yaml
 import argparse
 import numpy as np
 from typing import Any
@@ -57,7 +56,12 @@ from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
-from neurosim.rl import CombinedEventStateExtractor, EventCnnExtractor, NeurosimRLEnv
+from neurosim.core.utils.utils_gen import load_yaml
+from neurosim.rl import (
+    CombinedEventStateExtractor,
+    EventCnnExtractor,
+    env_class_for_task,
+)
 from neurosim.rl.disk_logging import (
     configure_training_disk_logger,
     gpu_assignment_summary,
@@ -66,11 +70,7 @@ from neurosim.rl.disk_logging import (
 
 
 def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    if not isinstance(cfg, dict):
-        raise ValueError("Experiment config must be a YAML mapping")
+    cfg = load_yaml(config_path)
 
     required_keys = [
         "seed",
@@ -128,7 +128,7 @@ def make_env(
     Each worker resets with ``seed + env_idx`` so that parallel workers
     get distinct initial randomizations (when DR is enabled in the config).
 
-    ``train`` is forwarded to :class:`~neurosim.rl.env.NeurosimRLEnv`; when
+    ``train`` is forwarded to :class:`~neurosim.rl.env.BaseNeurosimRLEnv`; when
     true, Rerun visualization is forced off regardless of YAML.
 
     ``gpu_id`` assigns the Habitat simulator to a specific GPU, enabling
@@ -147,7 +147,8 @@ def make_env(
             cfg["_neurosim_rl_worker_log_dir"] = str(worker_log_dir)
             cfg["_neurosim_rl_worker_log_role"] = worker_log_role
             cfg["_neurosim_rl_env_idx"] = env_idx
-        env = NeurosimRLEnv(env_config=cfg, train=train)
+        env_cls = env_class_for_task(cfg["task"]["name"])
+        env = env_cls(env_config=cfg, train=train)
         env = Monitor(env)
         if seed is not None:
             env.reset(seed=seed + env_idx)
