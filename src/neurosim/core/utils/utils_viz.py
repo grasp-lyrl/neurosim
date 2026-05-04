@@ -486,3 +486,40 @@ class RerunVisualizer:
             image = image.detach().cpu().numpy()
 
         rr.log(path, rr.Image(image), static=self.stream_only)
+
+    def log_safety(
+        self,
+        *,
+        position: np.ndarray,
+        is_safe: bool,
+        reason: str,
+    ) -> None:
+        """Visualize a safety-checker result alongside the drone trail.
+
+        Logs:
+        - ``safety/marker``: a sphere at ``position`` colored green when
+          ``is_safe`` and red otherwise.
+        - ``safety/is_safe``: scalar 1.0/0.0 time series.
+        - ``safety/event``: a Rerun TextLog at WARN whenever ``is_safe`` is
+          False, with ``reason`` as the message.
+        """
+        if not self.enabled:
+            return
+
+        color = (50, 220, 50) if is_safe else (220, 50, 50)
+        position_xyz = np.asarray(position, dtype=np.float32).reshape(1, 3)
+        rr.log(
+            "safety/marker",
+            rr.Points3D(
+                positions=position_xyz,
+                colors=[color],
+                radii=[0.25],
+            ),
+            static=self.stream_only,
+        )
+        rr.log("safety/is_safe", rr.Scalars(1.0 if is_safe else 0.0))
+        if not is_safe:
+            rr.log(
+                "safety/event",
+                rr.TextLog(reason or "unsafe", level="WARN"),
+            )

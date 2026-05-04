@@ -3,6 +3,7 @@ from .base import VisualBackendProtocol
 from .factory import create_visual_backend
 from .corner_detector import CornerDetector, FeatureDetectionResult
 from .edge_detector import EdgeDetector
+from .safety import HabitatSafetyChecker
 
 
 __all__ = [
@@ -16,4 +17,6 @@ __all__ = [
     "CornerDetector",
     "FeatureDetectionResult",
     "EdgeDetector",
+    # Safety
+    "HabitatSafetyChecker",
 ]

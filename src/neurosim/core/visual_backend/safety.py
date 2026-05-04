@@ -42,7 +42,12 @@ class HabitatSafetyChecker:
         self._hi_z = float(hi[2])
 
     def dynamics_to_habitat(self, x: np.ndarray) -> np.ndarray:
+        """Convert a position from dynamics frame to Habitat frame."""
         return self._pos_transform @ np.asarray(x, dtype=np.float64)
+
+    def dynamics_to_habitat_vel(self, v: np.ndarray) -> np.ndarray:
+        """Convert a linear velocity from dynamics frame to Habitat frame."""
+        return self._pos_transform @ np.asarray(v, dtype=np.float64)
 
     def is_in_bounds(self, habitat_pos: np.ndarray) -> bool:
         hx, hy, hz = habitat_pos
