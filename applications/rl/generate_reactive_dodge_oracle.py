@@ -22,8 +22,10 @@ def _oracle_delta_direction(env: ReactiveDodgeEnv) -> np.ndarray:
         return np.zeros(3, dtype=np.float32)
 
     state = env.sim.dynamics.state
-    agent_pos = env.dynamics_to_habitat_pos(np.asarray(state["x"]))
-    agent_vel = env.dynamics_to_habitat_vel(np.asarray(state["v"], dtype=np.float64))
+    agent_pos = env.sim.safety.dynamics_to_habitat(np.asarray(state["x"]))
+    agent_vel = env.sim.safety.dynamics_to_habitat_vel(
+        np.asarray(state["v"], dtype=np.float64)
+    )
     manager = getattr(env.sim.visual_backend, "_dynamic_obstacles", None)
     agent_height = float(getattr(manager, "_agent_height", 0.0))
 

@@ -20,7 +20,9 @@ env:
   obs_mode: state
   episode_seconds: 15.0
   init_speed_range: [0.5, 2.0]
-  enable_navigable_check: true
+
+  safety:
+    enable_navigable_check: true
 
   event_representation:
     model: time_surface
