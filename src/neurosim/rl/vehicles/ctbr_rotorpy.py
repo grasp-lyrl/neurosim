@@ -58,6 +58,32 @@ class RotorpyCtbrVehicle(RLVehicle):
     def action_space(self) -> spaces.Box:
         return self._action_space
 
+    @property
+    def hover_thrust(self) -> float:
+        return self._hover_thrust
+
+    @property
+    def control_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        low = np.asarray(
+            [
+                self._cmd_thrust_min,
+                -self._rate_limits.roll,
+                -self._rate_limits.pitch,
+                -self._rate_limits.yaw,
+            ],
+            dtype=np.float64,
+        )
+        high = np.asarray(
+            [
+                self._cmd_thrust_max,
+                self._rate_limits.roll,
+                self._rate_limits.pitch,
+                self._rate_limits.yaw,
+            ],
+            dtype=np.float64,
+        )
+        return low, high
+
     @staticmethod
     def _minmax_scale(
         x: np.ndarray,
@@ -120,3 +146,75 @@ class RotorpyCtbrVehicle(RLVehicle):
                 [cmd_roll_br, cmd_pitch_br, cmd_yaw_br], dtype=np.float64
             ),
         }
+
+    def clip_control(
+        self, control: dict[str, np.ndarray | float]
+    ) -> dict[str, np.ndarray | float]:
+        low, high = self.control_bounds
+        cmd = np.asarray(
+            [
+                float(control["cmd_thrust"]),
+                *np.asarray(control["cmd_w"], dtype=np.float64).reshape(3),
+            ],
+            dtype=np.float64,
+        )
+        clipped = np.clip(cmd, low, high)
+        merged = dict(control)
+        merged["cmd_thrust"] = float(clipped[0])
+        merged["cmd_w"] = clipped[1:].astype(np.float64, copy=False)
+        return merged
+
+    def control_to_normalized(
+        self, control: dict[str, np.ndarray | float]
+    ) -> np.ndarray:
+        low, high = self.control_bounds
+        cmd = np.asarray(
+            [
+                float(control["cmd_thrust"]),
+                *np.asarray(control["cmd_w"], dtype=np.float64).reshape(3),
+            ],
+            dtype=np.float64,
+        )
+        normalized = 2.0 * (cmd - low) / (high - low) - 1.0
+        return np.clip(normalized, -1.0, 1.0).astype(np.float32)
+
+    def apply_ctbr_delta(
+        self,
+        nominal_control: dict[str, np.ndarray | float],
+        action: np.ndarray,
+        *,
+        delta_thrust_fraction: float,
+        delta_rate_limits: np.ndarray,
+    ) -> dict[str, np.ndarray | float]:
+        action = np.asarray(action, dtype=np.float32)
+        delta_rate_limits = np.asarray(delta_rate_limits, dtype=np.float64).reshape(3)
+        delta_thrust = (
+            float(action[0]) * float(delta_thrust_fraction) * self._hover_thrust
+        )
+        delta_w = np.asarray(action[1:4], dtype=np.float64) * delta_rate_limits
+
+        merged = dict(nominal_control)
+        merged["cmd_thrust"] = float(nominal_control["cmd_thrust"]) + delta_thrust
+        merged["cmd_w"] = (
+            np.asarray(nominal_control["cmd_w"], dtype=np.float64) + delta_w
+        )
+        return self.clip_control(merged)
+
+    def apply_gated_ctbr_delta(
+        self,
+        nominal_control: dict[str, np.ndarray | float],
+        gate: float,
+        action: np.ndarray,
+        *,
+        delta_thrust_fraction: float,
+        delta_rate_limits: np.ndarray,
+    ) -> dict[str, np.ndarray | float]:
+        """Apply a CTBR residual scaled by a non-negative dodge gate."""
+        gate = float(np.clip(gate, 0.0, 1.0))
+        gated_action = gate * np.asarray(action, dtype=np.float32)
+        return self.apply_ctbr_delta(
+            nominal_control,
+            gated_action,
+            delta_thrust_fraction=delta_thrust_fraction,
+            delta_rate_limits=delta_rate_limits,
+        )

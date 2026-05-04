@@ -1,0 +1,70 @@
+# Curriculum phases for the reactive_dodge task.
+#
+# Apply these overrides to env.visual_backend.dynamic_obstacles as training
+# performance improves. Promote on evaluation metrics rather than wall-clock time.
+
+promotion_criteria:
+  episode_success_min: 0.80
+  obstacle_collision_rate_max: 0.15
+  tracking_failure_rate_max: 0.10
+  correction_energy_max: 0.35
+  gate_active_fraction_max: 0.25
+
+phases:
+  - name: phase_0_nominal
+    goal: Learn that the residual should stay quiet when the SE3 tracker is safe.
+    dynamic_obstacles:
+      enabled: false
+    task_overrides:
+      require_obstacle_encounter: false
+
+  - name: phase_1_easy_visible_throws
+    goal: Introduce slow single objects with broad aim noise.
+    dynamic_obstacles:
+      enabled: true
+      max_concurrent: 1
+      spawn_interval_s: 7.0
+      throw_speed_range_mps: [1.0, 2.0]
+      aim_noise_std_m: 0.7
+
+  - name: phase_2_slow_meaningful_threats
+    goal: Make slow throws more likely to intersect the nominal trajectory.
+    dynamic_obstacles:
+      enabled: true
+      max_concurrent: 1
+      spawn_interval_s: 5.5
+      throw_speed_range_mps: [1.5, 3.0]
+      aim_noise_std_m: 0.4
+
+  - name: phase_3_medium_reactive_dodges
+    goal: Train timely dodges and post-dodge recovery.
+    dynamic_obstacles:
+      enabled: true
+      max_concurrent: 1
+      spawn_interval_s: 4.0
+      throw_speed_range_mps: [2.5, 5.0]
+      aim_noise_std_m: 0.25
+
+  - name: phase_4_hard_dynamic_throws
+    goal: Approach target task difficulty without overwhelming exploration.
+    dynamic_obstacles:
+      enabled: true
+      max_concurrent: 2
+      spawn_interval_s: 2.5
+      throw_speed_range_mps: [4.0, 7.0]
+      aim_noise_std_m: 0.15
+
+  - name: phase_5_robustness
+    goal: Randomize scene, event camera, obstacle shape, and vehicle parameters.
+    dynamic_obstacles:
+      enabled: true
+      max_concurrent: 2
+      spawn_interval_s: 2.0
+      throw_speed_range_mps: [4.0, 8.0]
+      angular_speed_range_radps: [0.0, 2.0]
+      aim_noise_std_m: 0.15
+    randomization:
+      scenes: true
+      sensors: true
+      dynamics: true
+      obstacle_templates: true

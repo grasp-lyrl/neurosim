@@ -165,3 +165,32 @@ class RLTask(ABC):
         """Optional task-specific termination checks."""
         _ = state
         return False, ""
+
+    @property
+    def state_observation_dim(self) -> int:
+        """Dimension of the vector observation for this task."""
+        return 13
+
+    @property
+    def action_dim(self) -> int | None:
+        """Override the vehicle action dimension when the task owns action semantics."""
+        return None
+
+    @property
+    def uses_nominal_controller(self) -> bool:
+        """Whether the environment should build trajectory/controller context."""
+        return False
+
+    def set_context(self, context: dict[str, Any]) -> None:
+        """Receive environment-computed context before reward/observation calls."""
+        _ = context
+
+    def make_state_observation(
+        self,
+        *,
+        state: dict[str, np.ndarray],
+        base_state: np.ndarray,
+    ) -> np.ndarray:
+        """Build the vector observation for this task."""
+        _ = state
+        return np.asarray(base_state, dtype=np.float32)

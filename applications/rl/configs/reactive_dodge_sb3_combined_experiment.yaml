@@ -1,0 +1,181 @@
+# PPO training config for the reactive_dodge residual-control task.
+# Starts with a gentle single-obstacle curriculum; increase obstacle speed and
+# spawn frequency only after the policy tracks well and avoids slow throws.
+
+seed: 42
+num_envs: 16
+total_timesteps: 5000000
+n_gpus: 2
+
+eval:
+  freq: 32768
+  episodes: 5
+  num_envs: 1
+
+vec_env:
+  type: auto
+  start_method: spawn
+
+env:
+  obs_mode: combined
+  episode_seconds: 15.0
+  init_speed_range: [0.0, 0.0]
+  enable_navigable_check: true
+
+  event_sensor_uuid: null
+  event_representation: time_surface
+  event_log_compression: 1.0
+  event_downsample_factor: 1
+  event_ts_decay_ms: 10.0
+
+  task:
+    name: reactive_dodge
+    config:
+      w_survival: 0.2
+      w_pos: 1.5
+      w_vel: 0.5
+      w_yaw: 0.1
+      w_correction: 0.02
+      w_no_threat_correction: 0.2
+      w_smooth: 0.02
+      w_angular: 0.02
+      w_tilt: 0.05
+      w_gate: 0.05
+      w_dodge_success: 1.0
+      crash_penalty_scene: 100.0
+      crash_penalty_obstacle: 120.0
+      tracking_failure_penalty: 25.0
+      success_pos_rmse_threshold: 0.5
+      success_vel_rmse_threshold: 0.75
+      success_max_correction_energy: 0.5
+      near_miss_radius_m: 1.0
+      threat_distance_m: 1.5
+      threat_time_horizon_s: 1.0
+      recovery_pos_error_m: 0.75
+      recovery_window_s: 1.0
+      tracking_failure_pos_error_m: 3.0
+      tracking_failure_steps: 20
+      require_obstacle_encounter: true
+      lookahead_seconds: [0.25, 0.5]
+
+      controller:
+        model: rotorpy_se3
+        vehicle: crazyflie
+
+      trajectory:
+        model: habitat_random_minsnap
+        target_length: 15.0
+        min_waypoint_distance: 2.0
+        max_waypoints: 100
+        v_avg: 1.0
+
+      residual_control:
+        mode: gated_ctbr_delta
+        delta_thrust_fraction: 0.2
+        delta_rate_limits: [2.0, 2.0, 1.0]
+
+  scenes:
+    - name: apartment_1
+      path: data/scene_datasets/habitat-test-scenes/apartment_1.glb
+    - name: skokloster
+      path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
+
+  sensors:
+    event_camera_1:
+      type: event
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 120
+      zfar: 20.0
+      backend: cuda
+      contrast_threshold_neg: 0.15
+      contrast_threshold_pos: 0.15
+      anti_aliasing: 8
+
+  visual_backend:
+    enable_physics: true
+    dynamic_obstacles:
+      enabled: true
+      spawn_interval_s: 6.0
+      max_concurrent: 1
+      throw_speed_range_mps: [1.5, 3.0]
+      angular_speed_range_radps: [0.0, 1.0]
+      azimuth_range_deg: [-45.0, 45.0]
+      radial_distance_range_m: [2.5, 5.0]
+      relative_height_range_m: [-0.25, 1.0]
+      aim_noise_std_m: 0.5
+      seed: 7
+      templates:
+        - handle: cube
+          motion_mode: dynamic_throw
+          scale: [0.12, 0.12, 0.12]
+          mass: 0.25
+          ttl_s: 2.5
+        - handle: uvSphereSolid
+          motion_mode: dynamic_throw
+          scale: [0.10, 0.10, 0.10]
+          mass: 0.20
+          ttl_s: 2.5
+
+  dynamics:
+    model: rotorpy_multirotor_euler
+    vehicle: crazyflie
+    control_abstraction: cmd_ctbr
+    ctbr_rate_limits:
+      roll: 7.0
+      pitch: 7.0
+      yaw: 5.0
+
+    domain_randomization:
+      enabled: true
+      resample_every: 50
+      scales:
+        mass: [0.85, 1.15]
+        k_eta: [0.9, 1.1]
+        k_m: [0.9, 1.1]
+        rotor_speed_min: [1.0, 1.0]
+        rotor_speed_max: [0.95, 1.05]
+
+  simulator:
+    world_rate: 1000
+    control_rate: 100
+    sim_time: 30
+    coord_transform: rotorpy_to_hm3d
+
+    sensor_rates:
+      event_camera_1: 1000
+
+    viz_rates:
+      event_camera_1: 20
+
+    domain_randomization:
+      enabled: true
+      resample_every: 50
+      sensors:
+        event_camera_1:
+          contrast_threshold_neg:
+            range: [0.1, 0.3]
+          contrast_threshold_pos:
+            range: [0.1, 0.3]
+          hfov:
+            choices: [90, 120]
+
+ppo:
+  learning_rate: 0.0003
+  n_steps: 512
+  batch_size: 128
+  n_epochs: 4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.003
+  log_std_init: -1.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  device: auto
+
+vecnormalize:
+  normalize_obs: true
+  normalize_reward: true

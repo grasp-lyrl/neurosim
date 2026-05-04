@@ -1,7 +1,13 @@
 from .env import NeurosimRLEnv
 from .safety import HabitatSafetyChecker
 from .sb3_features import CombinedEventStateExtractor, EventCnnExtractor
-from .tasks import HoverStopTask, EventRepresentationManager, RLTask, build_task
+from .tasks import (
+    EventRepresentationManager,
+    HoverStopTask,
+    ReactiveDodgeTask,
+    RLTask,
+    build_task,
+)
 from .vehicles import RLVehicle, RotorpyCtbrVehicle, build_vehicle
 
 __all__ = [
@@ -12,6 +18,7 @@ __all__ = [
     "RLTask",
     "EventRepresentationManager",
     "HoverStopTask",
+    "ReactiveDodgeTask",
     "build_task",
     "RLVehicle",
     "RotorpyCtbrVehicle",

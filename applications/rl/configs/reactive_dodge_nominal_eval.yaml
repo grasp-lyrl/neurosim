@@ -1,0 +1,19 @@
+# Nominal-only evaluation for reactive_dodge.
+#
+# The evaluator loads the base experiment config, disables dynamic obstacles,
+# relaxes the encounter requirement, and steps the env with a zero residual.
+
+experiment_config: applications/rl/configs/reactive_dodge_sb3_combined_experiment.yaml
+episodes: 5
+seed: 42
+disable_obstacles: true
+zero_residual: true
+
+overrides:
+  env:
+    episode_seconds: 15.0
+    task:
+      config:
+        require_obstacle_encounter: false
+  policy:
+    deterministic: true
