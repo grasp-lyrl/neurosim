@@ -1,62 +1,16 @@
-FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04
-
-ENV LANG=en_US.UTF-8 \
-    LC_ALL=en_US.UTF-8 \
-    TZ=America/New_York \
-    NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=all \
-    DEBIAN_FRONTEND=noninteractive \
-    PATH=/opt/conda/bin:$PATH
+ARG BASE_IMAGE=neurosim:noros
+FROM ${BASE_IMAGE}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        wget \
-        nano \
-        lsb-release \
-        locales \
-        git \
-        git-lfs \
-        build-essential \
-        pkg-config \
-        cmake \
-        python3-pip \
-        python3-dev \
-        python3-setuptools \
-        libjpeg-dev \
-        libglm-dev \
-        libgl1-mesa-glx \
-        libegl1-mesa-dev \
-        mesa-utils \
-        xorg-dev \
-        freeglut3-dev \
-        libpng-dev \
-        libglfw3-dev \
-        libx11-dev \
-        libxkbcommon-x11-0 \
-        libomp-dev \
-        libeigen3-dev \
-        tmux \
-        software-properties-common \
-    && locale-gen en_US en_US.UTF-8 \
-    && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 \
-    && python3 -m pip install --no-cache-dir pip==25.1.1 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN echo '"\e[A": history-search-backward' > /root/.inputrc \
-    && echo '"\e[B": history-search-forward' >> /root/.inputrc \
-    && echo 'set completion-ignore-case on' >> /root/.inputrc \
-    && echo 'set show-all-if-ambiguous on' >> /root/.inputrc \
-    && echo 'set enable-keypad on' >> /root/.inputrc
 
 ARG ROS_APT_SOURCE_VERSION=1.1.0
 ARG UBUNTU_CODENAME=jammy
 
 # Install ROS2 Humble and tooling.
-RUN add-apt-repository universe \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository universe \
     && curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release && echo ${UBUNTU_CODENAME:-${VERSION_CODENAME}})_all.deb" \
     && dpkg -i /tmp/ros2-apt-source.deb \
     && rm -f /tmp/ros2-apt-source.deb \
@@ -101,24 +55,8 @@ RUN set -eux; \
     cmake --install json-3.12.0/build; \
     rm -rf json-3.12.0 v3.12.0.tar.gz
 
-# Install Miniforge and create the neurosim environment.
-RUN curl -fsSL -o /tmp/miniforge.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh" \
-    && bash /tmp/miniforge.sh -b -p /opt/conda \
-    && rm -f /tmp/miniforge.sh \
-    && conda clean -ya
-
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc \
     && echo "export ROS_LOCALHOST_ONLY=1" >> /root/.bashrc \
-    && echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /root/.bashrc \
-    && echo "source /opt/conda/etc/profile.d/conda.sh" >> /root/.bashrc \
-    && echo "conda activate neurosim" >> /root/.bashrc
-
-COPY docker/10_nvidia.json /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+    && echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /root/.bashrc
 
 WORKDIR /opt/neurosim
-COPY . /opt/neurosim
-
-# Install neurosim in editable mode into the dedicated conda env.
-RUN conda create -n neurosim python=3.10 cmake=3.14.0 pip==25.1.1 -y \
-    && conda run -n neurosim pip install -e . -v \
-    && conda clean -ya

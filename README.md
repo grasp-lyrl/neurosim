@@ -192,7 +192,7 @@ python -m habitat_sim.utils.datasets_download --uids habitat_test_scenes --data-
 ### Run the Simulator
 
 ```bash
-python test_sim.py --settings configs/skokloster-castle-settings.yaml --display --world_rate 750
+python test_sim.py --settings configs/skokloster-castle-settings.yaml --display
 ```
 
 ## Citation
