@@ -16,7 +16,7 @@ import yaml
 from cortex.messages.standard import ArrayMessage, DictMessage, MultiArrayMessage
 from cortex.utils.loop import run
 
-from neurosim.rl.env import NeurosimRLEnv
+from neurosim.rl.env import BaseNeurosimRLEnv
 from neurosim.sims.asynchronous_simulator import (
     controller_node,
     simulator_node,
@@ -102,7 +102,7 @@ def real_controller_node(cortex_discovery_daemon):
 @skip_missing_async_settings
 def test_rl_built_settings_use_same_scene_as_apartment_async_reference():
     """Parity with :mod:`test_rl_env`: same scene path as full async YAML."""
-    rl_settings = NeurosimRLEnv._build_simulator_settings(
+    rl_settings = BaseNeurosimRLEnv._build_simulator_settings(
         _test_env_config(obs_mode="state", episode_seconds=0.05)
     )
     apartment = _load_apartment_settings()
