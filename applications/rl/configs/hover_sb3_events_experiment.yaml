@@ -22,11 +22,12 @@ env:
   init_speed_range: [0.5, 2.0]
   enable_navigable_check: true
 
-  event_sensor_uuid: null
-  event_representation: time_surface
-  event_log_compression: 1.0
-  event_downsample_factor: 1
-  event_ts_decay_ms: 10.0
+  event_representation:
+    model: time_surface
+    log_compression: 1.0
+    downsample_factor: 1
+    ts_decay_ms: 10.0
+    sensor_uuid: null
 
   task:
     name: hover_stop
