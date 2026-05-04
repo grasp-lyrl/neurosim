@@ -1,6 +1,6 @@
 """Task registry for Neurosim RL."""
 
-from .base import EventRepresentationManager, RLTask
+from .base import RewardOutcome, RLTask, TaskStep
 from .hover_stop import HoverStopTask
 from .reactive_dodge import ReactiveDodgeTask
 
@@ -15,9 +15,10 @@ def build_task(task_name: str, **kwargs) -> RLTask:
 
 
 __all__ = [
-    "EventRepresentationManager",
-    "RLTask",
     "HoverStopTask",
     "ReactiveDodgeTask",
+    "RewardOutcome",
+    "RLTask",
+    "TaskStep",
     "build_task",
 ]

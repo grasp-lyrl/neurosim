@@ -1,26 +1,28 @@
-"""Gymnasium environment wrapping the synchronous neurosim simulator.
+"""Gymnasium environments for Neurosim RL tasks.
 
-Supports a *hover-stop* task: the drone starts with a random translational
-velocity and must decelerate to a stable hover inside the scene without
-collisions, using event-camera observations.
+This module owns ``BaseNeurosimRLEnv`` — the boring shared plumbing
+(simulator construction, domain randomization, safety checks, event
+representation, reward/info plumbing) — plus a thin ``HoverStopEnv`` that
+plugs the hover-stop task in with no extras.
 
-Safety checks are delegated to Habitat pathfinder bounds and navigability.
+Tasks that need extra machinery (e.g. residual control on top of a
+nominal trajectory tracker for ``reactive_dodge``) live in their own
+module and subclass the base; see ``env_reactive_dodge.py``.
 
-Experiment configs are self-contained: scenes, sensors, a ``dynamics`` block
-(model / vehicle / control_abstraction, plus RL-only fields), the full
-``simulator`` block (rates, IMU, etc.), and optional
-``simulator.domain_randomization`` (``enabled``, ``resample_every`` for how
-often to rebuild the sim, and per-sensor specs under ``sensors``) gate
-scene/sensor sampling for
+Experiment configs are self-contained: scenes, sensors, ``dynamics``
+(model / vehicle / control_abstraction), ``simulator`` (rates), and
+``simulator.domain_randomization`` (``enabled`` / ``resample_every`` /
+per-sensor specs) gate scene/sensor sampling for
 :class:`~neurosim.sims.synchronous_simulator.randomized_simulator.RandomizedSimulator`.
-
-Dynamics randomization is optional under ``dynamics.domain_randomization``
-(``enabled``, ``resample_every``, ``scales``); omit the block to disable.
+Dynamics randomization is optional under
+``dynamics.domain_randomization`` (``enabled`` / ``resample_every`` /
+``scales``).
 
 Habitat-oriented defaults live in ``_VISUAL_BACKEND_DEFAULTS`` only;
-everything tunable for a run is in YAML. The RL policy supplies control via
-``sim.step()`` — no ``controller`` or ``trajectory`` entries in settings
-(same idea as omitting trajectory for ``sim.run()``-style workflows).
+everything tunable for a run is in YAML. The RL policy supplies control
+via ``sim.step()`` — no ``controller`` or ``trajectory`` entries in
+settings (same idea as omitting trajectory for ``sim.run()``-style
+workflows).
 """
 
 import copy
@@ -33,11 +35,10 @@ from pathlib import Path
 import gymnasium as gym
 from gymnasium import spaces
 
+from neurosim.rl.representations import EventRepresentationManager
 from neurosim.rl.safety import HabitatSafetyChecker
-from neurosim.rl.tasks import EventRepresentationManager, RLTask, build_task
+from neurosim.rl.tasks import RLTask, TaskStep, build_task
 from neurosim.rl.vehicles import build_vehicle
-from neurosim.core.control import create_controller
-from neurosim.core.trajectory import create_trajectory
 from neurosim.sims.synchronous_simulator import RandomizedSimulator
 
 # ---------------------------------------------------------------------------
@@ -61,30 +62,34 @@ _VISUAL_BACKEND_DEFAULTS: dict[str, Any] = {
 }
 
 
-class NeurosimRLEnv(gym.Env):
-    """Single-drone RL environment with CTBR actions and pluggable tasks.
+class BaseNeurosimRLEnv(gym.Env):
+    """Shared Gymnasium env skeleton for Neurosim tasks.
 
-    Action space - 4-D continuous:
-        Normalized policy action in [-1, 1]^4.
-        Internally rescaled to [collective_thrust, roll_rate, pitch_rate, yaw_rate].
+    Subclass for a specific task and override the small set of hooks
+    documented under "Subclass hooks". The base class handles all the
+    Habitat / RotorPy / DR / safety plumbing, plus the per-step substep
+    loop and reward bookkeeping.
 
-    Observation modes:
-        "events"   - event histogram only  (2, H, W)
-        "state"    - privileged state only (13,)
-        "combined" - Dict {"events", "state"} (default, for SB3 MultiInputPolicy)
+    Action space (default): the underlying vehicle's action_space.
+    Subclasses can override ``_build_action_space`` if the task's policy
+    operates over a different shape (e.g. a residual on top of a nominal
+    command).
 
-    Safety checks are performed via Habitat pathfinder bounds and
-    navigability queries.
+    Observation space (default): obs_mode dispatch — ``state`` (Box of
+    ``task.state_observation_dim``), ``events`` (event tensor Box), or
+    ``combined`` (Dict of both). The state vector itself is produced by
+    the task's :meth:`RLTask.make_state_observation`, so tasks that need
+    extra features (tracking errors, lookaheads, etc.) extend it there.
 
     ``train=True`` forces Rerun visualization off regardless of
-    ``env_config["enable_visualization"]`` (for SB3 training; rollouts use
-    ``train=False``).
+    ``env_config["enable_visualization"]`` (for SB3 training; rollouts
+    use ``train=False``).
     """
 
     def __init__(self, env_config: dict[str, Any], *, train: bool = False):
         super().__init__()
 
-        # Worker setup --------------------------------------------------------------------
+        # Worker-side disk log (optional; injected by train_sb3.make_env).
         self._worker_log_setup(env_config)
 
         # Observation mode -----------------------------------------------------------------
@@ -96,23 +101,12 @@ class NeurosimRLEnv(gym.Env):
         self.episode_seconds = env_config["episode_seconds"]
         self.init_speed_range = env_config["init_speed_range"]
 
-        # Event representation -------------------------------------------------------------
-        self.event_downsample_factor = env_config.get("event_downsample_factor", 1)
-        self.event_representation = env_config.get(
-            "event_representation", "time_surface"
-        )
-        if self.event_representation not in {
-            "histogram",
-            "event_frame",
-            "time_surface",
-        }:
-            raise ValueError(
-                "event_representation must be 'histogram', 'event_frame', or 'time_surface'"
-            )
-        self.event_log_compression = env_config.get("event_log_compression", 1.0)
-        self._event_ts_tau_seconds = env_config.get("event_ts_decay_ms", 10.0) * 1e-3
+        # Event representation block (kwargs match EventRepresentationManager
+        # constructor; sensor_uuid is consumed here, not by the manager).
+        event_rep_cfg = dict(env_config["event_representation"])
+        self._event_sensor_uuid_cfg = event_rep_cfg.pop("sensor_uuid", None)
+        self._event_representation_cfg = event_rep_cfg
 
-        # Visualization --------------------------------------------------------------------
         self.enable_visualization = (
             False if train else bool(env_config.get("enable_visualization", False))
         )
@@ -131,18 +125,7 @@ class NeurosimRLEnv(gym.Env):
         self.crash_penalty = float(self._task.crash_penalty)
         self._prev_action: np.ndarray | None = None
         self._enable_navigable_check = env_config.get("enable_navigable_check", True)
-        self._event_sensor_uuid_cfg = env_config.get("event_sensor_uuid")
         self._dynamics_config = env_config["dynamics"]
-        self._nominal_controller = None
-        self._nominal_trajectory = None
-        self._current_flat: dict[str, Any] | None = None
-        self._delta_thrust_fraction = 0.2
-        self._delta_rate_limits = np.asarray([2.0, 2.0, 1.0], dtype=np.float64)
-        self._residual_control_mode = "ctbr_delta"
-        self._last_task_context: dict[str, Any] = {}
-
-        self._safety: HabitatSafetyChecker | None = None
-        self.event_sensor_uuid = ""
 
         # Domain randomization -------------------------------------------------------------
         dr_cfg = env_config.get("simulator", {}).get("domain_randomization", {})
@@ -173,7 +156,7 @@ class NeurosimRLEnv(gym.Env):
         )
 
     # ------------------------------------------------------------------
-    # Settings builder
+    # Construction helpers
     # ------------------------------------------------------------------
 
     def _worker_log_setup(self, env_config: dict[str, Any]) -> None:
@@ -199,25 +182,20 @@ class NeurosimRLEnv(gym.Env):
 
         Expects ``env_config["simulator"]`` to be the full block passed to
         ``SimulationConfig`` (world/control rates, ``additional_sensors``,
-        ``sensor_rates``, ``viz_rates``, etc.).  Expects ``env_config["dynamics"]``
-        with ``model``, ``vehicle``, and ``control_abstraction`` (same shape as
-        top-level ``dynamics`` in full simulator YAMLs).  RL-only keys such as
-        ``ctbr_rate_limits`` and ``domain_randomization`` (including
-        ``resample_every``) are not forwarded to ``create_dynamics``.  Merges
-        optional ``visual_backend`` overrides with
-        ``_VISUAL_BACKEND_DEFAULTS``, then sets ``scene`` from the first entry in
-        ``scenes`` and ``sensors`` from ``env_config["sensors"]``.  Strips
-        ``domain_randomization`` from the ``simulator`` sub-dict before building
-        :class:`~neurosim.core.utils.utils_simcfg.SimulationConfig` (unknown keys
-        would otherwise be rejected).
+        ``sensor_rates``, ``viz_rates``, etc.). Expects ``env_config["dynamics"]``
+        with ``model``, ``vehicle``, and ``control_abstraction``. RL-only
+        keys such as ``ctbr_rate_limits`` and ``domain_randomization`` are
+        not forwarded to ``create_dynamics``. Strips ``domain_randomization``
+        from the ``simulator`` sub-dict before building
+        :class:`~neurosim.core.utils.utils_simcfg.SimulationConfig`.
 
         Omits ``controller`` and ``trajectory`` so the simulator runs under
-        external RL control via :meth:`~neurosim.sims.synchronous_simulator.simulator.SynchronousSimulator.step`.
+        external RL control via :meth:`SynchronousSimulator.step`.
         """
         if "simulator" not in env_config:
             raise KeyError(
                 'env_config must include a "simulator" block '
-                "(world_rate, control_rate, additional_sensors, sensor_rates, viz_rates, …)"
+                "(world_rate, control_rate, additional_sensors, sensor_rates, viz_rates, ...)"
             )
 
         scenes = env_config["scenes"]
@@ -265,22 +243,16 @@ class NeurosimRLEnv(gym.Env):
         event_cfg = self.sim.config.visual_sensors[self.event_sensor_uuid]
         self._raw_event_height = int(event_cfg["height"])
         self._raw_event_width = int(event_cfg["width"])
-        self.event_height = self._raw_event_height // self.event_downsample_factor
-        self.event_width = self._raw_event_width // self.event_downsample_factor
-        if self.event_height <= 0 or self.event_width <= 0:
-            raise ValueError(
-                "event_downsample_factor is too large for event sensor resolution"
-            )
 
         self._event_manager = EventRepresentationManager(
-            representation=self.event_representation,
             raw_height=self._raw_event_height,
             raw_width=self._raw_event_width,
-            downsample_factor=self.event_downsample_factor,
-            event_log_compression=self.event_log_compression,
-            ts_tau_seconds=self._event_ts_tau_seconds,
             event_device=f"cuda:{int(self.sim.settings['visual_backend']['gpu_id'])}",
+            **self._event_representation_cfg,
         )
+        self.event_height = self._event_manager.downsampled_height
+        self.event_width = self._event_manager.downsampled_width
+
         if self._worker_log is not None:
             self._worker_log.info(
                 f"event_manager initialized on device={self._event_manager._device}",
@@ -290,26 +262,11 @@ class NeurosimRLEnv(gym.Env):
             sim=self.sim,
             dynamics_config=self._dynamics_config,
         )
-        if self._task.uses_nominal_controller:
-            residual_cfg = getattr(self._task, "residual_control_config", {}) or {}
-            self._residual_control_mode = str(residual_cfg.get("mode", "ctbr_delta"))
-            self._delta_thrust_fraction = float(
-                residual_cfg.get("delta_thrust_fraction", 0.2)
-            )
-            self._delta_rate_limits = np.asarray(
-                residual_cfg.get("delta_rate_limits", [2.0, 2.0, 1.0]),
-                dtype=np.float64,
-            )
-            action_dim = int(self._task.action_dim or 4)
-            self.action_space = spaces.Box(
-                low=-1.0,
-                high=1.0,
-                shape=(action_dim,),
-                dtype=np.float32,
-            )
-        else:
-            self.action_space = self._vehicle.action_space
+        self.action_space = self._build_action_space()
+        self.observation_space = self._build_observation_space()
 
+    def _build_observation_space(self) -> spaces.Space:
+        """Build observation_space from obs_mode and the task's state dim."""
         event_space = spaces.Box(
             low=0.0,
             high=1.0,
@@ -322,15 +279,91 @@ class NeurosimRLEnv(gym.Env):
             shape=(self._task.state_observation_dim,),
             dtype=np.float32,
         )
-
         if self.obs_mode == "events":
-            self.observation_space = event_space
-        elif self.obs_mode == "state":
-            self.observation_space = state_space
-        else:
-            self.observation_space = spaces.Dict(
-                {"events": event_space, "state": state_space}
-            )
+            return event_space
+        if self.obs_mode == "state":
+            return state_space
+        return spaces.Dict({"events": event_space, "state": state_space})
+
+    # ------------------------------------------------------------------
+    # Subclass hooks: THESE ARE OVERRIDDEN BY TASK-SPECIFIC ENVS
+    # ------------------------------------------------------------------
+
+    def _build_action_space(self) -> spaces.Space:
+        """Action space for the policy. Default: the vehicle's action space.
+
+        Override when the policy operates over a different shape (e.g. a
+        residual on top of a nominal command).
+        """
+        return self._vehicle.action_space
+
+    def _control_from_action(self, action: np.ndarray) -> dict[str, np.ndarray | float]:
+        """Convert a raw policy action into the control dict sent to ``sim.step``.
+
+        Default: pass the action straight through the vehicle. Override
+        when the action needs to be combined with anything else (e.g.
+        added as a residual to a nominal command).
+        """
+        return self._vehicle.action_to_control(action)
+
+    def _on_episode_reset(
+        self,
+        *,
+        rng: np.random.Generator,
+        hab_start: np.ndarray,
+    ) -> None:
+        """Set the per-episode initial state. Called once per ``reset()``.
+
+        Called after ``self.sim.time`` has been zeroed and a navigable
+        ``hab_start`` (Habitat-frame position) has been sampled, but
+        before the agent state is pushed to the visual backend, the
+        event manager is reset, or the first observation is composed.
+        The override is responsible for writing
+        ``self.sim.dynamics.state`` — and may also build any per-episode
+        components it needs (e.g. a random trajectory or a fresh
+        tracking controller).
+
+        Default behaviour: place the drone at the dynamics-frame
+        equivalent of ``hab_start`` with a random initial velocity drawn
+        from ``self.init_speed_range`` and a level orientation.
+        """
+        x0 = (self.sim.coord_trans.pos_transform_inv @ hab_start).astype(np.float32)
+        speed = rng.uniform(*self.init_speed_range)
+        direction = rng.standard_normal(3).astype(np.float32)
+        direction /= np.linalg.norm(direction) + 1e-8
+        v0 = (direction * speed).astype(np.float32)
+        q0 = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        w0 = np.zeros(3, dtype=np.float32)
+        self.sim.dynamics.state = {"x": x0, "v": v0, "q": q0, "w": w0}
+
+    def _populate_task_context(
+        self,
+        *,
+        state: dict[str, np.ndarray],
+        action: np.ndarray | None,
+    ) -> None:
+        """Feed extra environment-side context into ``self._task.set_context``.
+
+        Called once before each call into ``self._task`` (in ``reset()``
+        before the first observation with ``action=None``, and in
+        ``step()`` before ``compute_reward`` with the current action).
+        Default: no-op. Override to push tracking errors, threat metrics,
+        or other per-step quantities the task needs but that don't fit
+        cleanly inside ``TaskStep`` (e.g. because they are accumulated
+        across substeps or read from another component).
+        """
+
+    def _step_info_extras(self, reward_terms: dict[str, float]) -> dict[str, Any]:
+        """Extra fields to add to the step / reset info dict. Default: none.
+
+        Override to surface task-specific metrics or context (e.g. threat
+        info, tracking errors) to callers.
+        """
+        return {}
+
+    # ------------------------------------------------------------------
+    # Public helpers used by tools / scripts
+    # ------------------------------------------------------------------
 
     @property
     def sim(self):
@@ -349,27 +382,6 @@ class NeurosimRLEnv(gym.Env):
             axis=0,
         )
 
-    def _compose_observation(
-        self,
-        event_rep: np.ndarray | None,
-        state: dict[str, np.ndarray],
-    ) -> np.ndarray | dict[str, np.ndarray]:
-        base_state = self._state_vector(state)
-        state_vec = self._task.make_state_observation(
-            state=state,
-            base_state=base_state,
-        )
-        if self.obs_mode == "state":
-            return state_vec
-
-        if event_rep is None:
-            raise ValueError(
-                f"event representation is required for obs_mode={self.obs_mode!r}"
-            )
-        if self.obs_mode == "events":
-            return event_rep
-        return {"events": event_rep, "state": state_vec}
-
     @staticmethod
     def _quat_from_yaw(yaw: float) -> np.ndarray:
         half_yaw = 0.5 * float(yaw)
@@ -378,293 +390,53 @@ class NeurosimRLEnv(gym.Env):
             dtype=np.float32,
         )
 
-    def _build_nominal_controller(self) -> None:
-        controller_cfg = dict(getattr(self._task, "controller_config", {}) or {})
-        controller_cfg.setdefault("model", "rotorpy_se3")
-        controller_cfg.setdefault("vehicle", self._dynamics_config["vehicle"])
-        self._nominal_controller = create_controller(**controller_cfg)
+    # ------------------------------------------------------------------
+    # Observation assembly
+    # ------------------------------------------------------------------
 
-    def _build_nominal_trajectory(
+    def _compose_observation(
         self,
-        *,
-        hab_start: np.ndarray,
-        rng: np.random.Generator,
-    ) -> None:
-        trajectory_cfg = dict(getattr(self._task, "trajectory_config", {}) or {})
-        trajectory_cfg.setdefault("model", "habitat_random_minsnap")
-        trajectory_cfg.setdefault("target_length", max(5.0, self.episode_seconds))
-        trajectory_cfg.setdefault("min_waypoint_distance", 2.0)
-        trajectory_cfg.setdefault("max_waypoints", 100)
-        trajectory_cfg.setdefault("v_avg", 1.0)
-        trajectory_cfg.setdefault("start", hab_start)
-        trajectory_cfg["pathfinder"] = self.sim.visual_backend._sim.pathfinder
-        trajectory_cfg["coord_transform"] = self.sim.coord_trans.inverse_transform_batch
-        if "seed" not in trajectory_cfg:
-            trajectory_cfg["seed"] = int(rng.integers(0, np.iinfo(np.int32).max))
-        self._nominal_trajectory = create_trajectory(**trajectory_cfg)
-
-    def _reset_nominal_tracking(
-        self,
-        *,
-        hab_start: np.ndarray,
-        rng: np.random.Generator,
-    ) -> None:
-        self._build_nominal_controller()
-        self._build_nominal_trajectory(hab_start=hab_start, rng=rng)
-        self._current_flat = self._nominal_trajectory.update(self.sim.time)
-
-        yaw = float(self._current_flat.get("yaw", 0.0))
-        yaw_dot = float(self._current_flat.get("yaw_dot", 0.0))
-        self.sim.dynamics.state = {
-            "x": np.asarray(self._current_flat["x"], dtype=np.float32),
-            "v": np.asarray(self._current_flat["x_dot"], dtype=np.float32),
-            "q": self._quat_from_yaw(yaw),
-            "w": np.zeros(3, dtype=np.float32),
-            "yaw": yaw,
-            "yaw_dot": yaw_dot,
-        }
-
-    def _nominal_control(self) -> dict[str, np.ndarray | float]:
-        if self._nominal_controller is None or self._nominal_trajectory is None:
-            raise RuntimeError("Nominal controller/trajectory requested before reset")
-        self._current_flat = self._nominal_trajectory.update(self.sim.time)
-        return self._nominal_controller.update(
-            self.sim.time,
-            self.sim.dynamics.state,
-            self._current_flat,
-        )
-
-    def _lookahead_errors(self, state: dict[str, np.ndarray]) -> list[np.ndarray]:
-        if not self._task.uses_nominal_controller or self._nominal_trajectory is None:
-            return []
-        errors = []
-        for dt in getattr(self._task, "lookahead_seconds", ()):
-            flat = self._nominal_trajectory.update(self.sim.time + float(dt))
-            errors.append(
-                np.asarray(state["x"], dtype=np.float32)
-                - np.asarray(flat["x"], dtype=np.float32)
-            )
-        return errors
-
-    @staticmethod
-    def _constant_velocity_closest_approach(
-        rel_pos: np.ndarray,
-        rel_vel: np.ndarray,
-        horizon_s: float,
-    ) -> tuple[float, float]:
-        rel_pos = np.asarray(rel_pos, dtype=np.float64)
-        rel_vel = np.asarray(rel_vel, dtype=np.float64)
-        speed_sq = float(np.dot(rel_vel, rel_vel))
-        if speed_sq < 1e-9:
-            return float(np.linalg.norm(rel_pos)), np.inf
-        tca = -float(np.dot(rel_pos, rel_vel)) / speed_sq
-        tca = float(np.clip(tca, 0.0, horizon_s))
-        closest = rel_pos + rel_vel * tca
-        return float(np.linalg.norm(closest)), tca
-
-    @staticmethod
-    def _obstacle_velocity(item: Any) -> np.ndarray:
-        obj_vel = getattr(item.obj, "linear_velocity", None)
-        if obj_vel is not None:
-            return np.asarray(obj_vel, dtype=np.float64)
-        return np.asarray(item.velocity, dtype=np.float64)
-
-    def _nominal_counterfactual_collision(
-        self,
-        *,
-        obstacle_pos: np.ndarray,
-        obstacle_vel: np.ndarray,
-        combined_radius: float,
-        horizon_s: float,
-        threshold_m: float,
-    ) -> bool:
-        if self._nominal_trajectory is None:
-            return False
-
-        samples = max(int(np.ceil(horizon_s * self.sim.config.control_rate)), 2)
-        samples = min(samples, 20)
-        for dt in np.linspace(0.0, horizon_s, samples):
-            flat = self._nominal_trajectory.update(self.sim.time + float(dt))
-            nominal_pos = self._safety.dynamics_to_habitat(
-                np.asarray(flat["x"], dtype=np.float64)
-            )
-            future_obstacle = obstacle_pos + obstacle_vel * float(dt)
-            clearance = float(
-                np.linalg.norm(future_obstacle - nominal_pos) - combined_radius
-            )
-            if clearance <= threshold_m:
-                return True
-        return False
-
-    def _obstacle_metrics(self, state: dict[str, np.ndarray]) -> dict[str, Any]:
-        empty_metrics = {
-            "min_obstacle_distance": np.inf,
-            "predicted_closest_distance": np.inf,
-            "time_to_closest_approach": np.inf,
-            "obstacle_threat": False,
-            "threat_ids": (),
-            "near_miss_ids": (),
-            "nominal_counterfactual_collision": False,
-        }
-        if self._safety is None:
-            return empty_metrics
-
-        dynamic_obstacles = getattr(self.sim.visual_backend, "_dynamic_obstacles", None)
-        active = getattr(dynamic_obstacles, "_active", {}) if dynamic_obstacles else {}
-        if not active:
-            return empty_metrics
-
-        agent_pos = self._safety.dynamics_to_habitat(np.asarray(state["x"]))
-        agent_vel = np.asarray(
-            self._safety._pos_transform, dtype=np.float64
-        ) @ np.asarray(state["v"], dtype=np.float64)
-        min_distance = np.inf
-        min_predicted_distance = np.inf
-        min_tca = np.inf
-        threat_ids: list[int] = []
-        near_miss_ids: list[int] = []
-        nominal_counterfactual_collision = False
-        agent_height = float(getattr(dynamic_obstacles, "_agent_height", 0.0))
-        agent_radius = float(getattr(dynamic_obstacles, "_agent_radius", 0.0))
-        horizon_s = float(getattr(self._task, "threat_time_horizon_s", 1.0))
-        threat_distance = float(getattr(self._task, "threat_distance_m", 1.5))
-        near_miss_radius = float(getattr(self._task, "near_miss_radius_m", 1.0))
-
-        for item in active.values():
-            obstacle_pos = np.asarray(item.obj.translation, dtype=np.float64)
-            obstacle_pos[1] -= agent_height
-            obstacle_vel = self._obstacle_velocity(item)
-            rel_pos = obstacle_pos - agent_pos
-            rel_vel = obstacle_vel - agent_vel
-            combined_radius = agent_radius + float(item.collision_radius)
-
-            clearance = float(np.linalg.norm(rel_pos) - combined_radius)
-            predicted_center_distance, tca = self._constant_velocity_closest_approach(
-                rel_pos,
-                rel_vel,
-                horizon_s,
-            )
-            predicted_clearance = predicted_center_distance - combined_radius
-
-            min_distance = min(min_distance, clearance)
-            if predicted_clearance < min_predicted_distance:
-                min_predicted_distance = predicted_clearance
-                min_tca = tca
-
-            object_id = int(item.object_id)
-            if predicted_clearance <= threat_distance and tca <= horizon_s:
-                threat_ids.append(object_id)
-            if clearance <= near_miss_radius:
-                near_miss_ids.append(object_id)
-            if self._nominal_counterfactual_collision(
-                obstacle_pos=obstacle_pos,
-                obstacle_vel=obstacle_vel,
-                combined_radius=combined_radius,
-                horizon_s=horizon_s,
-                threshold_m=threat_distance,
-            ):
-                nominal_counterfactual_collision = True
-
-        return {
-            "min_obstacle_distance": min_distance,
-            "predicted_closest_distance": min_predicted_distance,
-            "time_to_closest_approach": min_tca,
-            "obstacle_threat": bool(threat_ids),
-            "threat_ids": tuple(threat_ids),
-            "near_miss_ids": tuple(near_miss_ids),
-            "nominal_counterfactual_collision": nominal_counterfactual_collision,
-        }
-
-    def _action_gate_and_delta(self, action: np.ndarray) -> tuple[float, np.ndarray]:
-        action = np.asarray(action, dtype=np.float32).reshape(-1)
-        if self._residual_control_mode == "gated_ctbr_delta":
-            gate = float(np.clip(action[0], 0.0, 1.0))
-            delta = gate * action[1:5]
-            return gate, delta.astype(np.float32, copy=False)
-        return 1.0, action[:4].astype(np.float32, copy=False)
-
-    def _update_task_context(
-        self,
-        *,
+        event_rep: np.ndarray | None,
         state: dict[str, np.ndarray],
-        nominal_control: dict[str, np.ndarray | float] | None = None,
-        action: np.ndarray | None = None,
-    ) -> None:
-        context: dict[str, Any] = {
-            "flat": self._current_flat,
-            "sim_time": self.sim.time,
-            "lookahead_errors": self._lookahead_errors(state),
-            "previous_action": self._prev_action,
-        }
-        context.update(self._obstacle_metrics(state))
-        if nominal_control is not None:
-            context["nominal_control_normalized"] = self._vehicle.control_to_normalized(
-                nominal_control
-            )
-        if action is not None:
-            gate, delta = self._action_gate_and_delta(action)
-            context["correction_energy"] = float(np.mean(np.square(delta)))
-            context["gate_value"] = gate
-        self._last_task_context = context
-        self._task.set_context(context)
+    ) -> np.ndarray | dict[str, np.ndarray]:
+        if self.obs_mode == "events":
+            if event_rep is None:
+                raise ValueError("event representation required for obs_mode='events'")
+            return np.asarray(event_rep, dtype=np.float32)
 
-    def _task_context_info(self) -> dict[str, Any]:
-        keys = (
-            "sim_time",
-            "min_obstacle_distance",
-            "predicted_closest_distance",
-            "time_to_closest_approach",
-            "obstacle_threat",
-            "threat_ids",
-            "near_miss_ids",
-            "nominal_counterfactual_collision",
-            "correction_energy",
-            "gate_value",
+        state_vec = np.asarray(
+            self._task.make_state_observation(
+                state=state, base_state=self._state_vector(state)
+            ),
+            dtype=np.float32,
         )
+        if self.obs_mode == "state":
+            return state_vec
+
+        if event_rep is None:
+            raise ValueError("event representation required for obs_mode='combined'")
         return {
-            key: self._last_task_context[key]
-            for key in keys
-            if key in self._last_task_context
+            "events": np.asarray(event_rep, dtype=np.float32),
+            "state": state_vec,
         }
-
-    def _control_from_action(
-        self, action: np.ndarray
-    ) -> tuple[dict[str, np.ndarray | float], dict[str, np.ndarray | float] | None]:
-        if not self._task.uses_nominal_controller:
-            return self._vehicle.action_to_control(action), None
-
-        nominal_control = self._nominal_control()
-        gate, delta_action = self._action_gate_and_delta(action)
-        if self._residual_control_mode == "gated_ctbr_delta":
-            control = self._vehicle.apply_gated_ctbr_delta(
-                nominal_control,
-                gate,
-                action[1:5],
-                delta_thrust_fraction=self._delta_thrust_fraction,
-                delta_rate_limits=self._delta_rate_limits,
-            )
-        else:
-            control = self._vehicle.apply_ctbr_delta(
-                nominal_control,
-                delta_action,
-                delta_thrust_fraction=self._delta_thrust_fraction,
-                delta_rate_limits=self._delta_rate_limits,
-            )
-        return control, nominal_control
 
     # ------------------------------------------------------------------
     # Reward / termination
     # ------------------------------------------------------------------
 
-    def _compute_reward(
+    def _build_task_step(
         self,
+        *,
         state: dict[str, np.ndarray],
         action: np.ndarray,
-    ) -> tuple[float, dict[str, float]]:
-        return self._task.compute_reward(
+    ) -> TaskStep:
+        return TaskStep(
             state=state,
-            action=action,
+            base_state=self._state_vector(state),
+            action=np.asarray(action, dtype=np.float32),
             prev_action=self._prev_action,
+            sim_time=float(self.sim.time),
+            dt=float(self.steps_per_action / self.sim.config.world_rate),
             event_manager=self._event_manager,
             obs_mode=self.obs_mode,
         )
@@ -731,7 +503,6 @@ class NeurosimRLEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def _should_domain_randomize_now(self) -> bool:
-        """True when ``RandomizedSimulator.randomize`` should run on this reset."""
         if not self._dr_enabled:
             return False
         return self._episode_count % self._resample_every == 0
@@ -746,10 +517,8 @@ class NeurosimRLEnv(gym.Env):
                     f"domain_randomization_start episode_count={self._episode_count}",
                 )
             t0 = time.perf_counter()
-
             self._rsim.randomize(rng)
             self._sync_from_simulator()
-
             if self._worker_log is not None:
                 self._worker_log.info(
                     f"domain_randomization_done episode_count={self._episode_count} "
@@ -758,34 +527,21 @@ class NeurosimRLEnv(gym.Env):
             self._visualizer_initialized = False
 
         self._vehicle.randomize(self._episode_count, rng)
-
         self._ensure_visualizer()
         self._task.on_reset()
         self._prev_action = None
-        self._current_flat = None
         if self.enable_visualization:
             self._rr_needs_episode_stream_switch = True
 
-        # Sample a valid navigable starting position in Habitat space,
-        # then convert to dynamics frame.
+        # Sample a valid navigable starting position in Habitat space.
         hab_start = self._safety.sample_habitat_start()
-        x0 = (self.sim.coord_trans.pos_transform_inv @ hab_start).astype(np.float32)
 
         self.sim.time = 0.0
         self.sim.simsteps = 0
 
-        if self._task.uses_nominal_controller:
-            self._reset_nominal_tracking(hab_start=hab_start, rng=rng)
-        else:
-            # Random initial velocity (random direction, speed from range).
-            speed = rng.uniform(*self.init_speed_range)
-            direction = rng.standard_normal(3).astype(np.float32)
-            direction /= np.linalg.norm(direction) + 1e-8
-            v0 = (direction * speed).astype(np.float32)
-
-            q0 = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
-            w0 = np.zeros(3, dtype=np.float32)
-            self.sim.dynamics.state = {"x": x0, "v": v0, "q": q0, "w": w0}
+        # Subclass hook fills in self.sim.dynamics.state and any per-episode
+        # components (e.g. nominal trajectory).
+        self._on_episode_reset(rng=rng, hab_start=hab_start)
 
         position, quaternion = self.sim.coord_trans.transform(
             self.sim.dynamics.state["x"], self.sim.dynamics.state["q"]
@@ -794,26 +550,21 @@ class NeurosimRLEnv(gym.Env):
 
         self._event_manager.reset_episode()
         event_rep = self._event_manager.observation()
-        reset_nominal_control = (
-            self._nominal_control() if self._task.uses_nominal_controller else None
-        )
-        self._update_task_context(
-            state=self.sim.dynamics.state,
-            nominal_control=reset_nominal_control,
-        )
+
+        self._populate_task_context(state=self.sim.dynamics.state, action=None)
 
         observation = self._compose_observation(event_rep, self.sim.dynamics.state)
         info: dict[str, Any] = {
             "time": self.sim.time,
             "simsteps": self.sim.simsteps,
-            "task_context": self._task_context_info(),
         }
+        info.update(self._step_info_extras({}))
         self._episode_count += 1
         return observation, info
 
     def step(self, action: np.ndarray):
         action = np.asarray(action, dtype=np.float32)
-        control, nominal_control = self._control_from_action(action)
+        control = self._control_from_action(action)
 
         self._event_manager.begin_step()
         events_accum = self.obs_mode != "state"
@@ -831,17 +582,17 @@ class NeurosimRLEnv(gym.Env):
         self._maybe_visualize(None, event_rep)
 
         state = self.sim.dynamics.state
-        self._update_task_context(
-            state=state,
-            nominal_control=nominal_control,
-            action=action,
+        self._populate_task_context(state=state, action=action)
+
+        outcome = self._task.compute_reward(
+            self._build_task_step(state=state, action=action)
         )
-        reward, reward_terms = self._compute_reward(state, action)
+        reward = float(outcome.reward)
+        reward_terms = outcome.terms
         self._prev_action = action.copy()
 
         terminated, term_reason = self._check_terminated(state)
         truncated = self.sim.time >= self.episode_seconds
-
         is_success = self._check_success(state) if not terminated else False
 
         if terminated:
@@ -854,26 +605,9 @@ class NeurosimRLEnv(gym.Env):
             "time": self.sim.time,
             "simsteps": self.sim.simsteps,
             "reward_terms": reward_terms,
-            "task_context": self._task_context_info(),
-            "task_metrics": {
-                key: reward_terms[key]
-                for key in (
-                    "min_obstacle_distance",
-                    "predicted_closest_distance",
-                    "time_to_closest_approach",
-                    "obstacle_threat",
-                    "meaningful_encounter_count",
-                    "near_miss_count",
-                    "nominal_counterfactual_collision_count",
-                    "dodge_success_count",
-                    "post_dodge_recovery_time",
-                    "correction_energy",
-                    "gate_value",
-                )
-                if key in reward_terms
-            },
             "is_success": is_success,
         }
+        info.update(self._step_info_extras(reward_terms))
         if term_reason:
             info["termination_reason"] = term_reason
 
@@ -883,6 +617,14 @@ class NeurosimRLEnv(gym.Env):
         if self._worker_log is not None:
             self._worker_log.info("worker_close")
             self._worker_log = None
-
         if hasattr(self, "_rsim"):
             self._rsim.close()
+
+
+class HoverStopEnv(BaseNeurosimRLEnv):
+    """Hover-stop env: drone starts with random velocity, must hover.
+
+    All defaults of ``BaseNeurosimRLEnv`` apply: 4-D CTBR action passed
+    straight to the vehicle, 13-D base state observation, random
+    initial-velocity reset.
+    """

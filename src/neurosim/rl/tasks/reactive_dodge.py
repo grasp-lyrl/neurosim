@@ -1,13 +1,11 @@
 """Reactive-dodge task for residual control over nominal trajectory tracking."""
 
-from __future__ import annotations
-
-from dataclasses import dataclass
 from typing import Any
+from dataclasses import dataclass
 
 import numpy as np
 
-from .base import EventRepresentationManager, RLTask
+from .base import RewardOutcome, RLTask, TaskStep
 
 
 @dataclass(slots=True)
@@ -110,18 +108,24 @@ class ReactiveDodgeTask(RLTask):
         self.controller_config = dict(controller or {})
         self.trajectory_config = dict(trajectory or {})
         self.residual_control_config = dict(residual_control or {})
-        self.residual_control_mode = str(
-            self.residual_control_config.get("mode", "ctbr_delta")
-        )
-        if self.residual_control_mode not in {"ctbr_delta", "gated_ctbr_delta"}:
+        rc = dict(self.residual_control_config)
+        mode = str(rc.pop("mode", "ctbr_delta"))
+        if mode not in {"ctbr_delta", "gated_ctbr_delta"}:
             raise ValueError(
                 "reactive_dodge residual_control.mode must be "
                 "'ctbr_delta' or 'gated_ctbr_delta'"
             )
-        default_action_dim = (
-            5 if self.residual_control_mode == "gated_ctbr_delta" else 4
-        )
-        self._action_dim = default_action_dim if action_dim is None else int(action_dim)
+        self.residual_control_mode = mode
+        self.delta_thrust_fraction = float(rc.pop("delta_thrust_fraction", 0.2))
+        self.delta_rate_limits = np.asarray(
+            rc.pop("delta_rate_limits", [2.0, 2.0, 1.0]),
+            dtype=np.float64,
+        ).reshape(3)
+        if rc:
+            unknown = ", ".join(sorted(rc))
+            raise ValueError(f"Unknown residual_control keys: {unknown}")
+        default_dim = 5 if mode == "gated_ctbr_delta" else 4
+        self._action_dim = default_dim if action_dim is None else int(action_dim)
         self._context = ReactiveDodgeContext()
         self._last_termination_reason = ""
         self.on_reset()
@@ -237,12 +241,19 @@ class ReactiveDodgeTask(RLTask):
         ]
         return np.concatenate(obs_parts, axis=0).astype(np.float32, copy=False)
 
-    def _applied_residual(self, action: np.ndarray) -> tuple[float, np.ndarray]:
+    def split_action(self, action: np.ndarray) -> tuple[float, np.ndarray]:
+        """Split a raw policy action into ``(gate, residual_delta)``.
+
+        For ``ctbr_delta`` mode: gate is fixed to 1.0 and the delta is the
+        first 4 components of ``action``. For ``gated_ctbr_delta`` mode:
+        ``action[0]`` is clipped to ``[0, 1]`` as the gate and scales
+        ``action[1:5]`` to produce the delta.
+        """
         action = np.asarray(action, dtype=np.float32).reshape(-1)
         if self.residual_control_mode == "gated_ctbr_delta":
             gate = float(np.clip(action[0], 0.0, 1.0))
-            residual = gate * action[1:5]
-            return gate, residual.astype(np.float32, copy=False)
+            delta = (gate * action[1:5]).astype(np.float32, copy=False)
+            return gate, delta
         return 1.0, action[:4].astype(np.float32, copy=False)
 
     def _update_encounter_metrics(self, pos_norm: float) -> tuple[bool, float]:
@@ -274,16 +285,8 @@ class ReactiveDodgeTask(RLTask):
 
         return False, self._last_recovery_time
 
-    def compute_reward(
-        self,
-        *,
-        state: dict[str, np.ndarray],
-        action: np.ndarray,
-        prev_action: np.ndarray | None,
-        event_manager: EventRepresentationManager,
-        obs_mode: str,
-    ) -> tuple[float, dict[str, float]]:
-        _ = event_manager, obs_mode
+    def compute_reward(self, step: TaskStep) -> RewardOutcome:
+        state = step.state
         pos_err, vel_err, yaw_err = self._tracking_errors(state)
         pos_norm = float(np.linalg.norm(pos_err))
         vel_norm = float(np.linalg.norm(vel_err))
@@ -293,13 +296,13 @@ class ReactiveDodgeTask(RLTask):
         q = np.asarray(state["q"], dtype=np.float32)
         tilt_penalty = float(np.linalg.norm(q[:2]))
 
-        action = np.asarray(action, dtype=np.float32)
-        gate_value, applied_residual = self._applied_residual(action)
-        correction_energy = float(np.mean(np.square(applied_residual)))
-        if prev_action is None:
+        action = np.asarray(step.action, dtype=np.float32)
+        gate_value, applied_delta = self.split_action(action)
+        correction_energy = float(np.mean(np.square(applied_delta)))
+        if step.prev_action is None:
             action_smoothness = 0.0
         else:
-            action_smoothness = float(np.linalg.norm(action - prev_action))
+            action_smoothness = float(np.linalg.norm(action - step.prev_action))
 
         no_threat_weight = (
             0.0 if self._context.obstacle_threat else self.w_no_threat_correction
@@ -339,7 +342,7 @@ class ReactiveDodgeTask(RLTask):
         else:
             self._tracking_failure_count = 0
 
-        return reward, {
+        terms = {
             "pos_error": pos_norm,
             "vel_error": vel_norm,
             "yaw_error": yaw_abs,
@@ -367,9 +370,9 @@ class ReactiveDodgeTask(RLTask):
             "r_attitude": r_attitude,
             "r_dodge_success": r_dodge_success,
         }
+        return RewardOutcome(reward=reward, terms=terms)
 
     def check_success(self, *, state: dict[str, np.ndarray]) -> bool:
-        _ = state
         if self._sample_count == 0:
             return False
         pos_rmse = float(np.sqrt(self._pos_sq_sum / self._sample_count))
@@ -390,7 +393,6 @@ class ReactiveDodgeTask(RLTask):
         )
 
     def check_terminated(self, *, state: dict[str, np.ndarray]) -> tuple[bool, str]:
-        _ = state
         if (
             self.tracking_failure_steps > 0
             and self._tracking_failure_count >= self.tracking_failure_steps
