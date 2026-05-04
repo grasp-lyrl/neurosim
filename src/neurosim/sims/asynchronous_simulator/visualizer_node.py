@@ -48,6 +48,7 @@ class VisualizerNode(Node):
         memory_limit: str = "10%",
         keep_latest: bool = True,
         mode: str = "spawn",
+        stream_only: bool = False,
     ):
         """
         Initialize the Visualizer Node.
@@ -66,6 +67,11 @@ class VisualizerNode(Node):
             mode: Rerun operating mode. Options:
                   - "spawn": Spawn local viewer (default)
                   - "serve": Start gRPC server for remote viewing (run on server)
+            stream_only: If True, log everything as static data so each entity
+                         overwrites in place. The viewer never accumulates a
+                         time-series, so it never hits the memory limit and
+                         goes black. No scrubbing, no history — just live.
+                         Implies ``keep_latest`` semantics.
         """
         ensure_discovery_daemon(discovery_address)
         super().__init__("neurosim_visualizer", discovery_address=discovery_address)
@@ -97,9 +103,14 @@ class VisualizerNode(Node):
         else:
             raise ValueError(f"Invalid mode: {mode}. Must be 'spawn' or 'serve'")
 
-        rr.set_time("sim_time", timestamp=0)
-        self.keep_latest = keep_latest
-        self.visualizer = RerunVisualizer(self.config, use_gpu=False, device="cpu")
+        self.stream_only = stream_only
+        # In stream-only mode there's no timeline — everything is static.
+        self.keep_latest = keep_latest or stream_only
+        if not stream_only:
+            rr.set_time("sim_time", timestamp=0)
+        self.visualizer = RerunVisualizer(
+            self.config, use_gpu=False, device="cpu", stream_only=stream_only
+        )
         self.visualizer.enabled = True
 
         # Initialize Cortex subscriptions and timers
@@ -190,7 +201,10 @@ class VisualizerNode(Node):
             self._stats["received_state"] += 1
 
             # Visualize with Rerun
-            rr.set_time("sim_time", timestamp=0.0 if self.keep_latest else timestamp)
+            if not self.stream_only:
+                rr.set_time(
+                    "sim_time", timestamp=0.0 if self.keep_latest else timestamp
+                )
             self.visualizer.log_state(state)
 
     async def receive_events(
@@ -310,21 +324,27 @@ async def main():
         default="10%",
         help="Memory limit for Rerun process (e.g., '10%%', '2GB')",
     )
+    parser.add_argument(
+        "--stream-only",
+        action="store_true",
+        help=(
+            "Log everything as static data so the viewer never accumulates a "
+            "time-series. Avoids the black-screen issue when memory_limit is hit."
+        ),
+    )
     args = parser.parse_args()
 
-    node = VisualizerNode(
+    async with VisualizerNode(
         settings=args.settings,
         discovery_address=args.discovery_address,
         mode=args.mode,
         memory_limit=args.memory_limit,
-    )
-
-    try:
-        await node.run()
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received.")
-    finally:
-        await node.close()
+        stream_only=args.stream_only,
+    ) as node:
+        try:
+            await node.run()
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received.")
 
 
 if __name__ == "__main__":

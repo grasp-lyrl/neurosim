@@ -206,18 +206,29 @@ class RerunVisualizer:
     Only transfers data to CPU when visualization is actually performed.
     """
 
-    def __init__(self, config, use_gpu: bool = True, device: str = "cuda:0"):
+    def __init__(
+        self,
+        config,
+        use_gpu: bool = True,
+        device: str = "cuda:0",
+        stream_only: bool = False,
+    ):
         """
         Initialize the Rerun visualizer.
 
         Args:
             config: Simulation configuration
             use_gpu: Use GPU buffers for event accumulation (default: True)
+            stream_only: If True, log everything as static data so each
+                entity overwrites in place. The viewer never grows a
+                time-series, so memory stays bounded indefinitely. No
+                scrubbing or history — pure live display.
         """
         self.config = config
         self.enabled = False
         self.use_gpu = use_gpu
         self.device = device
+        self.stream_only = stream_only
         self._display = True
         self._memory_limit = "10%"
         self._episode_streams: dict[int, object] = {}
@@ -318,7 +329,9 @@ class RerunVisualizer:
         if not self.enabled:
             return
 
-        rr.set_time("sim_time", timestamp=time)
+        static = self.stream_only
+        if not static:
+            rr.set_time("sim_time", timestamp=time)
 
         for uuid, measurement in measurements.items():
             sensor_cfg = self.config.sensor_manager.get_sensor_config(uuid)
@@ -338,6 +351,7 @@ class RerunVisualizer:
                 rr.log(
                     f"sensors/{uuid}/events",
                     rr.Image(self.event_viz_states[uuid].get_image()),
+                    static=static,
                 )
                 # Reset buffer after visualization
                 self.event_viz_states[uuid].reset()
@@ -346,35 +360,49 @@ class RerunVisualizer:
                 # Transfer from GPU only for visualization
                 if hasattr(measurement, "cpu"):
                     measurement = measurement.cpu().numpy()
-                rr.log(f"sensors/{uuid}/color", rr.Image(measurement))
+                rr.log(f"sensors/{uuid}/color", rr.Image(measurement), static=static)
 
             elif sensor_type == "semantic":
                 # Transfer from GPU only for visualization
                 if hasattr(measurement, "cpu"):
                     measurement = measurement.cpu().numpy()
-                rr.log(f"sensors/{uuid}/semantic", rr.Image(measurement))
+                rr.log(f"sensors/{uuid}/semantic", rr.Image(measurement), static=static)
 
             elif sensor_type == "depth":
                 # Transfer from GPU only for visualization
                 if hasattr(measurement, "cpu"):
                     measurement = measurement.cpu().numpy()
-                rr.log(f"sensors/{uuid}/depth", rr.DepthImage(measurement))
+                rr.log(
+                    f"sensors/{uuid}/depth",
+                    rr.DepthImage(measurement),
+                    static=static,
+                )
 
             elif sensor_type == "imu":
                 # IMU data is typically small, already on CPU
-                rr.log(f"sensors/{uuid}/accel", rr.Scalars(measurement["accel"]))
-                rr.log(f"sensors/{uuid}/gyro", rr.Scalars(measurement["gyro"]))
+                rr.log(
+                    f"sensors/{uuid}/accel",
+                    rr.Scalars(measurement["accel"]),
+                    static=static,
+                )
+                rr.log(
+                    f"sensors/{uuid}/gyro",
+                    rr.Scalars(measurement["gyro"]),
+                    static=static,
+                )
 
             elif sensor_type == "navmesh":
                 # Navmesh is already a numpy array on CPU
-                rr.log(f"sensors/{uuid}/navmesh", rr.Image(measurement))
+                rr.log(f"sensors/{uuid}/navmesh", rr.Image(measurement), static=static)
 
             elif sensor_type == "optical_flow":
                 # Transfer from GPU and convert to color visualization
                 if hasattr(measurement, "cpu"):
                     measurement = measurement.cpu().numpy()
                 flow_rgb = flow_to_color(measurement)
-                rr.log(f"sensors/{uuid}/optical_flow", rr.Image(flow_rgb))
+                rr.log(
+                    f"sensors/{uuid}/optical_flow", rr.Image(flow_rgb), static=static
+                )
 
             elif sensor_type == "corner":
                 # Corner detections: Draws circles scaled to keypoint size,
@@ -409,7 +437,7 @@ class RerunVisualizer:
                         flags=_cv2.DRAW_MATCHES_FLAGS_NOT_DRAW_SINGLE_POINTS,
                     )
 
-                rr.log(f"sensors/{uuid}/corners", rr.Image(corner_img))
+                rr.log(f"sensors/{uuid}/corners", rr.Image(corner_img), static=static)
 
             elif sensor_type == "edge":
                 # Edge map: (H, W) float tensor on GPU
@@ -417,20 +445,21 @@ class RerunVisualizer:
                     measurement = measurement.cpu().numpy()
                 # Convert to uint8 for display
                 edge_img = (measurement * 255).clip(0, 255).astype(np.uint8)
-                rr.log(f"sensors/{uuid}/edges", rr.Image(edge_img))
+                rr.log(f"sensors/{uuid}/edges", rr.Image(edge_img), static=static)
 
             elif sensor_type == "grayscale":
                 # Grayscale intensity: (H, W) float tensor in [0, 1]
                 if hasattr(measurement, "cpu"):
                     measurement = measurement.cpu().numpy()
                 gray_img = (measurement * 255).clip(0, 255).astype(np.uint8)
-                rr.log(f"sensors/{uuid}/grayscale", rr.Image(gray_img))
+                rr.log(f"sensors/{uuid}/grayscale", rr.Image(gray_img), static=static)
 
     def log_state(self, state: dict) -> None:
         """Log vehicle state to Rerun."""
         if not self.enabled:
             return
 
+        static = self.stream_only
         rr.log(
             "navigation/pose",
             rr.Transform3D(
@@ -441,8 +470,12 @@ class RerunVisualizer:
             rr.TransformAxes3D(
                 1.0
             ),  # Separate archetype for axis visualization in 0.28.1+
+            static=static,
         )
-        rr.log("navigation/trajectory", rr.Points3D(positions=state["x"][None, :]))
+        # Trajectory is intentionally not static — when streaming we drop the
+        # accumulating trail to keep memory bounded.
+        if not static:
+            rr.log("navigation/trajectory", rr.Points3D(positions=state["x"][None, :]))
 
     def log_image(self, path: str, image: np.ndarray) -> None:
         """Generic image logger wrapper for Rerun."""
@@ -452,4 +485,4 @@ class RerunVisualizer:
         if hasattr(image, "detach"):
             image = image.detach().cpu().numpy()
 
-        rr.log(path, rr.Image(image))
+        rr.log(path, rr.Image(image), static=self.stream_only)
