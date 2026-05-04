@@ -241,17 +241,14 @@ async def main():
     )
     args = parser.parse_args()
 
-    node = ControllerNode(
+    async with ControllerNode(
         settings_path=args.settings,
         discovery_address=args.discovery_address,
-    )
-
-    try:
-        await node.run()
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received.")
-    finally:
-        await node.close()
+    ) as node:
+        try:
+            await node.run()
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received.")
 
 
 if __name__ == "__main__":

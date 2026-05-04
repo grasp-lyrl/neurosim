@@ -4,11 +4,6 @@ import numpy as np
 
 from cortex.discovery.client import DiscoveryClient
 from cortex.discovery.daemon import DEFAULT_DISCOVERY_ADDRESS
-from cortex.discovery.protocol import (
-    DiscoveryCommand,
-    DiscoveryRequest,
-    DiscoveryStatus,
-)
 from cortex.messages.standard import ArrayMessage, DictMessage, MultiArrayMessage
 
 STATE_TOPIC = "state"
@@ -82,17 +77,13 @@ def ensure_discovery_daemon(discovery_address: str = DEFAULT_DISCOVERY_ADDRESS) 
         retries=1,
     )
     try:
-        response = client._send_request(  # noqa: SLF001 - Cortex exposes no ping API yet.
-            DiscoveryRequest(command=DiscoveryCommand.LIST_TOPICS)
-        )
+        if not client.ping():
+            raise RuntimeError(
+                f"Cortex discovery daemon at {discovery_address} did not "
+                "respond to ping. Start it with `cortex-discovery`."
+            )
     finally:
         client.close()
-
-    if response.status != DiscoveryStatus.OK:
-        raise RuntimeError(
-            "Cortex discovery daemon returned an error while listing topics: "
-            f"{response.message}"
-        )
 
 
 def state_from_message(data: dict) -> dict[str, np.ndarray]:
