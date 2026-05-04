@@ -322,7 +322,7 @@ class ReactiveDodgeEnv(BaseNeurosimRLEnv):
         samples = min(samples, 20)
         for dt in np.linspace(0.0, horizon_s, samples):
             flat = self._nominal_trajectory.update(self.sim.time + float(dt))
-            nominal_pos = self._safety.dynamics_to_habitat(
+            nominal_pos = self.sim.safety.dynamics_to_habitat(
                 np.asarray(flat["x"], dtype=np.float64)
             )
             future_obstacle = obstacle_pos + obstacle_vel * float(dt)
@@ -343,7 +343,7 @@ class ReactiveDodgeEnv(BaseNeurosimRLEnv):
             "near_miss_ids": (),
             "nominal_counterfactual_collision": False,
         }
-        if self._safety is None:
+        if self.sim.safety is None:
             return empty
 
         dynamic_obstacles = getattr(self.sim.visual_backend, "_dynamic_obstacles", None)
@@ -351,10 +351,10 @@ class ReactiveDodgeEnv(BaseNeurosimRLEnv):
         if not active:
             return empty
 
-        agent_pos = self._safety.dynamics_to_habitat(np.asarray(state["x"]))
-        agent_vel = np.asarray(
-            self._safety._pos_transform, dtype=np.float64
-        ) @ np.asarray(state["v"], dtype=np.float64)
+        agent_pos = self.sim.safety.dynamics_to_habitat(np.asarray(state["x"]))
+        agent_vel = self.sim.safety.dynamics_to_habitat_vel(
+            np.asarray(state["v"], dtype=np.float64)
+        )
         min_distance = np.inf
         min_predicted_distance = np.inf
         min_tca = np.inf

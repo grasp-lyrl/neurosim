@@ -1,7 +1,6 @@
 from .env import BaseNeurosimRLEnv, HoverStopEnv
 from .env_reactive_dodge import ReactiveDodgeEnv
 from .representations import EventRepresentationManager
-from .safety import HabitatSafetyChecker
 from .sb3_features import CombinedEventStateExtractor, EventCnnExtractor
 from .tasks import (
     HoverStopTask,
@@ -39,7 +38,6 @@ __all__ = [
     "BaseNeurosimRLEnv",
     "HoverStopEnv",
     "ReactiveDodgeEnv",
-    "HabitatSafetyChecker",
     "EventCnnExtractor",
     "EventRepresentationManager",
     "CombinedEventStateExtractor",

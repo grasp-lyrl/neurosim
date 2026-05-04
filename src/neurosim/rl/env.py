@@ -36,7 +36,6 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from neurosim.rl.representations import EventRepresentationManager
-from neurosim.rl.safety import HabitatSafetyChecker
 from neurosim.rl.tasks import RLTask, TaskStep, build_task
 from neurosim.rl.vehicles import build_vehicle
 from neurosim.sims.synchronous_simulator import RandomizedSimulator
@@ -124,7 +123,6 @@ class BaseNeurosimRLEnv(gym.Env):
 
         self.crash_penalty = float(self._task.crash_penalty)
         self._prev_action: np.ndarray | None = None
-        self._enable_navigable_check = env_config.get("enable_navigable_check", True)
         self._dynamics_config = env_config["dynamics"]
 
         # Domain randomization -------------------------------------------------------------
@@ -216,11 +214,14 @@ class BaseNeurosimRLEnv(gym.Env):
             "control_abstraction": dyn_cfg["control_abstraction"],
         }
 
-        return {
+        settings: dict[str, Any] = {
             "simulator": sim_settings,
             "visual_backend": vb_settings,
             "dynamics": dynamics_settings,
         }
+        if "safety" in env_config:
+            settings["safety"] = copy.deepcopy(env_config["safety"])
+        return settings
 
     def _get_default_event_sensor_uuid(self) -> str:
         event_sensors = self.sim.config.sensor_manager.get_sensors_by_type("event")
@@ -231,12 +232,7 @@ class BaseNeurosimRLEnv(gym.Env):
         return event_sensors[0].uuid
 
     def _sync_from_simulator(self) -> None:
-        """Re-derive spaces, vehicle, safety checker, etc. from the current simulator."""
-        self._safety = HabitatSafetyChecker(
-            self.sim,
-            enable_navigable_check=self._enable_navigable_check,
-        )
-
+        """Re-derive spaces, vehicle, etc. from the current simulator."""
         self.event_sensor_uuid = (
             self._event_sensor_uuid_cfg or self._get_default_event_sensor_uuid()
         )
@@ -442,7 +438,7 @@ class BaseNeurosimRLEnv(gym.Env):
         )
 
     def _check_terminated(self, state: dict[str, np.ndarray]) -> tuple[bool, str]:
-        safe, reason = self._safety.check(np.asarray(state["x"]))
+        safe, reason = self.sim.safety.check(np.asarray(state["x"]))
         if not safe:
             return True, reason
         task_terminated, task_reason = self._task.check_terminated(state=state)
@@ -534,7 +530,7 @@ class BaseNeurosimRLEnv(gym.Env):
             self._rr_needs_episode_stream_switch = True
 
         # Sample a valid navigable starting position in Habitat space.
-        hab_start = self._safety.sample_habitat_start()
+        hab_start = self.sim.safety.sample_habitat_start()
 
         self.sim.time = 0.0
         self.sim.simsteps = 0
