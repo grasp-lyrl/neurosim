@@ -27,14 +27,23 @@ logger = logging.getLogger(__name__)
 class SynchronousSimulator:
     """Main simulator class for neurosim."""
 
-    def __init__(self, settings: Path | str | dict, visualizer_disabled: bool = False):
+    def __init__(
+        self,
+        settings: Path | str | dict,
+        visualizer_disabled: bool = False,
+        stream_only: bool = False,
+    ):
         """
         Initialize the Simulator.
 
         Args:
             settings: Either a Path/str to settings YAML file or a settings dictionary
-            visualizer_disable: Whether to disable the visualizer
+            visualizer_disabled: Whether to disable the visualizer
+            stream_only: Forwarded to :class:`RerunVisualizer`. When True, the
+                visualizer logs everything as static data so each entity
+                overwrites in place — bounded memory.
         """
+        self._stream_only = bool(stream_only)
         if isinstance(settings, (str, Path)):
             settings_path = Path(settings)
             if not settings_path.exists():
@@ -86,7 +95,9 @@ class SynchronousSimulator:
         # Initialize visualizer
         self.visualizer = None
         if not visualizer_disabled:
-            self.visualizer = RerunVisualizer(self.config)
+            self.visualizer = RerunVisualizer(
+                self.config, stream_only=self._stream_only
+            )
 
         logger.info("═══════════════════════════════════════════════════════════")
         logger.info("✅ Simulator initialized successfully")
@@ -575,7 +586,10 @@ class SynchronousSimulator:
             use_gpu = self.visualizer.use_gpu
             device = self.visualizer.device
             self.visualizer = RerunVisualizer(
-                self.config, use_gpu=use_gpu, device=device
+                self.config,
+                use_gpu=use_gpu,
+                device=device,
+                stream_only=self._stream_only,
             )
 
         logger.info("Simulator reconfigured successfully")
