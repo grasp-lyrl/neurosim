@@ -1,33 +1,4 @@
-// Copyright (c) 2026, Neurosim contributors. Apache-2.0.
 #include "neurosim_ros2_bridge/bridge_node.hpp"
-
-#include <cortex_wire/header.hpp>
-#include <cortex_wire/metadata.hpp>
-#include <rclcpp_components/register_node_macro.hpp>
-#include <std_msgs/msg/float64_multi_array.hpp>
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <cctype>
-#include <chrono>
-#include <cstring>
-#include <filesystem>
-#include <functional>
-#include <stdexcept>
-#include <string>
-#include <utility>
-
-#include "neurosim_ros2_bridge/decoders.hpp"
-
-// Fingerprint constants. Hard-coded so we don't depend on
-// cortex_wire::find_by_name (which exists, but introduces an enum dependency
-// for three values). If the fingerprint table changes upstream, update here.
-//
-// These come from deps/cortex/cortex_wire_cpp/include/cortex_wire/fingerprint_table.hpp;
-// the bridge logs an error and refuses to wire up topics whose registered
-// fingerprint mismatches what we expect here.
-#include <cortex_wire/fingerprint_table.hpp>
 
 namespace neurosim_ros2_bridge
 {

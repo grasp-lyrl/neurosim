@@ -1,10 +1,4 @@
-// Copyright (c) 2026, Neurosim contributors. Apache-2.0.
 #include "neurosim_ros2_bridge/config.hpp"
-
-#include <yaml-cpp/yaml.h>
-
-#include <stdexcept>
-#include <unordered_map>
 
 namespace neurosim_ros2_bridge
 {

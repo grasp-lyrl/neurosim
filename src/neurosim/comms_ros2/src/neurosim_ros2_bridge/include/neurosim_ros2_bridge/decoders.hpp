@@ -1,5 +1,3 @@
-// Copyright (c) 2026, Neurosim contributors. Apache-2.0.
-//
 // Per-payload decoders. Each function takes a fully-decoded Cortex multipart
 // message (header + DecodedMetadata + OOB frames) and returns a heap-allocated
 // ROS 2 message ready for rclcpp::Publisher::publish (which moves it into the
@@ -15,9 +13,13 @@
 #include <cortex_wire/metadata.hpp>
 #include <cortex_wire/oob_buffer.hpp>
 
+#include <chrono>
+#include <cstring>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
+#include <utility>
 
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>

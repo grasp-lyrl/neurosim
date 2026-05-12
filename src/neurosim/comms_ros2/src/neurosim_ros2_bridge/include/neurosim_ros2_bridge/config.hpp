@@ -1,10 +1,11 @@
-// Copyright (c) 2026, Neurosim contributors. Apache-2.0.
 #ifndef NEUROSIM_ROS2_BRIDGE__CONFIG_HPP_
 #define NEUROSIM_ROS2_BRIDGE__CONFIG_HPP_
 
 #include <optional>
 #include <string>
 #include <vector>
+#include <yaml-cpp/yaml.h>
+#include <unordered_map>
 
 namespace neurosim_ros2_bridge
 {
