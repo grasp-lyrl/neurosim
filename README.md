@@ -30,7 +30,7 @@
 
 - [ ] Hardware-in-the-loop (HIL) support for real robot testing
 - [ ] 📚 Detailed documentation and tutorials
-- `04/16/26`: Added dynamic obstacles thrown at the agent.
+- `04/16/26`: Added dynamic obstacles thrown at the agent. See [GIF](assets/neurosim_dynamic_obstacles.gif) for fun.
 - `03/30/26`: Reinforcement Learning (RL) support added.
 - `02/16/26`: Neurosim paper released on arXiv ([2602.15018](https://arxiv.org/abs/2602.15018)).
 - `02/15/26`: [neurosim_cu_esim](https://github.com/grasp-lyrl/neurosim_cu_esim) now standalone for faster event simulation.
