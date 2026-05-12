@@ -39,34 +39,25 @@ cortex_to_ros2:
     ros2_topic: /neurosim/camera/color/image_raw
     payload: color_image
     frame_id: color_camera_1
-    qos:
-      reliability: best_effort
-      depth: 5
 
   - name: depth_camera_1
     cortex_topic: depth/depth_camera_1
     ros2_topic: /neurosim/camera/depth/image_raw
     payload: depth_image
     frame_id: depth_camera_1
-    qos:
-      reliability: best_effort
-      depth: 5
 
   - name: event_camera_1
     cortex_topic: events/event_camera_1
     ros2_topic: /neurosim/camera/events/event_camera_1
     payload: events
     frame_id: event_camera_1
-    qos:
-      reliability: best_effort
-      depth: 5
 
-ros2_to_cortex:
+# ros2_to_cortex:
 
-  - name: control
-    ros2_topic: /neurosim/control
-    cortex_topic: control
-    payload: control
-    cortex_type: DictMessage
-    qos:
-      depth: 1
+#   - name: control
+#     ros2_topic: /neurosim/control
+#     cortex_topic: control
+#     payload: control
+#     cortex_type: DictMessage
+#     qos:
+#       depth: 1

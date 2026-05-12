@@ -21,37 +21,13 @@ find_package(geometry_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
-# cortex_wire_cpp — pure-CMake sibling library. Prefer an installed package;
-# if not found, fall back to an in-tree copy located via NEUROSIM_CORTEX_WIRE_CPP
-# (set by tooling/build scripts) or the canonical monorepo layout
-# (deps/cortex/cortex_wire_cpp/ relative to the repo root).
-find_package(cortex_wire_cpp QUIET)
-if(NOT cortex_wire_cpp_FOUND)
-  set(_cwc_dir "")
-  if(DEFINED ENV{NEUROSIM_CORTEX_WIRE_CPP})
-    set(_cwc_dir "$ENV{NEUROSIM_CORTEX_WIRE_CPP}")
-  else()
-    # Walk up from CMAKE_CURRENT_SOURCE_DIR (this CMakeLists is at
-    # src/neurosim/cortex/ros2_ws/neurosim_ros2_bridge/) and probe for
-    # deps/cortex/cortex_wire_cpp. Survives symlinks by resolving via REALPATH.
-    get_filename_component(_pkg_real "${CMAKE_CURRENT_SOURCE_DIR}" REALPATH)
-    set(_candidate "${_pkg_real}/../../../../../deps/cortex/cortex_wire_cpp")
-    get_filename_component(_candidate "${_candidate}" REALPATH)
-    if(EXISTS "${_candidate}/CMakeLists.txt")
-      set(_cwc_dir "${_candidate}")
-    endif()
-  endif()
-  if(_cwc_dir AND EXISTS "${_cwc_dir}/CMakeLists.txt")
-    message(STATUS "cortex_wire_cpp: using in-tree source at ${_cwc_dir}")
-    set(CORTEX_WIRE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(CORTEX_WIRE_INSTALL     OFF CACHE BOOL "" FORCE)
-    add_subdirectory("${_cwc_dir}" "${CMAKE_BINARY_DIR}/cortex_wire_cpp_external")
-  else()
-    message(FATAL_ERROR
-      "cortex_wire_cpp not found via find_package and no in-tree copy located. "
-      "Install cortex_wire_cpp or point NEUROSIM_CORTEX_WIRE_CPP at its source dir.")
-  endif()
-endif()
+# cortex_wire_cpp's installed Config calls find_dependency(msgpack-cxx).
+# Ubuntu 22.04 ships libmsgpack-dev without a CMake config, so we provide
+# a shim under cmake/Findmsgpack-cxx.cmake. Newer distros / vcpkg / from-
+# source installs that ship msgpack-cxxConfig.cmake take precedence via
+# CONFIG mode and bypass the shim.
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+find_package(cortex_wire_cpp REQUIRED)
 
 # ---- ROS 2 message generation ---------------------------------------------
 

@@ -360,6 +360,9 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
 
   InboundWorker::Publisher pub_fn;
   switch (e.payload) {
+    // Each branch passes the decoded unique_ptr straight to publish() so we
+    // hit the move overload — no extra copy, and intra-process zero-copy is
+    // unlocked when a colocated subscriber loads into the same container.
     case Payload::State: {
         auto pub = this->create_publisher<msg::State>(e.ros2_topic, make_qos(e));
         const auto frame = e.frame_id;
@@ -367,7 +370,7 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
           const cortex_wire::MessageHeader & h,
           const cortex_wire::DecodedMetadata & m,
           const std::vector<cortex_wire::ZmqFramePtr> & o) {
-            pub->publish(*decoders::decode_state({h, m, o, frame}));
+            pub->publish(decoders::decode_state({h, m, o, frame}));
           };
         break;
       }
@@ -378,7 +381,7 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
           const cortex_wire::MessageHeader & h,
           const cortex_wire::DecodedMetadata & m,
           const std::vector<cortex_wire::ZmqFramePtr> & o) {
-            pub->publish(*decoders::decode_imu({h, m, o, frame}));
+            pub->publish(decoders::decode_imu({h, m, o, frame}));
           };
         break;
       }
@@ -389,7 +392,7 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
           const cortex_wire::MessageHeader & h,
           const cortex_wire::DecodedMetadata & m,
           const std::vector<cortex_wire::ZmqFramePtr> & o) {
-            pub->publish(*decoders::decode_events({h, m, o, frame}));
+            pub->publish(decoders::decode_events({h, m, o, frame}));
           };
         break;
       }
@@ -400,7 +403,7 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
           const cortex_wire::MessageHeader & h,
           const cortex_wire::DecodedMetadata & m,
           const std::vector<cortex_wire::ZmqFramePtr> & o) {
-            pub->publish(*decoders::decode_color_image({h, m, o, frame}));
+            pub->publish(decoders::decode_color_image({h, m, o, frame}));
           };
         break;
       }
@@ -411,7 +414,7 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
           const cortex_wire::MessageHeader & h,
           const cortex_wire::DecodedMetadata & m,
           const std::vector<cortex_wire::ZmqFramePtr> & o) {
-            pub->publish(*decoders::decode_depth_image({h, m, o, frame}));
+            pub->publish(decoders::decode_depth_image({h, m, o, frame}));
           };
         break;
       }

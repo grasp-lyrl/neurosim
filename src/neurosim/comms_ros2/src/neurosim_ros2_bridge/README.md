@@ -66,15 +66,6 @@ to an in-tree copy. The fallback follows symlinks and probes
 From a colcon workspace that contains this package under `src/`:
 
 ```bash
-colcon build --packages-select neurosim_ros2_bridge
-source install/setup.bash
-```
-
-On Anaconda-based ROS images (the neurosim docker default), point CMake at
-the system Python so the generated message bindings are loadable by ros2cli
-(which runs on system Python, not conda):
-
-```bash
 colcon build --packages-select neurosim_ros2_bridge \
   --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3 \
                -DPYTHON_EXECUTABLE=/usr/bin/python3
