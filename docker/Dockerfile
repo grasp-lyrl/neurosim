@@ -23,6 +23,7 @@ RUN apt-get update \
         ros-dev-tools \
         ros-humble-ament-* \
         libgflags-dev \
+        libmsgpack-dev \
     && rosdep init \
     && rosdep update \
     && rm -rf /var/lib/apt/lists/*
@@ -58,5 +59,15 @@ RUN set -eux; \
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc \
     && echo "export ROS_LOCALHOST_ONLY=1" >> /root/.bashrc \
     && echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /root/.bashrc
+
+# Conda's Python lacks the build-time helpers rosidl_generate_interfaces wants
+# (empy, catkin_pkg, lark-parser, numpy). Install them so the neurosim ROS 2
+# bridge can be built with `-DPython3_EXECUTABLE=/usr/bin/python3` against the
+# system Python that ros2cli already uses.
+RUN /opt/conda/bin/pip install --no-cache-dir \
+        "numpy<2.0" \
+        "empy==3.3.4" \
+        catkin_pkg \
+        lark-parser
 
 WORKDIR /opt/neurosim
