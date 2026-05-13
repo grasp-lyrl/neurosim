@@ -27,6 +27,7 @@
 #include "neurosim_ros2_bridge/msg/events.hpp"
 #include "neurosim_ros2_bridge/msg/imu.hpp"
 #include "neurosim_ros2_bridge/msg/state.hpp"
+#include "neurosim_ros2_bridge/msgpack_helpers.hpp"
 
 namespace neurosim_ros2_bridge::decoders
 {
@@ -66,15 +67,10 @@ std::unique_ptr<sensor_msgs::msg::Image> decode_depth_image(const Inbound & in);
 // ---- ROS 2 -> Cortex --------------------------------------------------------
 
 // std_msgs/Float64MultiArray -> cortex DictMessage{cmd_motor_speeds, timestamp}.
-// Returns (metadata_bytes, oob_buffers). Currently no OOB — control is small
-// enough to inline as a msgpack array.
-struct OutboundFrames
-{
-  std::vector<std::uint8_t> metadata;
-  std::vector<std::vector<std::uint8_t>> oob_buffers;
-};
-
-OutboundFrames encode_control(const std_msgs::msg::Float64MultiArray & msg);
+// Returns frames ready to hand to cortex_wire::Publisher::publish(). Currently
+// no OOB — control is small enough to inline as a msgpack array.
+cortex_wire::MetadataBuilder::Frames encode_control(
+  const std_msgs::msg::Float64MultiArray & msg);
 
 }  // namespace neurosim_ros2_bridge::decoders
 

@@ -31,8 +31,15 @@ types. Each `(payload tag) -> (ROS 2 type)` mapping is a single C++ decoder
 function. No type-erased adapter registry, no factory pattern — see
 [`include/neurosim_ros2_bridge/decoders.hpp`](include/neurosim_ros2_bridge/decoders.hpp).
 
+All ZMQ + cortex protocol machinery (SUB thread, fingerprint check, multipart
+encode/decode, discovery register/unregister, ipc:// endpoint slugification)
+lives in `cortex_wire_cpp` —
+the bridge just instantiates `cortex_wire::Subscriber` per inbound entry and
+`cortex_wire::Publisher` per outbound entry. See
+`cortex_wire_cpp/DOCS.md` for the underlying client's feature surface.
+
 For a generic Cortex<->ROS 2 bridge with a pluggable adapter system, see
-[`deps/cortex/ros2_bridge`](../../../../deps/cortex/ros2_bridge/).
+`deps/cortex/ros2_bridge`.
 
 ## Streams supported
 
@@ -56,12 +63,11 @@ Dependencies:
 
 - ROS 2 Humble (`ros-humble-desktop`)
 - `libzmq3-dev`, `cppzmq` (header-only), `libmsgpack-dev`, `libyaml-cpp-dev`
-- `cortex_wire_cpp` — pure-CMake sibling at `deps/cortex/cortex_wire_cpp/`
-
-The package's CMakeLists prefers an installed `cortex_wire_cpp` and falls back
-to an in-tree copy. The fallback follows symlinks and probes
-`<repo>/deps/cortex/cortex_wire_cpp`. Override the path with the
-`NEUROSIM_CORTEX_WIRE_CPP` environment variable.
+- `cortex_wire_cpp` — at `deps/cortex/cortex_wire_cpp/`.
+  Build and install it before this package
+  (`cmake -S deps/cortex/cortex_wire_cpp -B build && cmake --build build && sudo cmake --install build`).
+  The bridge's CMakeLists uses plain `find_package(cortex_wire_cpp REQUIRED)`
+  and fails loudly if it isn't on `CMAKE_PREFIX_PATH`.
 
 From a colcon workspace that contains this package under `src/`:
 

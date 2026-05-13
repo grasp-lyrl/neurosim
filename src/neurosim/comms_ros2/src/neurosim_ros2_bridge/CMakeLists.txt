@@ -21,12 +21,6 @@ find_package(geometry_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
-# cortex_wire_cpp's installed Config calls find_dependency(msgpack-cxx).
-# Ubuntu 22.04 ships libmsgpack-dev without a CMake config, so we provide
-# a shim under cmake/Findmsgpack-cxx.cmake. Newer distros / vcpkg / from-
-# source installs that ship msgpack-cxxConfig.cmake take precedence via
-# CONFIG mode and bypass the shim.
-list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(cortex_wire_cpp REQUIRED)
 
 # ---- ROS 2 message generation ---------------------------------------------
