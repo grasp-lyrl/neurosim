@@ -57,6 +57,12 @@ Neurosim enables **real-time closed-loop control** (`src/neurosim/sims/asynchron
   <p><em>Rollout with a trained policy to stabilize a "thrown" quad (without crashing into things)</em></p>
 </div>
 
+<div align="center">
+  <img src="assets/neurosim_dynamic_obstacles.gif" width="70%">
+  <p><em>Dynamic obstacles thrown at the quad</em></p>
+</div>
+
+
 
 ### RL Quick Start (reproducing the cool stuff above)
 
