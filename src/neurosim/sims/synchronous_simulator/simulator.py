@@ -12,7 +12,7 @@ import numpy as np
 from pathlib import Path
 from typing import Callable, Any
 
-from neurosim.core.visual_backend import create_visual_backend
+from neurosim.core.visual_backend import HabitatSafetyChecker, create_visual_backend
 from neurosim.core.dynamics import create_dynamics
 from neurosim.core.control import create_controller
 from neurosim.core.trajectory import create_trajectory
@@ -27,14 +27,23 @@ logger = logging.getLogger(__name__)
 class SynchronousSimulator:
     """Main simulator class for neurosim."""
 
-    def __init__(self, settings: Path | str | dict, visualizer_disabled: bool = False):
+    def __init__(
+        self,
+        settings: Path | str | dict,
+        visualizer_disabled: bool = False,
+        stream_only: bool = False,
+    ):
         """
         Initialize the Simulator.
 
         Args:
             settings: Either a Path/str to settings YAML file or a settings dictionary
-            visualizer_disable: Whether to disable the visualizer
+            visualizer_disabled: Whether to disable the visualizer
+            stream_only: Forwarded to :class:`RerunVisualizer`. When True, the
+                visualizer logs everything as static data so each entity
+                overwrites in place — bounded memory.
         """
+        self._stream_only = bool(stream_only)
         if isinstance(settings, (str, Path)):
             settings_path = Path(settings)
             if not settings_path.exists():
@@ -80,10 +89,15 @@ class SynchronousSimulator:
         # Initialize additional sensors like IMU and bind their executors
         self._init_additional_sensors()
 
+        # Optional safety checker (Habitat-backed; skipped if no pathfinder)
+        self._init_safety_checker()
+
         # Initialize visualizer
         self.visualizer = None
         if not visualizer_disabled:
-            self.visualizer = RerunVisualizer(self.config)
+            self.visualizer = RerunVisualizer(
+                self.config, stream_only=self._stream_only
+            )
 
         logger.info("═══════════════════════════════════════════════════════════")
         logger.info("✅ Simulator initialized successfully")
@@ -279,6 +293,25 @@ class SynchronousSimulator:
                 traj_kwargs["pathfinder"] = self.visual_backend._sim.pathfinder
             traj_kwargs["coord_transform"] = self.coord_trans.inverse_transform_batch
             self.trajectory = create_trajectory(**traj_kwargs)
+
+    def _init_safety_checker(self) -> None:
+        """Build a Habitat-backed safety checker when a pathfinder is loaded.
+
+        Reads ``settings["safety"]["enable_navigable_check"]`` (default True)
+        to decide whether the checker queries
+        ``pathfinder.is_navigable(point)``. Sets ``self.safety = None`` for
+        non-Habitat backends or when the pathfinder isn't loaded, so
+        callers can guard with a single ``is None`` check.
+        """
+        self.safety: HabitatSafetyChecker | None = None
+        pathfinder = self.visual_backend._sim.pathfinder
+        if pathfinder is None or not pathfinder.is_loaded:
+            return
+        safety_cfg = self.settings.get("safety", {})
+        enable_navigable_check = bool(safety_cfg.get("enable_navigable_check", False))
+        self.safety = HabitatSafetyChecker(
+            self, enable_navigable_check=enable_navigable_check
+        )
 
     def _init_additional_sensors(self) -> None:
         """Initialize additional sensors like IMU."""
@@ -480,6 +513,13 @@ class SynchronousSimulator:
                         measurements, self.time, self.simsteps
                     )
                     self.visualizer.log_state(self.dynamics.state)
+                    if self.safety is not None:
+                        safe, reason = self.safety.check(self.dynamics.state["x"])
+                        self.visualizer.log_safety(
+                            position=self.dynamics.state["x"],
+                            is_safe=safe,
+                            reason=reason,
+                        )
 
             # Update control at control rate
             flat = self.trajectory.update(self.time)
@@ -539,11 +579,17 @@ class SynchronousSimulator:
 
         self._init_additional_sensors()
 
+        # Pathfinder is fresh; rebuild the safety checker against it.
+        self._init_safety_checker()
+
         if self.visualizer is not None:
             use_gpu = self.visualizer.use_gpu
             device = self.visualizer.device
             self.visualizer = RerunVisualizer(
-                self.config, use_gpu=use_gpu, device=device
+                self.config,
+                use_gpu=use_gpu,
+                device=device,
+                stream_only=self._stream_only,
             )
 
         logger.info("Simulator reconfigured successfully")

@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from .base import RLTask, EventRepresentationManager
+from .base import RewardOutcome, RLTask, TaskStep
 
 
 class HoverStopTask(RLTask):
@@ -36,33 +36,25 @@ class HoverStopTask(RLTask):
     def on_reset(self) -> None:
         self._consecutive_success_steps = 0
 
-    def compute_reward(
-        self,
-        *,
-        state: dict[str, np.ndarray],
-        action: np.ndarray,
-        prev_action: np.ndarray | None,
-        event_manager: EventRepresentationManager,
-        obs_mode: str,
-    ) -> tuple[float, dict[str, float]]:
-        v = np.asarray(state["v"], dtype=np.float32)
-        w = np.asarray(state["w"], dtype=np.float32)
+    def compute_reward(self, step: TaskStep) -> RewardOutcome:
+        v = np.asarray(step.state["v"], dtype=np.float32)
+        w = np.asarray(step.state["w"], dtype=np.float32)
 
         vel_norm = float(np.linalg.norm(v))
         ang_rate_norm = float(np.linalg.norm(w))
-        if obs_mode == "state":
+        if step.obs_mode == "state":
             event_activity = 0.0
             event_activity_density = 0.0
         else:
-            event_activity = event_manager.step_event_count
+            event_activity = step.event_manager.step_event_count
             event_activity_density = event_activity / (
-                event_manager.raw_height * event_manager.raw_width
+                step.event_manager.raw_height * step.event_manager.raw_width
             )
 
-        if prev_action is None:
+        if step.prev_action is None:
             action_smoothness = 0.0
         else:
-            action_smoothness = float(np.linalg.norm(action - prev_action))
+            action_smoothness = float(np.linalg.norm(step.action - step.prev_action))
 
         r_velocity = -self.w_velocity * vel_norm
         r_events = -self.w_events * event_activity_density
@@ -72,7 +64,7 @@ class HoverStopTask(RLTask):
 
         reward = r_velocity + r_events + r_angular + r_action + r_survival
 
-        return reward, {
+        terms = {
             "vel_norm": vel_norm,
             "ang_rate_norm": ang_rate_norm,
             "event_activity": event_activity,
@@ -84,6 +76,7 @@ class HoverStopTask(RLTask):
             "r_action": r_action,
             "r_survival": r_survival,
         }
+        return RewardOutcome(reward=reward, terms=terms)
 
     def check_success(self, *, state: dict[str, np.ndarray]) -> bool:
         vel_norm = float(np.linalg.norm(np.asarray(state["v"])))

@@ -21,6 +21,7 @@ trap 'xhost -local:root' EXIT
 
 docker run --privileged \
         -e NVIDIA_VISIBLE_DEVICES=all \
+        -e NVIDIA_DRIVER_CAPABILITIES=all \
         -e DISPLAY \
         -v /dev:/dev \
         -v /tmp/.X11-unix/:/tmp/.X11-unix/ \

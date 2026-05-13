@@ -18,6 +18,14 @@ parser.add_argument(
     "--log-rrd", type=str, default=None, help="Path to Rerun .rrd file for recording"
 )
 parser.add_argument(
+    "--stream-only",
+    action="store_true",
+    help=(
+        "Log everything to Rerun as static data (each entity overwrites in "
+        "place). Bounded memory, no scrubbing/history — pure live display."
+    ),
+)
+parser.add_argument(
     "--verbose", "-v", action="store_true", help="Enable verbose (DEBUG) logging"
 )
 args = parser.parse_args()
@@ -35,7 +43,7 @@ def main():
     )
 
     settings_path = Path(args.settings)
-    sim = SynchronousSimulator(settings_path)
+    sim = SynchronousSimulator(settings_path, stream_only=args.stream_only)
     sim.run(display=args.display, log_h5=args.log_h5, log_rrd=args.log_rrd)
 
 

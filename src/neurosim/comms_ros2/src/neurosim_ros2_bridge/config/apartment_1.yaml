@@ -1,0 +1,63 @@
+# neurosim_ros2_bridge config for the apartment_1 simulation.
+#
+# Bridge:
+#   simulator_node (cortex) -> bridge -> ROS 2 (rviz2, downstream nodes)
+#   ROS 2 controller (or teleop) -> bridge -> cortex `control` (simulator)
+#
+# Run order:
+#   1. cortex-discovery
+#   2. python -m neurosim.sims.asynchronous_simulator.simulator_node \
+#        --settings configs/apartment_1-settings.yaml
+#   3. ros2 launch neurosim_ros2_bridge bridge.launch.py \
+#        config:=$(ros2 pkg prefix neurosim_ros2_bridge)/share/neurosim_ros2_bridge/config/apartment_1.yaml
+#   4. rviz2 (Fixed Frame: world, add an Image display each for color/depth)
+#
+# Optional: drive the simulator from a ROS 2 controller / teleop:
+#   ros2 topic pub --once /neurosim/control std_msgs/msg/Float64MultiArray \
+#       "{data: [1500.0, 1500.0, 1500.0, 1500.0]}"
+
+version: 1
+discovery_address: "ipc:///tmp/cortex/discovery.sock"
+node_name_prefix: "neurosim_bridge"
+
+cortex_to_ros2:
+
+  - name: state
+    cortex_topic: state
+    ros2_topic: /neurosim/state
+    payload: state
+    frame_id: world
+
+  - name: imu_1
+    cortex_topic: imu/imu_1
+    ros2_topic: /neurosim/imu/imu_1
+    payload: imu
+    frame_id: imu_1
+
+  - name: color_camera_1
+    cortex_topic: color/color_camera_1
+    ros2_topic: /neurosim/camera/color/image_raw
+    payload: color_image
+    frame_id: color_camera_1
+
+  - name: depth_camera_1
+    cortex_topic: depth/depth_camera_1
+    ros2_topic: /neurosim/camera/depth/image_raw
+    payload: depth_image
+    frame_id: depth_camera_1
+
+  - name: event_camera_1
+    cortex_topic: events/event_camera_1
+    ros2_topic: /neurosim/camera/events/event_camera_1
+    payload: events
+    frame_id: event_camera_1
+
+# ros2_to_cortex:
+
+#   - name: control
+#     ros2_topic: /neurosim/control
+#     cortex_topic: control
+#     payload: control
+#     cortex_type: DictMessage
+#     qos:
+#       depth: 1

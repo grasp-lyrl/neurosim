@@ -155,6 +155,21 @@ class CustomInstallCommand(install):
                 f.writelines(requirements)
             print("   ✓ Updated numpy version in Habitat-Sim requirements.txt")
             ######################################################################################
+
+            ################ cap habitat-sim build parallelism to avoid OOM ######################
+            # Default unbounded ninja build saturates RAM and gets OOM-killed at link.
+            # Pin self.parallel = 4 in habitat-sim's CMakeBuild so it emits -j4 to ninja.
+            habitat_setup_py = os.path.join(habitat_dir, "setup.py")
+            with open(habitat_setup_py, "r") as f:
+                src = f.read()
+            anchor = "        if not has_ninja() or self.parallel:"
+            if "self.parallel = 4" not in src and anchor in src:
+                src = src.replace(anchor, "        self.parallel = 4\n" + anchor, 1)
+                with open(habitat_setup_py, "w") as f:
+                    f.write(src)
+                print("   ✓ Pinned Habitat-Sim build parallelism to 4")
+            ######################################################################################
+
         else:
             print("   ✓ Habitat-Sim repository already exists")
 

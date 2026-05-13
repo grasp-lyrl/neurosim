@@ -1,0 +1,11 @@
+# Bridge config for the state-only smoke test (test/smoke_state_publisher.py).
+version: 1
+discovery_address: "ipc:///tmp/cortex/discovery.sock"
+node_name_prefix: "smoke_bridge"
+
+cortex_to_ros2:
+  - name: state
+    cortex_topic: state
+    ros2_topic: /neurosim/state
+    payload: state
+    frame_id: world

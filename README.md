@@ -30,7 +30,7 @@
 
 - [ ] Hardware-in-the-loop (HIL) support for real robot testing
 - [ ] 📚 Detailed documentation and tutorials
-- `04/16/26`: Added dynamic obstacles thrown at the agent.
+- `04/16/26`: Added dynamic obstacles thrown at the agent. See [GIF](assets/neurosim_dynamic_obstacles.gif) for fun.
 - `03/30/26`: Reinforcement Learning (RL) support added.
 - `02/16/26`: Neurosim paper released on arXiv ([2602.15018](https://arxiv.org/abs/2602.15018)).
 - `02/15/26`: [neurosim_cu_esim](https://github.com/grasp-lyrl/neurosim_cu_esim) now standalone for faster event simulation.
@@ -56,6 +56,12 @@ Neurosim enables **real-time closed-loop control** (`src/neurosim/sims/asynchron
   <img src="assets/neurosim_rl.gif" width="70%">
   <p><em>Rollout with a trained policy to stabilize a "thrown" quad (without crashing into things)</em></p>
 </div>
+
+<div align="center">
+  <img src="assets/neurosim_dynamic_obstacles.gif" width="70%">
+  <p><em>Dynamic obstacles thrown at the quad</em></p>
+</div>
+
 
 
 ### RL Quick Start (reproducing the cool stuff above)
@@ -192,7 +198,7 @@ python -m habitat_sim.utils.datasets_download --uids habitat_test_scenes --data-
 ### Run the Simulator
 
 ```bash
-python test_sim.py --settings configs/skokloster-castle-settings.yaml --display --world_rate 750
+python test_sim.py --settings configs/skokloster-castle-settings.yaml --display
 ```
 
 ## Citation

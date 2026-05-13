@@ -1,3 +1,8 @@
+import copy
+import yaml
+from typing import Any
+from pathlib import Path
+
 import torch
 import numpy as np
 
@@ -46,3 +51,26 @@ def color2intensity(color_im: torch.Tensor) -> torch.Tensor:
         + 0.1140 * color_im[:, :, 2]
     )
     return intensity_im
+
+
+def load_yaml(path: str | Path) -> dict[str, Any]:
+    """Load a YAML file and require the top-level node to be a mapping."""
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected YAML mapping in {path}")
+    return data
+
+
+def deep_update(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
+    """Recursively update ``dst`` with values from ``src``.
+
+    Nested dicts are merged in place; non-dict values from ``src`` are
+    deep-copied so callers can safely mutate either side afterward.
+    """
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            deep_update(dst[key], value)
+        else:
+            dst[key] = copy.deepcopy(value)
+    return dst

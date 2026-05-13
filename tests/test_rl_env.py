@@ -10,7 +10,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from neurosim.rl import NeurosimRLEnv
+from neurosim.rl import HoverStopEnv
 from neurosim.rl.safety import HabitatSafetyChecker
 
 
@@ -23,12 +23,14 @@ def _test_env_config(
     return {
         "obs_mode": obs_mode,
         "episode_seconds": episode_seconds,
-        "event_sensor_uuid": None,
-        "event_downsample_factor": event_downsample_factor,
         "init_speed_range": [0.5, 1.0],
-        "event_representation": "time_surface",
-        "event_log_compression": 1.0,
-        "event_ts_decay_ms": 10.0,
+        "event_representation": {
+            "model": "time_surface",
+            "log_compression": 1.0,
+            "downsample_factor": event_downsample_factor,
+            "ts_decay_ms": 10.0,
+            "sensor_uuid": None,
+        },
         "enable_navigable_check": True,
         "enable_visualization": False,
         "visualization_log_every_n_steps": 1,
@@ -106,12 +108,12 @@ def _config_with_simulator_domain_randomization(
     return cfg
 
 
-class TestNeurosimRLEnvDomainRandomization:
-    """NeurosimRLEnv wiring for :class:`~neurosim.sims.synchronous_simulator.randomized_simulator.RandomizedSimulator`."""
+class TestHoverStopEnvDomainRandomization:
+    """HoverStopEnv wiring for :class:`~neurosim.sims.synchronous_simulator.randomized_simulator.RandomizedSimulator`."""
 
     def test_dr_disabled_does_not_call_randomize(self):
         cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
-        env = NeurosimRLEnv(env_config=cfg)
+        env = HoverStopEnv(env_config=cfg)
         try:
             spy = Mock(wraps=env._rsim.randomize)
             env._rsim.randomize = spy
@@ -131,7 +133,7 @@ class TestNeurosimRLEnvDomainRandomization:
                 },
             },
         )
-        env = NeurosimRLEnv(env_config=cfg)
+        env = HoverStopEnv(env_config=cfg)
         try:
             spy = Mock(wraps=env._rsim.randomize)
             env._rsim.randomize = spy
@@ -153,7 +155,7 @@ class TestNeurosimRLEnvDomainRandomization:
                 },
             },
         )
-        env = NeurosimRLEnv(env_config=cfg)
+        env = HoverStopEnv(env_config=cfg)
         try:
             spy = Mock(wraps=env._rsim.randomize)
             env._rsim.randomize = spy
@@ -174,7 +176,7 @@ class TestNeurosimRLEnvDomainRandomization:
                 },
             },
         )
-        env = NeurosimRLEnv(env_config=cfg)
+        env = HoverStopEnv(env_config=cfg)
         try:
             spy = Mock(wraps=env._rsim.randomize)
             env._rsim.randomize = spy
@@ -198,7 +200,7 @@ class TestNeurosimRLEnvDomainRandomization:
                 },
             },
         )
-        env = NeurosimRLEnv(env_config=cfg)
+        env = HoverStopEnv(env_config=cfg)
         try:
             env.reset(seed=0)
             s = env.sim.config.visual_sensors["event_camera_1"]
@@ -210,7 +212,7 @@ class TestNeurosimRLEnvDomainRandomization:
     def test_dynamics_dr_scales_multirotor_when_enabled(self):
         """Do not hold two Habitat-backed envs open: teardown can abort (IOT) in habitat_sim.close."""
         baseline_cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
-        baseline = NeurosimRLEnv(env_config=baseline_cfg)
+        baseline = HoverStopEnv(env_config=baseline_cfg)
         try:
             baseline.reset(seed=5)
             m0 = float(baseline.sim.dynamics._multirotor.mass)
@@ -232,7 +234,7 @@ class TestNeurosimRLEnvDomainRandomization:
                 },
             },
         }
-        dr_env = NeurosimRLEnv(env_config=dr_cfg)
+        dr_env = HoverStopEnv(env_config=dr_cfg)
         try:
             dr_env.reset(seed=5)
             m1 = float(dr_env.sim.dynamics._multirotor.mass)
@@ -255,7 +257,7 @@ class TestNeurosimRLEnvDomainRandomization:
             "scales": scales,
         }
         scales_before = copy.deepcopy(scales)
-        env = NeurosimRLEnv(env_config=cfg)
+        env = HoverStopEnv(env_config=cfg)
         try:
             env.reset(seed=0)
             assert cfg["dynamics"]["domain_randomization"]["scales"] == scales_before
@@ -278,7 +280,7 @@ class TestNeurosimRLEnvDomainRandomization:
                 },
             },
         }
-        env = NeurosimRLEnv(env_config=cfg)
+        env = HoverStopEnv(env_config=cfg)
         try:
             spy = Mock(wraps=env._vehicle._apply_domain_randomization)
             env._vehicle._apply_domain_randomization = spy
@@ -294,17 +296,17 @@ class TestNeurosimRLEnvDomainRandomization:
 
 @pytest.fixture(scope="module")
 def env():
-    e = NeurosimRLEnv(
+    e = HoverStopEnv(
         env_config=_test_env_config(obs_mode="combined", episode_seconds=0.05),
     )
     yield e
     e.close()
 
 
-class TestNeurosimRLEnv:
+class TestHoverStopEnv:
     """Smoke tests for the hover-stop RL environment."""
 
-    def test_reset_returns_correct_obs_shape(self, env: NeurosimRLEnv):
+    def test_reset_returns_correct_obs_shape(self, env: HoverStopEnv):
         obs, info = env.reset(seed=7)
         assert "events" in obs
         assert "state" in obs
@@ -314,19 +316,19 @@ class TestNeurosimRLEnv:
         assert "time" in info
         assert "simsteps" in info
 
-    def test_reset_gives_nonzero_velocity(self, env: NeurosimRLEnv):
+    def test_reset_gives_nonzero_velocity(self, env: HoverStopEnv):
         env.reset(seed=42)
         v = env.sim.dynamics.state["v"]
         assert float(np.linalg.norm(v)) > 0.1, "Initial velocity should be nonzero"
 
-    def test_reset_gives_safe_initial_position(self, env: NeurosimRLEnv):
+    def test_reset_gives_safe_initial_position(self, env: HoverStopEnv):
         for seed in range(5):
             env.reset(seed=seed)
             x = env.sim.dynamics.state["x"]
             ok, reason = env._safety.check(x)
             assert ok, f"Unsafe initial position (seed={seed}): {reason}, x={x}"
 
-    def test_step_returns_valid_types(self, env: NeurosimRLEnv):
+    def test_step_returns_valid_types(self, env: HoverStopEnv):
         env.reset(seed=7)
         action = env.action_space.sample()
         next_obs, reward, terminated, truncated, info = env.step(action)
@@ -339,7 +341,7 @@ class TestNeurosimRLEnv:
         assert "reward_terms" in info
         assert "is_success" in info
 
-    def test_reward_terms_present(self, env: NeurosimRLEnv):
+    def test_reward_terms_present(self, env: HoverStopEnv):
         env.reset(seed=11)
         _, _, _, _, info = env.step(env.action_space.sample())
         rt = info["reward_terms"]
@@ -351,14 +353,14 @@ class TestNeurosimRLEnv:
         ):
             assert key in rt
 
-    def test_event_activity_density_is_normalized(self, env: NeurosimRLEnv):
+    def test_event_activity_density_is_normalized(self, env: HoverStopEnv):
         env.reset(seed=9)
         _, _, _, _, info = env.step(env.action_space.sample())
         density = info["reward_terms"]["event_activity_density"]
         assert np.isfinite(density)
         assert density >= 0.0
 
-    def test_no_immediate_termination(self, env: NeurosimRLEnv):
+    def test_no_immediate_termination(self, env: HoverStopEnv):
         """After reset + 1 step with neutral normalized CTBR action, should not terminate."""
         env.reset(seed=3)
         # With min-max scaling, 0 maps to midpoint thrust and zero body rates.
@@ -373,14 +375,14 @@ class TestNeurosimRLEnv:
     def test_train_mode_forces_visualization_off(self):
         cfg = _test_env_config(obs_mode="state", episode_seconds=0.05)
         cfg["enable_visualization"] = True
-        env = NeurosimRLEnv(env_config=cfg, train=True)
+        env = HoverStopEnv(env_config=cfg, train=True)
         try:
             assert env.enable_visualization is False
         finally:
             env.close()
 
     def test_downsampled_event_observation_shape(self):
-        env = NeurosimRLEnv(
+        env = HoverStopEnv(
             env_config=_test_env_config(
                 obs_mode="events",
                 episode_seconds=0.05,
@@ -401,7 +403,7 @@ class TestHabitatSafetyCheckerWithRealScene:
 
     @pytest.fixture(scope="class")
     def checker(self) -> HabitatSafetyChecker:
-        env = NeurosimRLEnv(
+        env = HoverStopEnv(
             env_config=_test_env_config(obs_mode="state", episode_seconds=1.0),
         )
         c = env._safety
