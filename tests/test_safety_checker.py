@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("habitat_sim", reason="habitat_sim not available")
 
 from neurosim.core.visual_backend.dynamic_obstacles import ActiveObstacle
-from neurosim.rl.safety import HabitatSafetyChecker
+from neurosim.core.visual_backend.safety import HabitatSafetyChecker
 from neurosim.sims.synchronous_simulator.simulator import SynchronousSimulator
 
 

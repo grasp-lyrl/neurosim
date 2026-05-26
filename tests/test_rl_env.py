@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from neurosim.rl import HoverStopEnv
-from neurosim.rl.safety import HabitatSafetyChecker
+from neurosim.core.visual_backend.safety import HabitatSafetyChecker
 
 
 def _test_env_config(
@@ -31,7 +31,7 @@ def _test_env_config(
             "ts_decay_ms": 10.0,
             "sensor_uuid": None,
         },
-        "enable_navigable_check": True,
+        "safety": {"enable_navigable_check": True},
         "enable_visualization": False,
         "visualization_log_every_n_steps": 1,
         "task": {
@@ -325,7 +325,7 @@ class TestHoverStopEnv:
         for seed in range(5):
             env.reset(seed=seed)
             x = env.sim.dynamics.state["x"]
-            ok, reason = env._safety.check(x)
+            ok, reason = env.sim.safety.check(x)
             assert ok, f"Unsafe initial position (seed={seed}): {reason}, x={x}"
 
     def test_step_returns_valid_types(self, env: HoverStopEnv):
@@ -406,7 +406,7 @@ class TestHabitatSafetyCheckerWithRealScene:
         env = HoverStopEnv(
             env_config=_test_env_config(obs_mode="state", episode_seconds=1.0),
         )
-        c = env._safety
+        c = env.sim.safety
         env.close()
         return c
 
