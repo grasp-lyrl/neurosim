@@ -264,18 +264,8 @@ class HabitatWrapper(VisualBackendProtocol):
             anti_aliasing=sensor_cfg.get("anti_aliasing", 8),
         )
 
-        backend = sensor_cfg.get("backend", "auto")
-
-        # Get contrast thresholds from settings
-        contrast_threshold_pos = sensor_cfg.get("contrast_threshold_pos", 0.35)
-        contrast_threshold_neg = sensor_cfg.get("contrast_threshold_neg", 0.35)
-
         event_simulator = create_event_simulator(
-            backend=backend,
-            width=sensor_cfg["width"],
-            height=sensor_cfg["height"],
-            contrast_threshold_neg=contrast_threshold_neg,
-            contrast_threshold_pos=contrast_threshold_pos,
+            sensor_cfg=sensor_cfg,
             device=f"cuda:{int(self.settings['gpu_id'])}",
         )
 
