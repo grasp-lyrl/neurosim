@@ -10,6 +10,7 @@ from typing import Any, Protocol
 import torch
 import numpy as np
 
+from neurosim.core.utils import Profiler
 from neurosim.core.visual_backend.corner_detector import FeatureDetectionResult
 
 
@@ -19,6 +20,15 @@ class VisualBackendProtocol(Protocol):
     All visual backends (Habitat, CARLA, etc.) must implement this interface
     to be compatible with the Neurosim simulator.
     """
+
+    def set_profiler(self, profiler: Profiler) -> None:
+        """Attach a profiler whose sections time the ``render_*`` methods.
+
+        Backends should default to a disabled profiler so timing is a no-op
+        until one is attached. Implementations record sections with *relative*
+        names that auto-nest under the simulator's per-sensor section.
+        """
+        ...
 
     def update_agent_state(self, position: np.ndarray, quaternion: np.ndarray) -> None:
         """Update the agent's pose in the simulation.

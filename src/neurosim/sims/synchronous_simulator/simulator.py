@@ -18,7 +18,13 @@ from neurosim.core.control import create_controller
 from neurosim.core.trajectory import create_trajectory
 from neurosim.core.imu_sim import create_imu_sensor
 from neurosim.core.coord_trans import CoordinateTransform
-from neurosim.core.utils import RerunVisualizer, H5Logger, SimulationConfig, format_dict
+from neurosim.core.utils import (
+    RerunVisualizer,
+    H5Logger,
+    SimulationConfig,
+    Profiler,
+    format_dict,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -27,11 +33,14 @@ logger = logging.getLogger(__name__)
 class SynchronousSimulator:
     """Main simulator class for neurosim."""
 
+    CPU_SENSORS = {"imu", "navmesh"}
+
     def __init__(
         self,
         settings: Path | str | dict,
         visualizer_disabled: bool = False,
         stream_only: bool = False,
+        profile: bool = False,
     ):
         """
         Initialize the Simulator.
@@ -42,6 +51,11 @@ class SynchronousSimulator:
             stream_only: Forwarded to :class:`RerunVisualizer`. When True, the
                 visualizer logs everything as static data so each entity
                 overwrites in place — bounded memory.
+            profile: Enable per-section timing of the simulation loop. The
+                profiler is owned by the simulator and attached to the visual
+                backend; it adds one ``cuda.synchronize`` per step when on and
+                is a zero-overhead no-op when off. :meth:`run` writes the
+                breakdown to ``profiling/profile_<scene>_<timestamp>.json``.
         """
         self._stream_only = bool(stream_only)
         if isinstance(settings, (str, Path)):
@@ -72,6 +86,10 @@ class SynchronousSimulator:
         ####################
         self.time = 0.0
         self.simsteps = 0
+
+        # Owned by the simulator and attached to the visual backend below.
+        gpu_id = self.settings["visual_backend"]["gpu_id"]
+        self.profiler = Profiler(enabled=profile, device=f"cuda:{gpu_id}")
 
         ######################################
         # Initialize backends and components #
@@ -235,6 +253,7 @@ class SynchronousSimulator:
 
     def _init_visual_backend(self) -> None:
         self.visual_backend = create_visual_backend(self.settings["visual_backend"])
+        self.visual_backend.set_profiler(self.profiler)
 
     def _init_visual_sensors(self) -> None:
         # Bind executors for visual sensors
@@ -372,10 +391,15 @@ class SynchronousSimulator:
         """
         measurements = {}
         sensor_manager = self.config.sensor_manager
+        prof = self.profiler
 
         for uuid, sensor_cfg in sensor_manager.sensors.items():
             if sensor_manager.should_sample(uuid, self.simsteps):
-                measurements[uuid] = sensor_cfg.executor()
+                # Per-uuid section under render_sensors (e.g. color_camera_1,
+                # event_camera_1). CPU sensors (imu/navmesh) aren't GPU-timed.
+                gpu = sensor_cfg.sensor_type not in self.CPU_SENSORS
+                with prof.section(uuid, gpu=gpu):
+                    measurements[uuid] = sensor_cfg.executor()
 
         return measurements
 
@@ -388,6 +412,10 @@ class SynchronousSimulator:
     ) -> dict:
         """
         Run the simulation.
+
+        Profiling is controlled by the ``profile`` constructor argument; when
+        enabled, :meth:`run` logs and saves the breakdown to
+        ``profiling/profile_<scene>_<timestamp>.json``.
 
         Args:
             display: Whether to display live visualization with Rerun
@@ -436,6 +464,14 @@ class SynchronousSimulator:
         logger.info("\nSimulation Statistics:")
         logger.info(format_dict(stats))
 
+        # Emit profiling breakdown and persist it for plotting.
+        if self.profiler.enabled:
+            self.profiler.log_summary()
+            scene = Path(self.settings["visual_backend"]["scene"]).stem
+            out = f"profiling/profile_{scene}_{time.strftime('%Y%m%d_%H%M%S')}.json"
+            self.profiler.save(out)
+            stats["profile_path"] = out
+
         return stats
 
     def _run_simulation_loop(
@@ -476,54 +512,66 @@ class SynchronousSimulator:
         )
         logger.info("════════════════════════════════════════════════════════════════")
 
+        prof = self.profiler
+
         while self.time < self.config.t_final:
             # Inner loop: world rate steps between control updates
             for _ in range(steps_per_control):
                 start_time = time.perf_counter()
 
                 # Simulate one step
-                self.step(control)
+                with prof.section("dynamics_step"):
+                    self.step(control)
 
-                # Render sensors
-                measurements = self._render_sensors()
+                # Render sensors. _render_sensors opens a per-uuid section under
+                # this one, and the event backend nests its kernels under that.
+                with prof.section("render_sensors", gpu=True):
+                    measurements = self._render_sensors()
 
                 # Call custom step callback if provided
                 if callback_hook_:
-                    callback_hook_(
-                        measurements, self.dynamics.state, self.time, self.simsteps
-                    )
+                    with prof.section("callback"):
+                        callback_hook_(
+                            measurements, self.dynamics.state, self.time, self.simsteps
+                        )
 
                 # Record latency
                 latencies.append(time.perf_counter() - start_time)
 
                 # Log to H5
                 if h5_logger:
-                    h5_logger.log(
-                        {
-                            **measurements,
-                            "state": self.dynamics.state,
-                        },
-                        self.time,
-                        self.simsteps,
-                    )
+                    with prof.section("log_h5"):
+                        h5_logger.log(
+                            {
+                                **measurements,
+                                "state": self.dynamics.state,
+                            },
+                            self.time,
+                            self.simsteps,
+                        )
 
                 # Display with Rerun
                 if rerun_logger:
-                    self.visualizer.log_measurements(
-                        measurements, self.time, self.simsteps
-                    )
-                    self.visualizer.log_state(self.dynamics.state)
-                    if self.safety is not None:
-                        safe, reason = self.safety.check(self.dynamics.state["x"])
-                        self.visualizer.log_safety(
-                            position=self.dynamics.state["x"],
-                            is_safe=safe,
-                            reason=reason,
+                    with prof.section("viz_rerun"):
+                        self.visualizer.log_measurements(
+                            measurements, self.time, self.simsteps
                         )
+                        self.visualizer.log_state(self.dynamics.state)
+                        if self.safety is not None:
+                            safe, reason = self.safety.check(self.dynamics.state["x"])
+                            self.visualizer.log_safety(
+                                position=self.dynamics.state["x"],
+                                is_safe=safe,
+                                reason=reason,
+                            )
+
+                # Step boundary: resolve deferred GPU timings (one sync/step).
+                prof.step()
 
             # Update control at control rate
-            flat = self.trajectory.update(self.time)
-            control = self.controller.update(self.time, self.dynamics.state, flat)
+            with prof.section("control_update"):
+                flat = self.trajectory.update(self.time)
+                control = self.controller.update(self.time, self.dynamics.state, flat)
 
         return latencies
 

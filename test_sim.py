@@ -28,6 +28,12 @@ parser.add_argument(
 parser.add_argument(
     "--verbose", "-v", action="store_true", help="Enable verbose (DEBUG) logging"
 )
+parser.add_argument(
+    "--profile",
+    action="store_true",
+    help="Profile the simulation loop (per-section CUDA-event timing breakdown). "
+    "Writes profiling/profile_<scene>_<timestamp>.json",
+)
 args = parser.parse_args()
 
 
@@ -43,7 +49,11 @@ def main():
     )
 
     settings_path = Path(args.settings)
-    sim = SynchronousSimulator(settings_path, stream_only=args.stream_only)
+    sim = SynchronousSimulator(
+        settings_path,
+        stream_only=args.stream_only,
+        profile=args.profile,
+    )
     sim.run(display=args.display, log_h5=args.log_h5, log_rrd=args.log_rrd)
 
 

@@ -1,0 +1,102 @@
+# Same as apartment_1-settings.yaml, but the event camera uses the
+# DVS-Voltmeter stochastic backend instead of the deterministic cu_esim model.
+simulator:
+  world_rate: 1000 # Hz
+  control_rate: 100 # Hz
+  sim_time: 30 # seconds
+  coord_transform: "rotorpy_to_hm3d"
+
+  additional_sensors:
+    imu_1:
+      type: "imu"
+      model: "rotorpy"
+      sampling_rate: 50 # Hz
+
+  sensor_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 1000 # Hz
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
+
+  viz_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 20 # Hz
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
+
+visual_backend:
+  gpu_id: 0
+  scene: "data/scene_datasets/habitat-test-scenes/apartment_1.glb"
+  scene_dataset_config_file: "default"
+  clear_color: [0.0, 0.0, 0.0, 1.0]
+  default_agent: 0
+
+  agent_height: 1.0
+  agent_radius: 0.3
+  agent_max_climb: 1.0
+  agent_max_slope: 90.0
+
+  enable_hbao: false
+  frustum_culling: true
+
+  seed: 324
+  physics_config_file: "data/default.physics_config.json"
+  enable_physics: true
+
+  sensors:
+    event_camera_1:
+      type: "event"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 120
+      zfar: 20.0
+      anti_aliasing: 8
+
+      # DVS-Voltmeter stochastic event model (Lin et al., ECCV 2022).
+      # Inputs are [0, 1] linear intensity; the factory passes
+      # input_normalized=True so the simulator rescales internally to the
+      # 0-255 scale that k1..k6 are calibrated against.
+      backend: "voltmeter"
+      camera_type: "DVS346"      # or "DVS240"
+      leak_scale: 1.0            # 0.0 = signal-only, 1.0 = faithful
+      randomize_phase: true      # desynchronises background ON sparkle
+      seed: 67
+      max_events_per_pixel: 16   # output buffer = W * H * this
+      # k: [k1, k2, k3, k4, k5, k6]   # uncomment to override camera_type
+
+    color_camera_1:
+      type: "color"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 20.0
+      anti_aliasing: 8
+
+    depth_camera_1:
+      type: "depth"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 10.0
+
+controller:
+  model: "rotorpy_se3"
+  vehicle: "crazyflie"
+
+dynamics:
+  model: "rotorpy_multirotor_euler"
+  vehicle: "crazyflie"
+
+trajectory:
+  model: "habitat_random_minsnap"
+  seed: 42
+  target_length: 30.0
+  min_waypoint_distance: 2.0
+  max_waypoints: 100
+  v_avg: 1.0
