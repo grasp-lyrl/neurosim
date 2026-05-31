@@ -16,7 +16,7 @@ from typing import Any
 
 import habitat_sim as hsim
 
-from neurosim.core.utils import color2intensity, RECOLOR_MAP, outline_border
+from neurosim.core.utils import color2intensity, RECOLOR_MAP, outline_border, Profiler
 from neurosim.core.event_sim import create_event_simulator, EventSimulatorProtocol
 from neurosim.core.visual_backend.base import VisualBackendProtocol
 from neurosim.core.visual_backend.optical_flow import OpticalFlowComputer
@@ -42,6 +42,10 @@ class HabitatWrapper(VisualBackendProtocol):
 
     def __init__(self, settings: dict[str, Any]):
         self.settings = settings
+
+        # Profiler used to time render_* sections; attach one via set_profiler.
+        # The default disabled profiler makes every section() a no-op.
+        self.profiler = Profiler(enabled=False)
 
         # Initialize event simulator container
         self._event_simulators: dict[str, EventSimulatorProtocol] = {}
@@ -525,6 +529,13 @@ class HabitatWrapper(VisualBackendProtocol):
 
         return hsim.Configuration(sim_cfg, [agent_cfg])
 
+    def set_profiler(self, profiler: Profiler) -> None:
+        """Attach a profiler used to time the ``render_*`` sections.
+
+        A disabled profiler (the default) keeps all timing a no-op.
+        """
+        self.profiler = profiler
+
     def update_agent_state(
         self, position: np.ndarray, quaternion: np.ndarray | np.quaternion
     ) -> None:
@@ -573,21 +584,30 @@ class HabitatWrapper(VisualBackendProtocol):
         Returns:
             Tuple of (x, y, t, p) event arrays, or None if no events.
         """
+        prof = self.profiler
         color_sensor = self._sim._sensors[uuid]
-        color_sensor.draw_observation()
-        color_observation = color_sensor.get_observation()[..., :3]  # RGB
 
-        intensity_image = color2intensity(color_observation / 255.0)
+        # These sections auto-nest under the active render_sensors.<uuid>
+        # Habitat GPU render of the intensity image feeding the event sim.
+        with prof.section("habitat_render", gpu=True):
+            color_sensor.draw_observation()
+            color_observation = color_sensor.get_observation()[..., :3]  # RGB
 
-        events = self._event_simulators[uuid](intensity_image, timestamp_us=time)
+        with prof.section("color2intensity", gpu=True):
+            intensity_image = color2intensity(color_observation / 255.0)
+
+        # The event-sim kernel
+        with prof.section("event_kernel", gpu=True):
+            events = self._event_simulators[uuid](intensity_image, timestamp_us=time)
 
         if to_numpy and events is not None:
-            events = [
-                events.x.cpu().numpy().astype(np.uint16),
-                events.y.cpu().numpy().astype(np.uint16),
-                events.t.cpu().numpy().astype(np.uint64),
-                events.p.cpu().numpy().astype(np.uint8),
-            ]
+            with prof.section("to_numpy"):
+                events = [
+                    events.x.cpu().numpy().astype(np.uint16),
+                    events.y.cpu().numpy().astype(np.uint16),
+                    events.t.cpu().numpy().astype(np.uint64),
+                    events.p.cpu().numpy().astype(np.uint8),
+                ]
             # else we assume they are already numpy arrays
         return events
 
