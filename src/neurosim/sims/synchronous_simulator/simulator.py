@@ -367,17 +367,25 @@ class SynchronousSimulator:
         self.time += self.config.t_step
         self.simsteps += 1
 
+        # Sub-sections auto-nest under the active dynamics_step section (CPU work:
+        # rotorpy integration, coord transform, Habitat agent pose, Bullet physics).
+        prof = self.profiler
+
         # Update dynamics
-        state = self.dynamics.step(control, self.config.t_step)
+        with prof.section("integrate"):
+            state = self.dynamics.step(control, self.config.t_step)
 
         # TODO: Choose the transform based on settings. Right now hardcoded from rotorpy to habitat
         # This is the coordinate transform step from the dynamics to the visual renderer
-        position, quaternion = self.coord_trans.transform(state["x"], state["q"])
-        self.visual_backend.update_agent_state(position, quaternion)
+        with prof.section("coord_transform"):
+            position, quaternion = self.coord_trans.transform(state["x"], state["q"])
+        with prof.section("agent_state"):
+            self.visual_backend.update_agent_state(position, quaternion)
 
-        self.visual_backend.update_dynamic_obstacles(
-            sim_time=self.time, dt=self.config.t_step
-        )
+        with prof.section("obstacles"):
+            self.visual_backend.update_dynamic_obstacles(
+                sim_time=self.time, dt=self.config.t_step
+            )
 
     def _render_sensors(self) -> dict:
         """
