@@ -57,6 +57,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from neurosim.core.utils.utils_gen import load_yaml
+from neurosim.core.utils import sim_gpu_assignments
 from neurosim.rl import (
     CombinedEventStateExtractor,
     EventCnnExtractor,
@@ -87,30 +88,6 @@ def load_experiment_config(config_path: str | Path) -> dict[str, Any]:
         raise ValueError(f"Missing required experiment config keys: {missing}")
 
     return cfg
-
-
-def sim_gpu_assignments(num_envs: int, n_gpus: int) -> list[int]:
-    """Map each vec-env index to a GPU id in ``0 .. n_gpus - 1``.
-
-    For ``n`` parallel envs and ``g`` GPUs with ``g >= 2``:
-
-    - ``max(0, n // g - 2)`` envs are assigned to GPU ``0`` (roughly four fewer
-      than an even ``n / g`` share, so PPO can keep GPU 0 busier with the policy).
-    - The remaining ``n - count0`` envs are round-robined over GPUs ``1 .. g - 1``.
-
-    For ``g <= 1`` or ``n <= 0``, every env uses GPU ``0``.
-    """
-    n, g = num_envs, int(n_gpus)
-    if g == 1 or n <= 0:
-        return [0] * n
-
-    count0 = max(0, n // g - 2)
-    assign: list[int] = [0] * count0
-
-    rest = n - count0
-    for i in range(rest):
-        assign.append(1 + (i % (g - 1)))
-    return assign
 
 
 def make_env(

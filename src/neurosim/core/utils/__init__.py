@@ -1,4 +1,5 @@
 from .utils_bench import Profiler, ProfileSectionStat
+from .utils_gpu import sim_gpu_assignments, explicit_gpu_map
 from .utils_gen import color2intensity, RECOLOR_MAP, outline_border
 from .utils_viz import RerunVisualizer, EventBuffer, EventVisualizationState
 from .utils_h5 import H5Logger
@@ -10,6 +11,9 @@ __all__ = [
     # Benchmarking / Profiling Utilities
     "Profiler",
     "ProfileSectionStat",
+    # GPU placement
+    "sim_gpu_assignments",
+    "explicit_gpu_map",
     # General Utilities
     "color2intensity",
     "get_pose_on_navmesh",
