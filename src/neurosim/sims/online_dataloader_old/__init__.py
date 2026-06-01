@@ -1,28 +1,23 @@
 """
-Online Dataloader Module.
+Online Dataloader Module — **ARCHIVED, do not import.**
 
-This module provides infrastructure for generating training data from
-simulations in real-time and loading it into PyTorch batches.
+.. deprecated::
+    This package targets a removed Cortex API (``neurosim.cortex.utils.ZMQNODE``
+    no longer exists) and pairs depth/events by *arrival order* rather than
+    timestamp. Kept only as reference while the replacement is built in
+    ``neurosim.online_data`` (see ``scaling-online-depth-training-plan.md``).
+    Salvage value: preallocated batch buffers + event normalization in
+    ``dataloader.py``.
 
-The system is designed to run as two separate processes:
-1. Publisher (simulator side): Runs simulations and publishes data via ZMQ
-2. Subscriber (shared storage): Receives data via ZMQ and buffers it
-                                for access by the DataLoader
-3. DataLoader (training side): Receives data and creates PyTorch batches
+Original design (for reference): two processes —
+1. Publisher (simulator side): runs sims, publishes data via ZMQ.
+2. Subscriber (shared storage): receives via ZMQ, buffers for the DataLoader.
+3. DataLoader (training side): builds PyTorch batches.
+
+The eager re-exports below are intentionally **removed** so that
+``import neurosim.sims.online_dataloader_old`` does not blow up on the missing
+``neurosim.cortex`` dependency. Import the specific archived module directly if
+you need to read it.
 """
 
-from .config import DatasetConfig
-from .datapublisher import DataPublisher
-from .datasubscriber import DataSubscriber
-from .dataloader import OnlineDataLoader
-
-__all__ = [
-    # Config
-    "DatasetConfig",
-    # Publisher (simulator side)
-    "DataPublisher",
-    # Subscriber (shared storage)
-    "DataSubscriber",
-    # Dataloader (training side)
-    "OnlineDataLoader",
-]
+__all__: list[str] = []
