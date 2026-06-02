@@ -3,11 +3,15 @@
 A torch-``DataLoader``-like façade fed by heterogeneous, time-aligned simulator
 producers. See ``scaling-online-depth-training-plan.md`` for the full design.
 
-Implemented so far (PR1): the wire unit (:class:`TimeAlignedSample`,
-:class:`SampleMeta`) and the sensor schema (:class:`SampleSchema`,
-:class:`SensorKind`, :class:`SensorRole`, :class:`SensorSpec`). The transport,
-batcher, simulator worker, config, and loader façade are scaffolded and land in
-PR2–PR4.
+Implemented so far:
+* PR1 — the wire unit (:class:`TimeAlignedSample`, :class:`SampleMeta`) and the
+  sensor schema (:class:`SampleSchema`, :class:`SensorKind`, :class:`SensorRole`,
+  :class:`SensorSpec`).
+* PR2 — anchor-driven assembly (:class:`AnchorAssembler`, :class:`StreamAccumulator`)
+  and the producer (:class:`SimulatorWorker`).
+
+The transport (``SampleBus``), batcher, config, and loader façade are scaffolded
+and land in PR3–PR4.
 """
 
 from .sample import SampleMeta, TimeAlignedSample, assert_owned_array
@@ -20,6 +24,8 @@ from .schema import (
     SENSOR_TYPE_TO_KIND,
     BATCH_STRATEGY_FOR_KIND,
 )
+from .assembler import AnchorAssembler, StreamAccumulator
+from .sim_worker import SimulatorWorker
 from .bus import RoutingPolicy
 
 __all__ = [
@@ -35,6 +41,10 @@ __all__ = [
     "infer_kind",
     "SENSOR_TYPE_TO_KIND",
     "BATCH_STRATEGY_FOR_KIND",
+    # Producer (PR2)
+    "AnchorAssembler",
+    "StreamAccumulator",
+    "SimulatorWorker",
     # Transport (routing policy enum is stable; SampleBus impl lands in PR3)
     "RoutingPolicy",
 ]
