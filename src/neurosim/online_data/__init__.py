@@ -9,9 +9,11 @@ Implemented so far:
   :class:`SensorSpec`).
 * PR2 — anchor-driven assembly (:class:`AnchorAssembler`, :class:`StreamAccumulator`)
   and the producer (:class:`SimulatorWorker`).
+* PR3 — transport (:class:`SampleBus`), batching (:class:`ShuffledBatcher`,
+  :class:`Batch`, :class:`BatchMeta`, :class:`EventNorm`), and the
+  :class:`OnlineDataLoader` façade (single producer → single consumer).
 
-The transport (``SampleBus``), batcher, config, and loader façade are scaffolded
-and land in PR3–PR4.
+The multi-producer config and DDP sharding land in PR4+.
 """
 
 from .sample import SampleMeta, TimeAlignedSample, assert_owned_array
@@ -26,7 +28,16 @@ from .schema import (
 )
 from .assembler import AnchorAssembler, StreamAccumulator
 from .sim_worker import SimulatorWorker
-from .bus import RoutingPolicy
+from .batcher import (
+    ShuffledBatcher,
+    Batch,
+    BatchMeta,
+    EventNorm,
+    FrameBuffer,
+    normalize_events,
+)
+from .bus import SampleBus, RoutingPolicy
+from .loader import OnlineDataLoader
 
 __all__ = [
     # Sample (wire unit)
@@ -45,6 +56,15 @@ __all__ = [
     "AnchorAssembler",
     "StreamAccumulator",
     "SimulatorWorker",
-    # Transport (routing policy enum is stable; SampleBus impl lands in PR3)
+    # Transport + batching (PR3)
+    "SampleBus",
     "RoutingPolicy",
+    "ShuffledBatcher",
+    "Batch",
+    "BatchMeta",
+    "EventNorm",
+    "FrameBuffer",
+    "normalize_events",
+    # Façade (PR3)
+    "OnlineDataLoader",
 ]
