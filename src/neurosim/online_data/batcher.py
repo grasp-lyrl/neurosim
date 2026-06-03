@@ -57,9 +57,9 @@ def normalize_events(packet: dict, norm: EventNorm) -> np.ndarray:
         return np.column_stack([x, y, t, p]).astype(np.float32)
     # t is ascending (renders concatenated in time order) -> t[-1] is the latest.
     t_rel = (t[-1] - t) / norm.time_window_us
-    return np.column_stack(
-        [x / norm.width, y / norm.height, t_rel, p]
-    ).astype(np.float32)
+    return np.column_stack([x / norm.width, y / norm.height, t_rel, p]).astype(
+        np.float32
+    )
 
 
 # --------------------------------------------------------------------------- #

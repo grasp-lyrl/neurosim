@@ -33,7 +33,11 @@ def _sample(uid):
         sample_uid=uid,
     )
     return TimeAlignedSample(
-        meta, {"depth_1": np.full((2, 2), uid, np.float32), "event_1": {"t": np.arange(uid, dtype=np.uint64)}}
+        meta,
+        {
+            "depth_1": np.full((2, 2), uid, np.float32),
+            "event_1": {"t": np.arange(uid, dtype=np.uint64)},
+        },
     )
 
 

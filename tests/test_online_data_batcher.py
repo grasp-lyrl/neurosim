@@ -6,7 +6,6 @@ empty-events / partial-batch edge cases.
 """
 
 import numpy as np
-import pytest
 
 from neurosim.online_data import (
     SampleMeta,
@@ -33,10 +32,16 @@ def _schema():
 
 
 def _norm(enabled=True):
-    return {"event_1": EventNorm(width=W, height=H, time_window_us=TIME_WINDOW, enabled=enabled)}
+    return {
+        "event_1": EventNorm(
+            width=W, height=H, time_window_us=TIME_WINDOW, enabled=enabled
+        )
+    }
 
 
-def _sample(uid, *, depth_fill, xs, ts, t_us=1000, step_idx=0, is_first=False, is_last=False):
+def _sample(
+    uid, *, depth_fill, xs, ts, t_us=1000, step_idx=0, is_first=False, is_last=False
+):
     xs = np.asarray(xs, np.uint16)
     ts = np.asarray(ts, np.uint64)
     n = len(xs)
@@ -135,8 +140,12 @@ def test_batcher_emits_on_full_and_shapes():
 
 def test_batcher_meta_stacked():
     b = ShuffledBatcher(_schema(), batch_size=2, event_norm=_norm())
-    b.add(_sample(10, depth_fill=1, xs=[0], ts=[1], t_us=100, step_idx=0, is_first=True))
-    batch = b.add(_sample(11, depth_fill=2, xs=[1], ts=[2], t_us=200, step_idx=1, is_last=True))
+    b.add(
+        _sample(10, depth_fill=1, xs=[0], ts=[1], t_us=100, step_idx=0, is_first=True)
+    )
+    batch = b.add(
+        _sample(11, depth_fill=2, xs=[1], ts=[2], t_us=200, step_idx=1, is_last=True)
+    )
     m = batch.meta
     assert m.t_us.tolist() == [100, 200]
     assert m.sample_uid.tolist() == [10, 11]

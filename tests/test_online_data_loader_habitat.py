@@ -21,7 +21,9 @@ _SETTINGS = Path("configs/apartment_1-settings.yaml")
 _SCENE = Path("data/scene_datasets/habitat-test-scenes/apartment_1.glb")
 
 if not _SETTINGS.exists() or not _SCENE.exists():
-    pytest.skip("apartment_1 settings/scene asset not available", allow_module_level=True)
+    pytest.skip(
+        "apartment_1 settings/scene asset not available", allow_module_level=True
+    )
 
 BATCH = 4
 

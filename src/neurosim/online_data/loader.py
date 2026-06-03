@@ -25,7 +25,7 @@ import queue
 import logging
 
 from neurosim.online_data.bus import SampleBus
-from neurosim.online_data.batcher import ShuffledBatcher, EventNorm, Batch
+from neurosim.online_data.batcher import ShuffledBatcher, EventNorm
 from neurosim.online_data.schema import SampleSchema, SensorKind
 
 logger = logging.getLogger(__name__)

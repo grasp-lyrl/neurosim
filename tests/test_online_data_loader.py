@@ -10,7 +10,12 @@ import itertools
 
 import numpy as np
 
-from neurosim.online_data import SampleMeta, TimeAlignedSample, SampleSchema, OnlineDataLoader
+from neurosim.online_data import (
+    SampleMeta,
+    TimeAlignedSample,
+    SampleSchema,
+    OnlineDataLoader,
+)
 
 W = H = 4
 SENSOR_CONFIGS = {
