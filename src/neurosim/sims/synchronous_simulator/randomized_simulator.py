@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _deep_merge(target: dict[str, Any], overrides: dict[str, Any]) -> None:
+    """Recursively merge ``overrides`` into ``target`` in place.
+
+    Nested dicts are merged; every other value replaces the target's value.
+    """
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], value)
+        else:
+            target[key] = value
+
+
 def _sample_value(spec: Any, rng: np.random.Generator) -> Any:
     """Resolve a single randomization spec to a concrete value.
 
@@ -178,18 +190,30 @@ class RandomizedSimulator:
             settings, visualizer_disabled=self._viz_disabled
         )
 
-    def randomize(self, rng: np.random.Generator) -> None:
+    def randomize(
+        self,
+        rng: np.random.Generator,
+        extra_overrides: dict[str, Any] | None = None,
+    ) -> None:
         """Sample new settings and reconfigure the existing simulator.
 
         Reuses the OpenGL / EGL context created during :meth:`build` by
         calling ``SynchronousSimulator.reconfigure`` instead of tearing
         down and recreating the simulator.  If the simulator has not been
         built yet, falls back to a full build.
+
+        Args:
+            rng: Generator driving the domain-randomization sampling.
+            extra_overrides: Optional dict deep-merged into the sampled settings
+                *after* DR sampling (and before reconfigure).
         """
         if self._rand_cfg is not None:
             settings = self._rand_cfg.sample(self._base_settings, rng)
         else:
             settings = copy.deepcopy(self._base_settings)
+
+        if extra_overrides:
+            _deep_merge(settings, extra_overrides)
 
         self._last_sampled_settings = settings
 
