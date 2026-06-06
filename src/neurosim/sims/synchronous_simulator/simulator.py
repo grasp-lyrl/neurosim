@@ -313,6 +313,14 @@ class SynchronousSimulator:
             traj_kwargs["coord_transform"] = self.coord_trans.inverse_transform_batch
             self.trajectory = create_trajectory(**traj_kwargs)
 
+    def renew_trajectory(self, overrides: dict | None = None) -> None:
+        """Rebuild ONLY the trajectory on the already-loaded scene + reset the clock."""
+        if overrides:
+            self.settings.setdefault("trajectory", {}).update(overrides)
+        self._init_trajectory()
+        self.time = 0.0
+        self.simsteps = 0
+
     def _init_safety_checker(self) -> None:
         """Build a Habitat-backed safety checker when a pathfinder is loaded.
 
