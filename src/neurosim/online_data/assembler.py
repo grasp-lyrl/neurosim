@@ -287,7 +287,7 @@ class AnchorAssembler:
             seed=self._seed,
             t_us=t_us,
             window_us=t_us - self._t_prev_us,
-            anchor_uuids=tuple(self.schema.anchor_uuids),
+            anchor_uuids=self.schema.anchor_uuids,
             episode_id=self._episode_id,
             step_idx=self._step_idx,
             is_first=(self._step_idx == 0),

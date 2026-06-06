@@ -92,18 +92,6 @@ class TimeAlignedSample:
         """Sensor UUIDs carried by this sample."""
         return list(self.sensors.keys())
 
-    def nbytes(self) -> int:
-        """Approximate owned-payload size in bytes (for backpressure/logging)."""
-        total = 0
-        for payload in self.sensors.values():
-            if isinstance(payload, np.ndarray):
-                total += int(payload.nbytes)
-            elif isinstance(payload, dict):
-                total += sum(
-                    int(v.nbytes) for v in payload.values() if isinstance(v, np.ndarray)
-                )
-        return total
-
 
 def assert_owned_array(arr: np.ndarray, name: str = "payload") -> np.ndarray:
     """Assert ``arr`` owns its memory (not a view into a reused sim buffer).

@@ -37,7 +37,7 @@ from .batcher import (
     normalize_events,
 )
 from .bus import SampleBus, RoutingPolicy
-from .loader import OnlineDataLoader
+from .loader import OnlineDataLoader, ProducerSpec, build_producer_specs
 
 __all__ = [
     # Sample (wire unit)
@@ -65,6 +65,8 @@ __all__ = [
     "EventNorm",
     "FrameBuffer",
     "normalize_events",
-    # Façade (PR3)
+    # Façade (PR3) + multi-producer (PR4)
     "OnlineDataLoader",
+    "ProducerSpec",
+    "build_producer_specs",
 ]
