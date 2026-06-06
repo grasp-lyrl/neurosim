@@ -113,7 +113,7 @@ class SimulatorWorker:
         if rsim is None:
             if base_settings is None:
                 raise ValueError("Provide either `rsim` or `base_settings`.")
-            rsim = self._build_rsim(base_settings, randomization, gpu_id)
+            rsim = self._build_rsim(base_settings, randomization, gpu_id, seed)
         self.rsim = rsim
 
         if validate:
@@ -130,7 +130,9 @@ class SimulatorWorker:
         )
 
     @staticmethod
-    def _build_rsim(base_settings: dict, randomization: dict | None, gpu_id: int):
+    def _build_rsim(
+        base_settings: dict, randomization: dict | None, gpu_id: int, seed: int
+    ):
         # Lazy import: keeps Habitat out of the import path for unit tests.
         import copy
 
@@ -139,7 +141,7 @@ class SimulatorWorker:
         settings = copy.deepcopy(base_settings)
         settings.setdefault("visual_backend", {})["gpu_id"] = gpu_id
         return RandomizedSimulator(
-            settings, randomization=randomization, visualizer_disabled=True
+            settings, randomization=randomization, visualizer_disabled=True, seed=seed
         )
 
     @property
@@ -181,6 +183,9 @@ class SimulatorWorker:
             episode_idx = self._episode_idx
         self._episode_idx = episode_idx + 1
 
+        # RandomizedSimulator owns the cadence: it reconfigures scene+sensors
+        # every ``resample_every`` episodes (from the DR config) and rebuilds
+        # the trajectory in-place every episode. (Dynamics DR stays RL-only.)
         self.rsim.randomize(self._rng)
         scene = ""
         sampled = getattr(self.rsim, "last_sampled_settings", None)
@@ -195,13 +200,6 @@ class SimulatorWorker:
         for sample in self.assembler.end_episode():
             self._emit_fn(sample)
         return self.assembler.stats["emitted"] - before
-
-    def run(self, n_episodes: int) -> int:
-        """Run ``n_episodes`` sequentially; returns total emitted sample count."""
-        total = 0
-        for _ in range(n_episodes):
-            total += self.run_episode()
-        return total
 
     def close(self) -> None:
         if self.rsim is not None:
