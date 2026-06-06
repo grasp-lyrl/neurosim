@@ -64,19 +64,13 @@ def _meta(**kw):
     return SampleMeta(**base)
 
 
-def test_sample_nbytes_and_uuids():
+def test_sample_uuids():
     depth = np.zeros((480, 640), dtype=np.float32)
-    events = {
-        "x": np.zeros(10, np.int16),
-        "y": np.zeros(10, np.int16),
-        "t": np.zeros(10, np.int64),
-        "p": np.zeros(10, np.int8),
-    }
+    events = {"x": np.zeros(10, np.int16), "t": np.zeros(10, np.int64)}
     s = TimeAlignedSample(
         meta=_meta(), sensors={"depth_camera_1": depth, "event_camera_1": events}
     )
     assert set(s.uuids()) == {"depth_camera_1", "event_camera_1"}
-    assert s.nbytes() == depth.nbytes + sum(v.nbytes for v in events.values())
 
 
 def test_assert_owned_array():

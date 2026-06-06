@@ -52,13 +52,16 @@ class _FakeSim:
 
 
 class _FakeRSim:
+    """Mock RandomizedSimulator — cadence/trajectory live in the real one, so
+    here ``randomize`` is a no-op (the scripted ``sim.run`` drives the samples)."""
+
     def __init__(self, sim, scene="apartment_1"):
         self.sim = sim
         self.last_sampled_settings = {"visual_backend": {"scene": scene}}
         self.closed = False
 
     def randomize(self, rng):
-        pass
+        return True
 
     def close(self):
         self.closed = True

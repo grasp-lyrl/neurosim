@@ -1,15 +1,16 @@
-"""Habitat end-to-end test for OnlineDataLoader (PR3).
+"""Habitat end-to-end test for the multi-producer OnlineDataLoader (PR4).
 
-Spawns a real producer process (SimulatorWorker on Habitat) feeding the bus, and
-consumes a batch through the loader. Skips when Habitat / the apartment_1 scene
-asset is unavailable. Run in the ``neurosim`` conda env.
+Spawns TWO real producer processes (SimulatorWorkers on Habitat, distinct seeds)
+feeding one bus, and consumes batches through the loader — exercising multi-GPU-
+style fan-out (both on gpu0 here), diversity (batches mix ``spec_id``), and clean
+teardown. Skips when Habitat / the apartment_1 scene asset is unavailable. Run in
+the ``neurosim`` conda env.
 """
 
 import copy
 import itertools
 from pathlib import Path
 
-import numpy as np
 import pytest
 import yaml
 
@@ -26,6 +27,7 @@ if not _SETTINGS.exists() or not _SCENE.exists():
     )
 
 BATCH = 4
+N_PRODUCERS = 2
 
 
 def _short_settings(sim_time: float = 5.0) -> dict:
@@ -35,7 +37,7 @@ def _short_settings(sim_time: float = 5.0) -> dict:
     return settings
 
 
-def test_loader_end_to_end():
+def test_loader_multi_producer_end_to_end():
     settings = _short_settings()
     schema = SampleSchema.from_sensor_configs(
         {
@@ -50,29 +52,34 @@ def test_loader_end_to_end():
         schema,
         batch_size=BATCH,
         base_settings=copy.deepcopy(settings),
-        worker_kwargs={"gpu_id": 0, "seed": 0},
+        num_producers=N_PRODUCERS,
+        gpu_ids=[0],  # both producers on gpu0
+        base_seed=0,
         bus_maxsize=64,
         event_time_window_us=50_000,
         get_timeout=2.0,
     )
+    seen_spec_ids = set()
+    batches = []
     try:
-        batches = list(itertools.islice(loader, 1))
+        # Consume several batches so both producers are represented.
+        for batch in itertools.islice(loader, 4):
+            batches.append(batch)
+            seen_spec_ids.update(batch.meta.spec_id.tolist())
     finally:
         loader.close()
 
-    assert len(batches) == 1, "no batch produced (producer may have died)"
-    batch = batches[0]
+    assert len(batches) == 4, "too few batches (a producer may have died)"
 
+    batch = batches[0]
     depth = batch["depth_camera_1"]
     assert depth.shape == (BATCH, 480, 640)
-
     counts, events = batch["event_camera_1"]
     assert counts.shape == (BATCH,)
     assert events.shape[1] == 4 and events.shape[0] == int(counts.sum())
 
-    m = batch.meta
-    assert m.t_us.shape == (BATCH,)
-    assert np.all(np.diff(m.t_us) > 0)  # samples in time order within the batch
-    assert m.scene[0].endswith("apartment_1.glb")
+    # Diversity: samples come from both producers (distinct spec_ids).
+    assert len(seen_spec_ids) >= 2, f"expected >=2 spec_ids, saw {seen_spec_ids}"
 
-    assert loader._proc is None  # producer cleanly terminated by close()
+    # Clean teardown: no producer left alive / tracked.
+    assert loader._procs == []

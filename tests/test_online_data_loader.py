@@ -84,6 +84,23 @@ def test_loader_close_idempotent_without_producer():
     loader.close()  # no raise
 
 
+def test_build_producer_specs():
+    from neurosim.online_data import build_producer_specs
+
+    specs = build_producer_specs(
+        {"k": 1}, num_producers=8, gpu_ids=[0], base_seed=10, randomization={"d": 1}
+    )
+    assert len(specs) == 8
+    assert [s.gpu_id for s in specs] == [0] * 8
+    assert [s.seed for s in specs] == list(range(10, 18))
+    assert [s.spec_id for s in specs] == list(range(8))
+    assert all(s.randomization == {"d": 1} for s in specs)
+
+    # GPU ids cycle across producers.
+    multi = build_producer_specs({"k": 1}, num_producers=4, gpu_ids=[0, 1])
+    assert [s.gpu_id for s in multi] == [0, 1, 0, 1]
+
+
 def test_loader_context_manager():
     with OnlineDataLoader(
         _schema(), batch_size=1, base_settings=None, start=False, get_timeout=0.2

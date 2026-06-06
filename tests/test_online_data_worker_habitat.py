@@ -82,3 +82,47 @@ def test_boundary_flags_and_scene(worker_samples):
     assert sum(s.meta.is_first for s in worker_samples) == 1
     assert sum(s.meta.is_last for s in worker_samples) == 1
     assert worker_samples[0].meta.scene.endswith("apartment_1.glb")
+
+
+def test_cheap_trajectory_reset_on_light_episodes():
+    """Real-Habitat check of the cost-tiered hotfix: a light episode goes through
+    ``sim.renew_trajectory`` (rebuild traj + clock reset, no scene reload) and a
+    heavy episode after it still reconfigures cleanly."""
+    settings = _short_settings(sim_time=0.5)
+    schema = SampleSchema.from_sensor_configs(
+        {
+            uuid: cfg
+            for uuid, cfg in settings["visual_backend"]["sensors"].items()
+            if uuid in ("depth_camera_1", "event_camera_1")
+        },
+        anchor=["depth_camera_1"],
+        stream=["event_camera_1"],
+    )
+    # scene reconfigure every 2 episodes -> ep0 heavy, ep1 light, ep2 heavy.
+    # Cadence is owned by RandomizedSimulator via the DR config; the trajectory is
+    # reseeded every episode automatically.
+    worker = SimulatorWorker(
+        schema,
+        base_settings=copy.deepcopy(settings),
+        randomization={"resample_every": 2},
+        worker_id=0,
+        gpu_id=0,
+        seed=0,
+    )
+    try:
+        for ep in range(3):
+            worker.run_episode(episode_idx=ep)
+    finally:
+        worker.close()
+
+    by_ep: dict = {}
+    for s in worker.samples:
+        by_ep.setdefault(s.meta.episode_id, []).append(s)
+
+    assert len(by_ep) == 3  # all three episodes (incl. the light one) produced data
+    for samples in by_ep.values():
+        assert len(samples) >= 1
+        assert samples[0].meta.step_idx == 0  # clock reset each episode
+        ts = [s.meta.t_us for s in samples]
+        assert ts == sorted(ts)  # monotonic within the episode
+        assert samples[0].meta.is_first and samples[-1].meta.is_last
