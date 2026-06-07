@@ -1,9 +1,9 @@
 """Anchor-driven sample assembly (pure, simulator-agnostic).
 
-This is the heart of a producer (plan §6.1). It consumes per-step sensor
-measurements (already converted to **owned host memory** by the worker) and emits
-:class:`~neurosim.online_data.sample.TimeAlignedSample`s whose boundaries are
-defined by an *anchor* sensor tick:
+It consumes per-step sensor measurements (already converted to **owned
+host memory** by the worker) and emits
+:class:`~neurosim.online_data.sample.TimeAlignedSample`s whose boundaries
+are defined by an *anchor* sensor tick:
 
 * ``stream`` sensors  — accumulated into bounded (drop-oldest) packets between
   anchor ticks, flushed at the anchor (window ``(t_prev, t_anchor]``).
@@ -12,21 +12,18 @@ defined by an *anchor* sensor tick:
   what triggers a sample; secondary anchors behave as held-latest, so a
   depth+color joint anchor that fires on the same tick gets both fresh.
 
-Design choices (locked while implementing PR2):
+Design choices:
 
 * **Always emit.** Every primary-anchor tick (after warm-up) emits a sample, even
-  if the stream window is empty — event-count gating is left to training (Q4).
+  if the stream window is empty — event-count gating is left to training.
 * **Ring cap, drop-oldest.** A stream that overflows its cap keeps the newest
-  rows and counts/logs the overflow; no time-based window cap (Q4).
+  rows and counts/logs the overflow; no time-based window cap.
 * **Hold-back-by-one.** A sample is buffered and released when the *next* sample
   is assembled (or at :meth:`end_episode`), so ``is_first``/``is_last`` are exact
   in a streaming callback — the basis for the recurrent (TBPTT) batcher later.
 * **Ownership backstop.** Inputs must be owned host arrays (the worker's
   ``_to_host`` is the copy boundary); ``strict_owned`` asserts ``OWNDATA`` so a
-  reused-buffer aliasing bug is caught immediately (plan §0.10).
-
-This module imports neither torch nor Habitat, so it is exhaustively unit-testable
-with synthetic numpy measurements.
+  reused-buffer aliasing bug is caught immediately.
 """
 
 import logging
@@ -129,8 +126,7 @@ class AnchorAssembler:
         worker_id: Producer process index (provenance / episode-id high bits).
         spec_id: Producer spec / DR-variant index (diversity provenance).
         ring_caps: Optional ``uuid -> max rows`` cap per stream sensor.
-        strict_owned: Assert every ingested array owns its memory (backstop for
-            the §0.10 copy rule).
+        strict_owned: Assert every ingested array owns its memory
         uid_start: Starting value for the globally-monotonic ``sample_uid``.
     """
 

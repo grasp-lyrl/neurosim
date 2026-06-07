@@ -3,14 +3,7 @@
 Wires a ``RandomizedSimulator`` to an :class:`~neurosim.online_data.assembler.AnchorAssembler`:
 each episode it (re-)randomizes, flies one trajectory via ``sim.run(callback=...)``,
 and on every step converts the raw (GPU) measurements to **owned host memory**
-(:func:`_to_host_array` / :func:`_events_to_host` — the §0.10 copy boundary) and
-feeds them to the assembler. Released samples are routed to ``emit_fn`` (defaults
-to collecting into ``self.samples``; PR3 swaps in a ``SampleBus`` push).
-
-The only Habitat-bearing import (``RandomizedSimulator``) is **lazy** (inside
-:meth:`_build_rsim`), so the conversion + assembly logic — and tests that inject a
-mock simulator — run without Habitat. ``torch`` is not imported here either; the
-converters use duck-typing (``detach``/``cpu``/``numpy``).
+and feeds them to the assembler. Released samples are routed to ``emit_fn``..
 """
 
 import logging

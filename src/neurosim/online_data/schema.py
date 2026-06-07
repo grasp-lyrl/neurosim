@@ -8,8 +8,8 @@ instead every requested UUID resolves to:
 * a **role** (:class:`SensorRole`) — chosen in config — that determines how the
   producer's anchor assembler treats it (boundary / accumulate / hold).
 
-This decoupling is what lets v1 ship events+depth while events+IMU, color, pose,
-etc. drop in later with no batcher surgery: the batcher dispatches on *kind*
+This allows us to support arbitrary sensor combinations and new sensor types, e.g,
+events+depth, events+IMU, color+pose, etc., without too much work.
 (see :data:`BATCH_STRATEGY_FOR_KIND`), and the worker dispatches on *role*.
 
 A :class:`SampleSchema` is built once at loader init from the requested sensors

@@ -3,18 +3,17 @@
 Dispatch is by sensor *kind* via
 :data:`neurosim.online_data.schema.BATCH_STRATEGY_FOR_KIND`:
 
-* ``stack``         — frames/vectors stacked to ``(B, …)`` (preallocated buffer).
-* ``concat_counts`` — event/vector streams concatenated with a ``counts`` vector
-  (ports the normalization from the archived ``dataloader.py``).
+* ``stack``         — frames/vectors stacked to ``(B, ...)`` (preallocated buffer).
+* ``concat_counts`` — event/vector streams concatenated with a ``counts`` vector.
+  Events are packed ``[x, y, t_anchor - t, p]`` (raw values, anchor-relative
+  time); model-side normalization happens downstream (see :func:`shift_events`).
 
 Unlike the archived loader, a :class:`~neurosim.online_data.sample.TimeAlignedSample`
 is an **atomic, already-aligned row**: one sample fills row ``i`` for *every*
 delivered sensor at once, so there is no per-sensor "ready" bookkeeping.
 
-``ShuffledBatcher`` (v1) builds batches in arrival order — diversity comes from
-producers interleaving on the shared bus, not from a shuffle buffer. The
-recurrent ``SequenceBatcher`` (PR7) will reuse the same dispatch + ``Batch``/
-``BatchMeta`` types.
+``ShuffledBatcher`` builds batches in arrival order — diversity comes from
+producers interleaving on the shared bus, not from a shuffle buffer.
 """
 
 import logging
@@ -30,36 +29,30 @@ logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
-# Event normalization (parity with archived dataloader `_process_sample`)
+# Event packing (anchor-relative time; normalization is a downstream concern)
 # --------------------------------------------------------------------------- #
-@dataclass(slots=True)
-class EventNorm:
-    """Per-sensor event normalization config.
+def shift_events(packet: dict, t_anchor_us: int) -> np.ndarray:
+    """Stack an event packet ``{x,y,t,p}`` into an ``(N, 4)`` float32 array.
 
-    Normalized columns are ``[x/width, y/height, (t_last - t)/time_window, p]``
-    (most-recent event -> 0, oldest -> ~1), matching the archived loader. When
-    ``enabled`` is False, raw ``[x, y, t, p]`` are stacked as float32.
+    Columns are ``[x, y, t_anchor_us - t, p]``: raw pixel coordinates, raw
+    polarity, and time measured **backwards from the anchor** in microseconds
+    (newest event -> 0, oldest -> ~``window_us``). Events fall in
+    ``(t_prev, t_anchor]`` so the relative time is bounded by the sample window,
+    which keeps it ``float32``-exact (absolute µs would overflow the mantissa).
+
+    Spatial/temporal *scaling* (``/W``, ``/H``, ``/window``) is a model concern
+    and is applied downstream (e.g. in the training loop, ideally on-GPU), not
+    here — different models want different normalizations, and ``width`` /
+    ``height`` / ``window_us`` all travel in the schema + ``BatchMeta``.
     """
-
-    width: int
-    height: int
-    time_window_us: float
-    enabled: bool = True
-
-
-def normalize_events(packet: dict, norm: EventNorm) -> np.ndarray:
-    """Stack an event packet ``{x,y,t,p}`` into an ``(N, 4)`` float32 array."""
     n = len(packet.get("x", ())) if packet else 0
     if n == 0:
         return np.zeros((0, 4), dtype=np.float32)
     x, y, t, p = packet["x"], packet["y"], packet["t"], packet["p"]
-    if not norm.enabled:
-        return np.column_stack([x, y, t, p]).astype(np.float32)
-    # t is ascending (renders concatenated in time order) -> t[-1] is the latest.
-    t_rel = (t[-1] - t) / norm.time_window_us
-    return np.column_stack([x / norm.width, y / norm.height, t_rel, p]).astype(
-        np.float32
-    )
+    t_rel = int(t_anchor_us) - t.astype(
+        np.int64
+    )  # int64: values << 2**31, no underflow
+    return np.column_stack([x, y, t_rel, p]).astype(np.float32)
 
 
 # --------------------------------------------------------------------------- #
@@ -150,15 +143,8 @@ class Batcher(ABC):
 class ShuffledBatcher(Batcher):
     """Arrival-order feed-forward batcher (v1)."""
 
-    def __init__(
-        self,
-        schema: SampleSchema,
-        batch_size: int,
-        *,
-        event_norm: dict[str, EventNorm] | None = None,
-    ):
+    def __init__(self, schema: SampleSchema, batch_size: int):
         super().__init__(schema, batch_size)
-        self._event_norm = event_norm or {}
 
         self._frame_bufs: dict[str, FrameBuffer] = {}
         self._event_uuids: list[str] = []
@@ -198,10 +184,9 @@ class ShuffledBatcher(Batcher):
         for uuid, buf in self._frame_bufs.items():
             buf.set(i, sample.sensors[uuid])
         for uuid in self._event_uuids:
-            norm = self._event_norm.get(uuid)
-            if norm is None:
-                raise ValueError(f"missing EventNorm config for event sensor {uuid!r}")
-            self._event_rows[uuid].append(normalize_events(sample.sensors[uuid], norm))
+            self._event_rows[uuid].append(
+                shift_events(sample.sensors[uuid], sample.meta.t_us)
+            )
         self._metas.append(sample.meta)
         self._idx += 1
 

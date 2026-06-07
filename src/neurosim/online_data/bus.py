@@ -1,15 +1,14 @@
 """SampleBus: transport from simulator producers to per-rank batch builders.
 
-v1 is a single bounded ``mp.Queue`` shared by producers (put) and consumers
-(get). With one consumer it is a plain FIFO; with N consumers each ``get`` pops a
+Single bounded ``mp.Queue`` shared by producers (put) and consumers (get).
+With one consumer it is a plain FIFO; with N consumers each ``get`` pops a
 distinct sample, so the stream is sharded disjointly across consumers
 (work-stealing) and batches mix producers — that is the ``ROUND_ROBIN`` policy.
 
 The bound provides **backpressure**: when the queue is full, producers block on
 ``put`` so a fast simulator throttles instead of exhausting host memory. A
 ``by_episode`` policy (episode-affinity routing for the recurrent batcher) and a
-shared-memory / Cortex-backed implementation can slot in behind this interface
-later (plan §10).
+shared-memory / Cortex-backed implementation can slot in behind this interface later.
 """
 
 import logging
@@ -48,7 +47,7 @@ class SampleBus:
         if policy != RoutingPolicy.ROUND_ROBIN:
             raise NotImplementedError(
                 f"routing policy {policy!r} not implemented; only "
-                f"{RoutingPolicy.ROUND_ROBIN!r} is available in v1."
+                f"{RoutingPolicy.ROUND_ROBIN!r} is available right now."
             )
         if isinstance(ctx, str):
             ctx = mp.get_context(ctx)

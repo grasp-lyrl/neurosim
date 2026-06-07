@@ -1,4 +1,4 @@
-"""OnlineDataLoader: the torch-``DataLoader``-like façade.
+"""OnlineDataLoader
 
 Construct with a schema + producer settings, iterate batches, close::
 
@@ -9,14 +9,14 @@ Construct with a schema + producer settings, iterate batches, close::
         depth  = batch["depth_camera_1"]   # (B, H, W)
     loader.close()
 
-Topology (v1 target): **M producer processes** each own a
-:class:`~neurosim.online_data.sim_worker.SimulatorWorker` on an assigned GPU and
-push time-aligned samples to one bounded :class:`~neurosim.online_data.bus.SampleBus`;
-the consumer (this process) pops them and builds batches inline with a
-:class:`~neurosim.online_data.batcher.ShuffledBatcher`. Because all producers share
-the bus, consecutive samples come from different specs → **diverse batches**. The
-bounded bus decouples sim from training (producers run ahead) and bounds memory
-(backpressure). Producers use ``spawn`` (Habitat/EGL + CUDA must not fork).
+**M producer processes** each own a :class:`~neurosim.online_data.sim_worker.SimulatorWorker`
+on an assigned GPU and push time-aligned samples to one bounded
+:class:`~neurosim.online_data.bus.SampleBus`; the consumer (this process) pops them
+and builds batches inline with a :class:`~neurosim.online_data.batcher.ShuffledBatcher`.
+Because all producers share the bus, consecutive samples come from different specs →
+**diverse batches**. The bounded bus decouples sim from training (producers run ahead)
+and bounds memory (backpressure). Producers use ``spawn`` (Habitat/EGL + CUDA must
+not fork).
 
 ``base_settings=None`` / ``start=False`` skips producers entirely so the consumer
 path can be driven by feeding ``loader.bus`` directly (tests).
@@ -28,8 +28,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 
 from neurosim.online_data.bus import SampleBus
-from neurosim.online_data.batcher import ShuffledBatcher, EventNorm
-from neurosim.online_data.schema import SampleSchema, SensorKind
+from neurosim.online_data.batcher import ShuffledBatcher
+from neurosim.online_data.schema import SampleSchema
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +172,6 @@ class OnlineDataLoader:
             every episode) is set in ``randomization`` (``resample_every`` /
             ``trajectory``) and owned by ``RandomizedSimulator.randomize``.
         bus_maxsize: Bus capacity (backpressure bound).
-        event_time_window_us / normalize_events: Event normalization.
         mp_context: Start method (``"spawn"`` for CUDA/Habitat).
         get_timeout: Consumer poll interval / producer-death check.
         log_dir: If set, write ``run_setup.yaml`` + per-producer logs.
@@ -192,8 +191,6 @@ class OnlineDataLoader:
         base_seed: int = 0,
         ring_caps: dict | None = None,
         bus_maxsize: int = 256,
-        event_time_window_us: float = 50_000,
-        normalize_events: bool = True,
         mp_context: str = "spawn",
         get_timeout: float = 1.0,
         log_dir=None,
@@ -220,17 +217,7 @@ class OnlineDataLoader:
         else:
             self._specs = []
 
-        event_norm = {
-            uuid: EventNorm(
-                width=int(schema.specs[uuid].extras["width"]),
-                height=int(schema.specs[uuid].extras["height"]),
-                time_window_us=event_time_window_us,
-                enabled=normalize_events,
-            )
-            for uuid in schema.deliver_uuids()
-            if schema.kind_of(uuid) is SensorKind.EVENT_STREAM
-        }
-        self.batcher = ShuffledBatcher(schema, batch_size, event_norm=event_norm)
+        self.batcher = ShuffledBatcher(schema, batch_size)
 
         self._ctx = mp.get_context(mp_context)
         self.bus = SampleBus(maxsize=bus_maxsize, ctx=self._ctx)

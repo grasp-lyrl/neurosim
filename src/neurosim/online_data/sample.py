@@ -6,22 +6,6 @@ time ``t_us``), one payload per requested sensor UUID:
 * ``anchor`` sensors  — the frame(s) whose tick defined this sample boundary.
 * ``stream`` sensors  — packets accumulated over the window ``(t_prev, t_us]``.
 * ``latest`` sensors  — the most recent held snapshot.
-
-Two invariants make the design rock-solid (enforced by the producer, see the
-``sim_worker`` module added in a later PR):
-
-1. **Alignment is structural.** The sample is assembled inside the simulator
-   worker where the anchor render and the stream-window boundary share one
-   ``sim.time`` — never inferred downstream from arrival order.
-2. **Payloads are owned host memory.** Several simulator buffers (event buffers,
-   ``gpu2gpu_transfer`` render tensors) are reused/overwritten each step, so the
-   worker must copy every payload before it enters a sample (a GPU→CPU copy
-   counts). :func:`assert_owned_array` documents/asserts that contract.
-
-The sequence/recurrence fields on :class:`SampleMeta` (``episode_id``,
-``step_idx``, ``is_first``/``is_last``) are populated for every sample even
-though the v1 shuffled batcher ignores them; they are the entire basis for the
-recurrent (TBPTT) batcher added later.
 """
 
 import numpy as np

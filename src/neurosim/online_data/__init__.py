@@ -10,7 +10,7 @@ Implemented so far:
 * PR2 — anchor-driven assembly (:class:`AnchorAssembler`, :class:`StreamAccumulator`)
   and the producer (:class:`SimulatorWorker`).
 * PR3 — transport (:class:`SampleBus`), batching (:class:`ShuffledBatcher`,
-  :class:`Batch`, :class:`BatchMeta`, :class:`EventNorm`), and the
+  :class:`Batch`, :class:`BatchMeta`, :func:`shift_events`), and the
   :class:`OnlineDataLoader` façade (single producer → single consumer).
 
 The multi-producer config and DDP sharding land in PR4+.
@@ -32,9 +32,8 @@ from .batcher import (
     ShuffledBatcher,
     Batch,
     BatchMeta,
-    EventNorm,
     FrameBuffer,
-    normalize_events,
+    shift_events,
 )
 from .bus import SampleBus, RoutingPolicy
 from .loader import OnlineDataLoader, ProducerSpec, build_producer_specs
@@ -62,9 +61,8 @@ __all__ = [
     "ShuffledBatcher",
     "Batch",
     "BatchMeta",
-    "EventNorm",
     "FrameBuffer",
-    "normalize_events",
+    "shift_events",
     # Façade (PR3) + multi-producer (PR4)
     "OnlineDataLoader",
     "ProducerSpec",
