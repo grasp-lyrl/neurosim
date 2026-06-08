@@ -1,8 +1,8 @@
 """Unit tests for batching (PR3). Pure numpy — no Habitat / mp.
 
-Covers ShuffledBatcher (shapes by kind, event counts, batch.meta), event
-normalization parity with the archived `_process_sample`, FrameBuffer, and the
-empty-events / partial-batch edge cases.
+Covers ShuffledBatcher (shapes by kind, event counts, batch.meta), anchor-relative
+event packing (`shift_events`), FrameBuffer, and the empty-events / partial-batch
+edge cases.
 """
 
 import numpy as np
@@ -12,9 +12,8 @@ from neurosim.online_data import (
     TimeAlignedSample,
     SampleSchema,
     ShuffledBatcher,
-    EventNorm,
     FrameBuffer,
-    normalize_events,
+    shift_events,
 )
 
 W = H = 4
@@ -22,21 +21,12 @@ SENSOR_CONFIGS = {
     "depth_1": {"type": "depth", "height": H, "width": W},
     "event_1": {"type": "event", "height": H, "width": W},
 }
-TIME_WINDOW = 50_000
 
 
 def _schema():
     return SampleSchema.from_sensor_configs(
         SENSOR_CONFIGS, anchor=["depth_1"], stream=["event_1"]
     )
-
-
-def _norm(enabled=True):
-    return {
-        "event_1": EventNorm(
-            width=W, height=H, time_window_us=TIME_WINDOW, enabled=enabled
-        )
-    }
 
 
 def _sample(
@@ -72,39 +62,35 @@ def _sample(
 
 
 # --------------------------------------------------------------------------- #
-# normalization
+# event packing (anchor-relative time, raw spatial/polarity)
 # --------------------------------------------------------------------------- #
-def test_normalize_events_parity():
+def test_shift_events_anchor_relative():
     ev = {
         "x": np.array([0, 2], np.uint16),
         "y": np.array([0, 1], np.uint16),
         "t": np.array([10_000, 40_000], np.uint64),
         "p": np.array([1, 0], np.uint8),
     }
-    out = normalize_events(ev, EventNorm(W, H, TIME_WINDOW))
-    # parity with archived _process_sample column_stack formula
+    out = shift_events(ev, t_anchor_us=50_000)
+    # raw x, y, p; time measured backwards from the anchor in µs.
     expected = np.column_stack(
-        [
-            ev["x"] / W,
-            ev["y"] / H,
-            (ev["t"][-1] - ev["t"]) / TIME_WINDOW,
-            ev["p"],
-        ]
+        [ev["x"], ev["y"], 50_000 - ev["t"].astype(np.int64), ev["p"]]
     ).astype(np.float32)
     assert np.allclose(out, expected)
     assert out.dtype == np.float32
+    assert out[:, 2].tolist() == [40_000.0, 10_000.0]  # newest -> smaller
 
 
-def test_normalize_events_empty_and_disabled():
-    assert normalize_events({}, EventNorm(W, H, TIME_WINDOW)).shape == (0, 4)
+def test_shift_events_empty_and_single():
+    assert shift_events({}, t_anchor_us=10).shape == (0, 4)
     ev = {
         "x": np.array([3], np.uint16),
         "y": np.array([1], np.uint16),
-        "t": np.array([5], np.uint64),
+        "t": np.array([4], np.uint64),
         "p": np.array([1], np.uint8),
     }
-    raw = normalize_events(ev, EventNorm(W, H, TIME_WINDOW, enabled=False))
-    assert raw.tolist() == [[3, 1, 5, 1]]
+    out = shift_events(ev, t_anchor_us=10)
+    assert out.tolist() == [[3, 1, 6, 1]]  # t_rel = 10 - 4
 
 
 def test_frame_buffer():
@@ -122,7 +108,7 @@ def test_frame_buffer():
 # ShuffledBatcher
 # --------------------------------------------------------------------------- #
 def test_batcher_emits_on_full_and_shapes():
-    b = ShuffledBatcher(_schema(), batch_size=3, event_norm=_norm())
+    b = ShuffledBatcher(_schema(), batch_size=3)
     assert b.add(_sample(0, depth_fill=1, xs=[0, 1], ts=[10, 20], step_idx=0)) is None
     assert b.add(_sample(1, depth_fill=2, xs=[2], ts=[30], step_idx=1)) is None
     batch = b.add(_sample(2, depth_fill=3, xs=[], ts=[], step_idx=2))
@@ -135,11 +121,11 @@ def test_batcher_emits_on_full_and_shapes():
     counts, events = batch["event_1"]
     assert counts.tolist() == [2, 1, 0]  # third sample had no events
     assert events.shape == (3, 4)  # 2 + 1 + 0 events, 4 cols
-    assert events[:, 0].max() <= 1.0  # x normalized into [0,1]
+    assert events[:, 0].tolist() == [0, 1, 2]  # raw pixel x preserved (no scaling)
 
 
 def test_batcher_meta_stacked():
-    b = ShuffledBatcher(_schema(), batch_size=2, event_norm=_norm())
+    b = ShuffledBatcher(_schema(), batch_size=2)
     b.add(
         _sample(10, depth_fill=1, xs=[0], ts=[1], t_us=100, step_idx=0, is_first=True)
     )
@@ -157,7 +143,7 @@ def test_batcher_meta_stacked():
 
 
 def test_batcher_multiple_batches_reset():
-    b = ShuffledBatcher(_schema(), batch_size=2, event_norm=_norm())
+    b = ShuffledBatcher(_schema(), batch_size=2)
     out = []
     for i in range(4):
         r = b.add(_sample(i, depth_fill=i, xs=[i], ts=[i + 1], step_idx=i))
@@ -169,10 +155,10 @@ def test_batcher_multiple_batches_reset():
 
 
 def test_batcher_event_counts_concatenation_order():
-    b = ShuffledBatcher(_schema(), batch_size=2, event_norm=_norm(enabled=False))
+    b = ShuffledBatcher(_schema(), batch_size=2)
     b.add(_sample(0, depth_fill=1, xs=[1, 2], ts=[1, 2]))
     batch = b.add(_sample(1, depth_fill=2, xs=[3], ts=[3]))
     counts, events = batch["event_1"]
     assert counts.tolist() == [2, 1]
-    # rows are concatenated in sample order (raw x preserved when norm disabled)
+    # rows are concatenated in sample order (raw x preserved)
     assert events[:, 0].tolist() == [1, 2, 3]

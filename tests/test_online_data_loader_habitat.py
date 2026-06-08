@@ -56,7 +56,6 @@ def test_loader_multi_producer_end_to_end():
         gpu_ids=[0],  # both producers on gpu0
         base_seed=0,
         bus_maxsize=64,
-        event_time_window_us=50_000,
         get_timeout=2.0,
     )
     seen_spec_ids = set()
