@@ -22,6 +22,27 @@ logger = logging.getLogger(__name__)
 _EVENT_DTYPES = {"x": np.uint16, "y": np.uint16, "t": np.uint64, "p": np.uint8}
 
 
+def build_randomized_sim(
+    base_settings: dict, randomization: dict | None, gpu_id: int, seed: int
+):
+    """Build a headless ``RandomizedSimulator`` pinned to ``gpu_id`` with ``seed``.
+
+    Deep-copies ``base_settings`` (so the caller's dict is never mutated), sets
+    ``visual_backend.gpu_id``, and disables the visualizer. Shared by the producer
+    pool (:class:`SimulatorWorker`) and the offline H5 recorder so both build their
+    simulator identically. Lazy Habitat import keeps it out of unit-test paths.
+    """
+    import copy
+
+    from neurosim.sims.synchronous_simulator import RandomizedSimulator
+
+    settings = copy.deepcopy(base_settings)
+    settings.setdefault("visual_backend", {})["gpu_id"] = gpu_id
+    return RandomizedSimulator(
+        settings, randomization=randomization, visualizer_disabled=True, seed=seed
+    )
+
+
 def _to_host_array(x: Any) -> np.ndarray:
     """Convert a (possibly GPU) tensor/array to an OWNED, independent host array.
 
@@ -106,7 +127,7 @@ class SimulatorWorker:
         if rsim is None:
             if base_settings is None:
                 raise ValueError("Provide either `rsim` or `base_settings`.")
-            rsim = self._build_rsim(base_settings, randomization, gpu_id, seed)
+            rsim = build_randomized_sim(base_settings, randomization, gpu_id, seed)
         self.rsim = rsim
 
         if validate:
@@ -120,21 +141,6 @@ class SimulatorWorker:
             spec_id=spec_id,
             ring_caps=ring_caps,
             strict_owned=strict_owned,
-        )
-
-    @staticmethod
-    def _build_rsim(
-        base_settings: dict, randomization: dict | None, gpu_id: int, seed: int
-    ):
-        # Lazy import: keeps Habitat out of the import path for unit tests.
-        import copy
-
-        from neurosim.sims.synchronous_simulator import RandomizedSimulator
-
-        settings = copy.deepcopy(base_settings)
-        settings.setdefault("visual_backend", {})["gpu_id"] = gpu_id
-        return RandomizedSimulator(
-            settings, randomization=randomization, visualizer_disabled=True, seed=seed
         )
 
     @property

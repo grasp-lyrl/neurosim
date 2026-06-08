@@ -27,7 +27,8 @@ from .schema import (
     BATCH_STRATEGY_FOR_KIND,
 )
 from .assembler import AnchorAssembler, StreamAccumulator
-from .sim_worker import SimulatorWorker
+from .sim_worker import SimulatorWorker, build_randomized_sim
+from .recorder import record_episodes, record_dataset
 from .batcher import (
     ShuffledBatcher,
     Batch,
@@ -55,6 +56,10 @@ __all__ = [
     "AnchorAssembler",
     "StreamAccumulator",
     "SimulatorWorker",
+    "build_randomized_sim",
+    # Offline H5 recorder
+    "record_episodes",
+    "record_dataset",
     # Transport + batching (PR3)
     "SampleBus",
     "RoutingPolicy",
