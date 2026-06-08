@@ -1,4 +1,4 @@
-# Monocular Depth Training Configuration for OnlineDataLoader
+# Monocular Depth Training Configuration (online_data pipeline)
 # Reference: https://github.com/grasp-lyrl/fast-feature-fields/blob/main/confs/monocular_depth/dav2b_fullttairv2indoor_pseudo_308x308x20.yml
 
 # Training options
@@ -35,12 +35,20 @@ eventff:
   config: deps/fast-feature-fields/confs/ff/modeloptions/640x480x20_patchff_ds1_small_v1.yml
   ckpt: applications/f3_training/models/640x480x20_patchff_ds1_small_v1.pth # Path to EventFF checkpoint
 
-# OnlineDataLoader settings
-dataloader:
-  dataset_config: "configs/example_dataset_config.yaml" # Path to dataset config
-  event_sensor: "event_camera_1" # UUID of event sensor
-  depth_sensor: "depth_camera_1" # UUID of depth sensor
-  color_sensor: "color_camera_1" # UUID of color sensor (used for visualization)
-  queue_maxsize: 1000
-  max_events: 8_000_000
-  prefetch_factor: 8
+# Online data pipeline settings.
+# Producers run SynchronousSimulators (events + depth) built from `settings`;
+# domain randomization + distinct per-producer seeds give batch diversity.
+data:
+  settings: configs/apartment_1-settings.yaml # base sim settings (sensors, dynamics, controller, trajectory)
+  event_sensor: event_camera_1 # stream role
+  depth_sensor: depth_camera_1 # anchor role
+  num_producers: 8 # 8 simulators ...
+  producer_gpus: [0] # ... all on gpu0
+  trainer_gpu: 1 # trainer on gpu1
+  base_seed: 0
+  bus_maxsize: 256 # backpressure bound
+  resample_every: 20 # reload scene+sensors every N episodes; trajectory refreshes every episode
+  # The loader ships raw events [x, y, t_anchor - t, p]; process_batch normalizes
+  # them to the model frame sizes. event_time_window_us is the normalization window
+  # and defaults to the model's frame T (ms) * 1000.
+  # randomization: optional domain_randomization dict (scenes + sensors).
