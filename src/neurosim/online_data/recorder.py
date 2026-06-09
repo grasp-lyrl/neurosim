@@ -67,7 +67,7 @@ def record_episodes(
             stem = out_dir / f"episode_{int(ep):06d}"
             if write_meta:
                 with open(f"{stem}.meta.yaml", "w", encoding="utf-8") as f:
-                    yaml.safe_dump(rsim.last_sampled_settings, f, sort_keys=False)
+                    yaml.safe_dump(rsim.sim.settings, f, sort_keys=False)
             rsim.run(log_h5=f"{stem}.h5")
             logger.info(
                 "episode %d -> %s.h5 (gpu=%d seed=%d)", ep, stem.name, gpu_id, seed
@@ -111,9 +111,8 @@ def _write_dataset_setup(
         "num_workers": int(num_workers),
         "gpus": [int(g) for g in gpus],
         "base_seed": int(base_seed),
-        "randomization": randomization,
-        "scene": base_settings.get("visual_backend", {}).get("scene"),
         "sim_time": base_settings.get("simulator", {}).get("sim_time"),
+        "randomization": randomization,
     }
     with open(out_dir / "dataset_setup.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(payload, f, default_flow_style=False, sort_keys=False)

@@ -61,7 +61,11 @@ def test_plan_shards_gpu_cycling_and_seeds():
 # --------------------------------------------------------------------------- #
 def _mock_rsim():
     rsim = MagicMock()
-    rsim.last_sampled_settings = {"visual_backend": {"scene": "scene_a.glb"}}
+    # record_episodes dumps the full live settings (rsim.sim.settings) for provenance.
+    rsim.sim.settings = {
+        "visual_backend": {"scene": "scene_a.glb"},
+        "trajectory": {"v_avg": 1.2, "seed": 99},
+    }
     return rsim
 
 
@@ -89,13 +93,13 @@ def test_record_episodes_writes_files_and_calls(mock_build, tmp_path):
         str(tmp_path / "episode_000001.h5"),
         str(tmp_path / "episode_000002.h5"),
     ]
-    # provenance meta written per episode
+    # provenance meta written per episode: full live settings incl. trajectory
     for ep in (0, 1, 2):
         meta = tmp_path / f"episode_{ep:06d}.meta.yaml"
         assert meta.exists()
-        assert (
-            yaml.safe_load(meta.read_text())["visual_backend"]["scene"] == "scene_a.glb"
-        )
+        loaded = yaml.safe_load(meta.read_text())
+        assert loaded["visual_backend"]["scene"] == "scene_a.glb"
+        assert loaded["trajectory"] == {"v_avg": 1.2, "seed": 99}
     rsim.close.assert_called_once()
 
 
