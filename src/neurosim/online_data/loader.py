@@ -22,6 +22,7 @@ not fork).
 path can be driven by feeding ``loader.bus`` directly (tests).
 """
 
+import time
 import queue
 import logging
 from pathlib import Path
@@ -174,6 +175,8 @@ class OnlineDataLoader:
         bus_maxsize: Bus capacity (backpressure bound).
         mp_context: Start method (``"spawn"`` for CUDA/Habitat).
         get_timeout: Consumer poll interval / producer-death check.
+        stall_warn_s: If no sample arrives for this many seconds while producers are
+            still alive, log a one-time warning.``0`` disables the watchdog.
         log_dir: If set, write ``run_setup.yaml`` + per-producer logs.
         start: Start producers immediately.
     """
@@ -193,6 +196,7 @@ class OnlineDataLoader:
         bus_maxsize: int = 256,
         mp_context: str = "spawn",
         get_timeout: float = 1.0,
+        stall_warn_s: float = 60.0,
         log_dir=None,
         start: bool = True,
     ):
@@ -201,6 +205,7 @@ class OnlineDataLoader:
         self.schema = schema
         self.batch_size = batch_size
         self._get_timeout = get_timeout
+        self._stall_warn_s = stall_warn_s
         self._log_dir = Path(log_dir) if log_dir is not None else None
 
         if producers is not None:
@@ -390,7 +395,13 @@ class OnlineDataLoader:
         return bool(self._procs) and all(not p.is_alive() for p in self._procs)
 
     def __iter__(self):
-        """Yield batches forever (use ``itertools.islice`` to bound)."""
+        """Yield batches forever.
+
+        Watchdog: if no sample arrives for ``stall_warn_s`` while producers are still
+        alive, log a one-time warning.
+        """
+        last_sample_t = time.monotonic()
+        stall_warned = False
         while True:
             try:
                 sample = self.bus.get(timeout=self._get_timeout)
@@ -398,7 +409,20 @@ class OnlineDataLoader:
                 if self._all_producers_dead():
                     logger.error("all producer processes died; stopping iteration")
                     return
+                if (
+                    self._stall_warn_s
+                    and not stall_warned
+                    and time.monotonic() - last_sample_t > self._stall_warn_s
+                ):
+                    logger.warning(
+                        "no sample in %.0fs but %d producer(s) still alive — still waiting...",
+                        self._stall_warn_s,
+                        sum(p.is_alive() for p in self._procs),
+                    )
+                    stall_warned = True
                 continue
+            last_sample_t = time.monotonic()
+            stall_warned = False
             batch = self.batcher.add(sample)
             if batch is not None:
                 yield batch
@@ -426,7 +450,9 @@ class OnlineDataLoader:
         self._procs = []
 
         # Drain whatever the (now-dead) producers left buffered, then close.
-        while True:
+        # Bounded: producers are already terminated (no new puts), so at most a
+        # bus-full's worth remains — the cap guarantees close() always terminates.
+        for _ in range(getattr(self.bus, "maxsize", 0) + 8):
             try:
                 self.bus.get(timeout=0.0)
             except queue.Empty:
