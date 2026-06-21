@@ -14,8 +14,8 @@ Config (YAML) keys::
     gpu_ids:       [0, 1]          # cycled across workers
     base_seed:     0
     sim_time:      null            # optional override of simulator.sim_time (seconds)
-    domain_randomization:          # optional; scenes/sensors/trajectory/resample_every
-      resample_every: 20
+    randomization:                 # optional; scenes/sensors/trajectory/resample_every
+      resample_every: 20           # (same grammar as OnlineDataLoader's randomization)
       scenes:  [{name: apt1, path: data/.../apartment_1.glb}]
       sensors: {event_camera_1: {contrast_threshold_pos: {range: [0.1, 0.3]}}}
       trajectory: {v_avg: {range: [0.8, 1.5]}}
@@ -67,7 +67,7 @@ def main() -> None:
         num_workers=num_workers,
         gpu_ids=cfg.get("gpu_ids", [0]),
         base_seed=int(cfg.get("base_seed", 0)),
-        randomization=cfg.get("domain_randomization"),
+        randomization=cfg.get("randomization"),
     )
 
 
