@@ -227,6 +227,118 @@ class OnlineDataLoader:
         if start and self._specs:
             self.start()
 
+    @classmethod
+    def from_config(cls, config, *, start: bool = True, log_dir=None, **overrides):
+        """Build a loader from a single YAML/dict — schema roles, DR, and knobs.
+
+        ``config`` is a path or dict with an ``online_data`` block; everything else
+        in the dict (``simulator`` / ``visual_backend`` / ``dynamics`` / ...) is the
+        base simulator settings, **unless** ``online_data.base_settings`` names a
+        separate settings file/dict to use instead. The ``online_data`` block::
+
+            online_data:
+              # base_settings: configs/some-settings.yaml   # optional; else use this file
+              batch_size: 4
+              num_producers: 2
+              gpu_ids: [0]
+              base_seed: 0
+              bus_maxsize: 256            # optional
+              ring_caps: {event_camera_1: 5000000}   # optional
+              roles:
+                anchor: [depth_camera_1]
+                stream: [event_camera_1]
+                latest: []               # optional
+                deliver: [...]           # optional (default: anchor+stream+latest)
+              randomization:             # optional; same grammar as elsewhere
+                resample_every: 1
+                scenes:  [{name: ..., path: ...}]
+                sensors: {...}
+                trajectory: {...}
+
+        ``overrides`` are forwarded to ``__init__`` (e.g. ``mp_context``,
+        ``get_timeout``), taking precedence over the config.
+        """
+        import copy
+
+        import yaml
+
+        if isinstance(config, (str, Path)):
+            with open(config, "r", encoding="utf-8") as fh:
+                config = yaml.safe_load(fh)
+        cfg = copy.deepcopy(config)
+
+        od = cfg.pop("online_data", None)
+        if not od:
+            raise ValueError("config is missing the required `online_data` block")
+
+        base = od.get("base_settings")
+        if base is None:
+            base_settings = cfg  # the rest of this file is the sim settings
+        elif isinstance(base, (str, Path)):
+            with open(base, "r", encoding="utf-8") as fh:
+                base_settings = yaml.safe_load(fh)
+        else:
+            base_settings = base
+
+        roles = od.get("roles") or {}
+        if not roles.get("anchor"):
+            raise ValueError("config `online_data.roles.anchor` must be non-empty")
+
+        # Sensors visible to the schema: visual + additional (IMU, ...), like the worker.
+        all_sensors = {
+            **base_settings.get("visual_backend", {}).get("sensors", {}),
+            **base_settings.get("simulator", {}).get("additional_sensors", {}),
+        }
+        role_uuids = list(
+            dict.fromkeys(
+                [
+                    *roles.get("anchor", []),
+                    *roles.get("stream", []),
+                    *roles.get("latest", []),
+                    *roles.get("deliver", []),
+                ]
+            )
+        )
+        missing = [u for u in role_uuids if u not in all_sensors]
+        if missing:
+            raise ValueError(
+                f"roles reference sensors not in settings: {missing}; "
+                f"available: {sorted(all_sensors)}"
+            )
+
+        schema = SampleSchema.from_sensor_configs(
+            {u: all_sensors[u] for u in role_uuids},
+            anchor=roles["anchor"],
+            stream=roles.get("stream"),
+            latest=roles.get("latest"),
+            deliver=roles.get("deliver"),
+        )
+
+        # batch_size may come from the config or be supplied by the caller (e.g. a
+        # training script that sources it from its own training config).
+        batch_size = overrides.pop("batch_size", None)
+        if batch_size is None:
+            batch_size = od.get("batch_size")
+        if batch_size is None:
+            raise ValueError(
+                "batch_size must be set in `online_data.batch_size` or passed to "
+                "from_config(..., batch_size=...)"
+            )
+
+        kwargs = dict(
+            base_settings=base_settings,
+            randomization=od.get("randomization"),
+            num_producers=int(od.get("num_producers", 1)),
+            gpu_ids=od.get("gpu_ids", [0]),
+            base_seed=int(od.get("base_seed", 0)),
+            bus_maxsize=int(od.get("bus_maxsize", 256)),
+            ring_caps=od.get("ring_caps"),
+            log_dir=log_dir,
+            start=start,
+        )
+        kwargs.update(overrides)
+        return cls(schema, int(batch_size), **kwargs)
+
     def start(self) -> None:
         """Spawn one producer process per spec."""
         if self._procs:
@@ -292,7 +404,15 @@ class OnlineDataLoader:
                 yield batch
 
     def close(self) -> None:
-        """Stop all producers and release the bus (idempotent)."""
+        """Stop all producers and release the bus (idempotent).
+
+        Producers are force-terminated because ``sim.run()`` is uninterruptible
+        mid-episode (it cannot poll ``stop_event``). A producer killed while blocked
+        in ``bus.put`` may leave samples buffered in the shared queue, so we **drain**
+        the queue before closing — that lets the queue's feeder thread and its POSIX
+        semaphores release cleanly instead of being reclaimed by the multiprocessing
+        ``resource_tracker`` at interpreter shutdown (the "leaked semaphore" warning).
+        """
         self._stop.set()
         for proc in self._procs:
             proc.terminate()
@@ -304,6 +424,15 @@ class OnlineDataLoader:
         if self._procs:
             logger.info("terminated %d producer process(es)", len(self._procs))
         self._procs = []
+
+        # Drain whatever the (now-dead) producers left buffered, then close.
+        while True:
+            try:
+                self.bus.get(timeout=0.0)
+            except queue.Empty:
+                break
+            except (OSError, ValueError):  # queue already closed/broken
+                break
         self.bus.close()
 
     def __enter__(self):
