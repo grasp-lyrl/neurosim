@@ -1,0 +1,106 @@
+# Self-contained example config for `OnlineDataLoader.from_config(...)`.
+# Everything the loader needs lives here: simulator settings + the `online_data`
+# block (sensor roles, domain randomization, and loader knobs). Run:
+#
+#   conda run -n neurosim python -c "
+#   import itertools
+#   from neurosim.online_data import OnlineDataLoader
+#   with OnlineDataLoader.from_config('configs/online_data_example.yaml') as dl:
+#       for b in itertools.islice(dl, 3):
+#           print(tuple(b['depth_camera_1'].shape), tuple(b['event_camera_1'][1].shape))
+#   "
+#
+# Edit the `online_data.randomization.scenes` paths to .glb files you have.
+
+# ── Simulator settings (base_settings) ──────────────────────────────────────
+simulator:
+  world_rate: 1000 # Hz
+  control_rate: 100 # Hz
+  sim_time: 1.0 # seconds per episode (short for a quick demo)
+  coord_transform: "rotorpy_to_hm3d"
+
+  sensor_rates:
+    event_camera_1: 1000 # Hz - high-frequency event accumulation
+    depth_camera_1: 20 # Hz - anchor rate -> ~20 samples/sec/episode
+
+visual_backend:
+  gpu_id: 0
+  scene: "data/hm3d/00000-kfPV7w3FaU5/kfPV7w3FaU5.basis.glb" # default; DR overrides per episode
+  scene_dataset_config_file: "default"
+  clear_color: [0.0, 0.0, 0.0, 1.0]
+  default_agent: 0
+  agent_height: 1.0
+  agent_radius: 0.3
+  agent_max_climb: 2.0
+  agent_max_slope: 90.0
+  enable_hbao: false
+  frustum_culling: true
+  seed: 324
+  physics_config_file: "data/default.physics_config.json"
+  enable_physics: true
+
+  sensors:
+    event_camera_1:
+      type: "event"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 1000.0
+      backend: "cuda"
+      contrast_threshold_neg: 0.15
+      contrast_threshold_pos: 0.15
+      anti_aliasing: 8
+
+    depth_camera_1:
+      type: "depth"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 1000.0
+
+controller:
+  model: "rotorpy_se3"
+  vehicle: "crazyflie"
+
+dynamics:
+  model: "rotorpy_multirotor_euler"
+  vehicle: "crazyflie"
+
+trajectory:
+  model: "habitat_random_minsnap"
+  seed: 42
+  target_length: 30.0
+  min_waypoint_distance: 2.0
+  max_waypoints: 100
+  v_avg: 1.0
+
+# ── OnlineDataLoader configuration ──────────────────────────────────────────
+online_data:
+  batch_size: 4
+  num_producers: 2 # simulators running concurrently
+  gpu_ids: [0] # cycled across producers
+  base_seed: 0
+  bus_maxsize: 256
+
+  # Sensor roles: which sensor is the anchor (defines the sample boundary) vs
+  # streamed (accumulated within each anchor window) vs latest (held).
+  roles:
+    anchor: [depth_camera_1]
+    stream: [event_camera_1]
+
+  # Per-episode domain randomization.
+  randomization:
+    resample_every: 10
+    scenes:
+      - {name: kfPV7w3FaU5, path: data/hm3d/00000-kfPV7w3FaU5/kfPV7w3FaU5.basis.glb}
+      - {name: UVdNNRcVyV1, path: data/hm3d/00001-UVdNNRcVyV1/UVdNNRcVyV1.basis.glb}
+    sensors:
+      event_camera_1:
+        contrast_threshold_pos: {range: [0.1, 0.3]}
+        contrast_threshold_neg: {range: [0.1, 0.3]}
+    trajectory:
+      v_avg: {range: [0.8, 1.5]}

@@ -1,4 +1,4 @@
-# Monocular Depth Training Configuration for OnlineDataLoader
+# Monocular Depth Training Configuration (online_data pipeline)
 # Reference: https://github.com/grasp-lyrl/fast-feature-fields/blob/main/confs/monocular_depth/dav2b_fullttairv2indoor_pseudo_308x308x20.yml
 
 # Training options
@@ -35,12 +35,24 @@ eventff:
   config: deps/fast-feature-fields/confs/ff/modeloptions/640x480x20_patchff_ds1_small_v1.yml
   ckpt: applications/f3_training/models/640x480x20_patchff_ds1_small_v1.pth # Path to EventFF checkpoint
 
-# OnlineDataLoader settings
-dataloader:
-  dataset_config: "configs/example_dataset_config.yaml" # Path to dataset config
-  event_sensor: "event_camera_1" # UUID of event sensor
-  depth_sensor: "depth_camera_1" # UUID of depth sensor
-  color_sensor: "color_camera_1" # UUID of color sensor (used for visualization)
-  queue_maxsize: 1000
-  max_events: 8_000_000
-  prefetch_factor: 8
+# Online data pipeline settings.
+# `online_data` is the same block OnlineDataLoader.from_config(...) reads everywhere
+# (roles + scenes/DR + loader knobs); `trainer_gpu`/`color_sensor`/`sim_time`/
+# `event_time_window_us` are training-only siblings.
+data:
+  trainer_gpu: 1 # trainer GPU (producers run on online_data.gpu_ids)
+
+  online_data:
+    base_settings: configs/apartment_1-settings.yaml # sensors, dynamics, controller, trajectory
+    num_producers: 8 # 8 simulators ...
+    gpu_ids: [0] # ... all on gpu0
+    base_seed: 0
+    bus_maxsize: 256 # backpressure bound
+    roles:
+      anchor: [depth_camera_1] # depth tick defines the sample boundary
+      stream: [event_camera_1] # events accumulate within each depth window
+    randomization:
+      resample_every: 20 # reload scene+sensors every N episodes; trajectory every episode
+      # scenes:  [{name: ..., path: ...}]   # DR scene pool (omit -> fixed base scene)
+      # sensors: {event_camera_1: {contrast_threshold_pos: {range: [0.1, 0.3]}}}
+      # trajectory: {v_avg: {range: [0.8, 1.5]}}

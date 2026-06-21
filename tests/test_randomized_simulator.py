@@ -148,26 +148,96 @@ class TestRandomizedSimulatorMocked:
     @patch(
         "neurosim.sims.synchronous_simulator.randomized_simulator.SynchronousSimulator"
     )
-    def test_randomize_without_config_same_as_rebuild_from_base(self, mock_cls):
+    def test_randomize_without_config_does_not_reconfigure(self, mock_cls):
+        # No DR config -> scene is fixed, so randomize must NOT reconfigure.
         mock_inst = MagicMock()
         mock_cls.return_value = mock_inst
-        base = _minimal_base_settings()
         r = RandomizedSimulator(
-            base,
-            randomization=None,
-            visualizer_disabled=True,
+            _minimal_base_settings(), randomization=None, visualizer_disabled=True
         )
-        mock_cls.reset_mock()
-        r.randomize(np.random.default_rng(5))
-        assert mock_cls.call_count == 0
-        mock_inst.reconfigure.assert_called_once()
-        applied = mock_inst.reconfigure.call_args[0][0]
-        assert applied["visual_backend"]["scene"] == base["visual_backend"]["scene"]
-        assert (
-            applied["visual_backend"]["sensors"]["event_camera_1"]["hfov"]
-            == base["visual_backend"]["sensors"]["event_camera_1"]["hfov"]
-        )
+        mock_inst.reset_mock()
+        rebuilt = r.randomize(np.random.default_rng(5))
+        assert rebuilt is False
+        mock_inst.reconfigure.assert_not_called()
         r.close()
+
+    @patch(
+        "neurosim.sims.synchronous_simulator.randomized_simulator.SynchronousSimulator"
+    )
+    def test_resample_every_cadence(self, mock_cls):
+        # Reconfigure only on episodes where episode % resample_every == 0.
+        mock_inst = MagicMock()
+        mock_cls.return_value = mock_inst
+        dr = {"scenes": [{"name": "a", "path": "a.glb"}], "resample_every": 3}
+        r = RandomizedSimulator(
+            _minimal_base_settings(), randomization=dr, visualizer_disabled=True
+        )
+        mock_inst.reset_mock()  # ignore the build()
+        flags = [r.randomize(np.random.default_rng(0)) for _ in range(6)]
+        # episodes 0..5 -> rebuild at 0 and 3
+        assert flags == [True, False, False, True, False, False]
+        assert mock_inst.reconfigure.call_count == 2
+        r.close()
+
+    @patch(
+        "neurosim.sims.synchronous_simulator.randomized_simulator.SynchronousSimulator"
+    )
+    def test_trajectory_seed_deterministic_and_decoupled(self, mock_cls):
+        # Per-episode trajectory seed depends only on (seed, episode) — reproducible
+        # and independent of scene/sensor cadence.
+        def per_episode_seeds(resample_every):
+            inst = MagicMock()
+            inst.settings = {
+                "trajectory": {"model": "x"}
+            }  # real dict -> "trajectory" in settings
+            mock_cls.return_value = inst
+            r = RandomizedSimulator(
+                _minimal_base_settings(),
+                randomization={
+                    "scenes": [{"name": "a", "path": "a.glb"}],
+                    "resample_every": resample_every,
+                },
+                visualizer_disabled=True,
+                seed=123,
+            )
+            seeds = []
+            for _ in range(4):
+                r.randomize(np.random.default_rng(0))
+                seeds.append(inst.renew_trajectory.call_args[0][0]["seed"])
+            r.close()
+            return seeds
+
+        s1 = per_episode_seeds(resample_every=1)
+        s3 = per_episode_seeds(resample_every=3)
+        assert s1 == s3  # decoupled from scene cadence + reproducible
+        assert len(set(s1)) == 4  # a fresh seed every episode
+
+
+class TestTrajectoryAndCadenceConfig:
+    def test_resample_every(self):
+        assert (
+            DomainRandomizationConfig.from_dict({"resample_every": 50}).resample_every
+            == 50
+        )
+        assert DomainRandomizationConfig.from_dict({}).resample_every == 1
+
+    def test_sample_trajectory_always_seeds_plus_params(self):
+        cfg = DomainRandomizationConfig.from_dict(
+            {"trajectory": {"v_avg": {"range": [0.8, 1.5]}}}
+        )
+        out = cfg.sample_trajectory(np.random.default_rng(0))
+        assert isinstance(out["seed"], int)  # always a fresh seed, no flag
+        assert 0.8 <= out["v_avg"] <= 1.5
+
+    def test_sample_trajectory_seeds_without_params(self):
+        cfg = DomainRandomizationConfig.from_dict({})
+        assert "seed" in cfg.sample_trajectory(np.random.default_rng(0))
+
+    def test_sample_trajectory_ignores_legacy_reseed_key(self):
+        # A stale `reseed` key must not leak into trajectory settings.
+        cfg = DomainRandomizationConfig.from_dict({"trajectory": {"reseed": True}})
+        out = cfg.sample_trajectory(np.random.default_rng(0))
+        assert "reseed" not in out and "seed" in out
 
 
 def test_preflight_randomize_distinct_seeds():
