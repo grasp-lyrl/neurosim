@@ -97,43 +97,28 @@ def build_loader(
     batch_size: int,
     log_dir: str | None = None,
 ) -> tuple[OnlineDataLoader, SampleSchema]:
-    """Build an OnlineDataLoader (multi-producer) from the ``data`` config block.
+    """Build an OnlineDataLoader from the ``data.online_data`` config block.
 
-    Anchors on the depth sensor, streams the event sensor; producers are placed
-    via ``producer_gpus`` and seeded ``base_seed + i`` for per-producer diversity.
+    Delegates to :meth:`OnlineDataLoader.from_config` (the same YAML schema used
+    everywhere — roles, scenes, DR, and loader knobs live in ``data.online_data``).
+    ``batch_size`` comes from the training config (``train.mini_batch``), and an
+    optional ``data.sim_time`` overrides the base settings' episode length.
     """
-    with open(data_cfg["settings"], "r") as f:
-        settings = yaml.safe_load(f)
-    if data_cfg.get("sim_time") is not None:
-        settings["simulator"]["sim_time"] = data_cfg["sim_time"]
+    od = dict(data_cfg["online_data"])
 
-    sensors = settings["visual_backend"]["sensors"]
-    event_uuid = data_cfg["event_sensor"]
-    depth_uuid = data_cfg["depth_sensor"]
-    sub = {u: sensors[u] for u in (depth_uuid, event_uuid)}
-    schema = SampleSchema.from_sensor_configs(
-        sub, anchor=[depth_uuid], stream=[event_uuid]
+    sim_time = data_cfg.get("sim_time")
+    if sim_time is not None:
+        base = od.get("base_settings")
+        if isinstance(base, str):
+            with open(base, "r") as f:
+                base = yaml.safe_load(f)
+        base.setdefault("simulator", {})["sim_time"] = sim_time
+        od["base_settings"] = base
+
+    loader = OnlineDataLoader.from_config(
+        {"online_data": od}, batch_size=batch_size, log_dir=log_dir
     )
-
-    # Randomization cadence is owned by RandomizedSimulator: fold the convenience
-    # `resample_every` knob into the domain_randomization dict. The trajectory is
-    # reseeded every episode automatically; add a `trajectory` block to randomize
-    # its params (e.g. v_avg). Data-gen always randomizes.
-    randomization = dict(data_cfg.get("randomization") or {})
-    randomization.setdefault("resample_every", int(data_cfg.get("resample_every", 20)))
-
-    loader = OnlineDataLoader(
-        schema,
-        batch_size=batch_size,
-        base_settings=settings,
-        randomization=randomization,
-        num_producers=int(data_cfg.get("num_producers", 1)),
-        gpu_ids=data_cfg.get("producer_gpus", [0]),
-        base_seed=int(data_cfg.get("base_seed", 0)),
-        bus_maxsize=int(data_cfg.get("bus_maxsize", 256)),
-        log_dir=log_dir,
-    )
-    return loader, schema
+    return loader, loader.schema
 
 
 def process_batch(batch, args, device):
@@ -386,8 +371,8 @@ def _smoke_data(args, data_cfg, logger=None):
     log.info("smoke: deliver=%s, batch_size=%d", schema.deliver_uuids(), batch_size)
     try:
         for i, batch in enumerate(itertools.islice(loader, args.smoke_batches)):
-            depth = batch[data_cfg["depth_sensor"]]
-            counts, events = batch[data_cfg["event_sensor"]]
+            depth = batch[args.depth_sensor]
+            counts, events = batch[args.event_sensor]
             log.info(
                 "batch %d: depth=%s events=%s counts.sum=%d spec_ids=%s",
                 i,
@@ -412,8 +397,11 @@ def main():
             raise ValueError(f"Config key '{key}' overrides a command-line arg")
 
     data_cfg = conf["data"]
-    args.event_sensor = data_cfg["event_sensor"]
-    args.depth_sensor = data_cfg["depth_sensor"]
+    # Sensor UUIDs come from the loader roles (anchor=depth, stream=events) so they
+    # are defined in exactly one place (the `online_data` block).
+    roles = data_cfg["online_data"]["roles"]
+    args.depth_sensor = roles["anchor"][0]
+    args.event_sensor = roles["stream"][0]
     args.color_sensor = data_cfg.get("color_sensor")
 
     if args.smoke_data:

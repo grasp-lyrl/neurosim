@@ -36,19 +36,23 @@ eventff:
   ckpt: applications/f3_training/models/640x480x20_patchff_ds1_small_v1.pth # Path to EventFF checkpoint
 
 # Online data pipeline settings.
-# Producers run SynchronousSimulators (events + depth) built from `settings`;
-# domain randomization + distinct per-producer seeds give batch diversity.
+# `online_data` is the same block OnlineDataLoader.from_config(...) reads everywhere
+# (roles + scenes/DR + loader knobs); `trainer_gpu`/`color_sensor`/`sim_time`/
+# `event_time_window_us` are training-only siblings.
 data:
-  settings: configs/apartment_1-settings.yaml # base sim settings (sensors, dynamics, controller, trajectory)
-  event_sensor: event_camera_1 # stream role
-  depth_sensor: depth_camera_1 # anchor role
-  num_producers: 8 # 8 simulators ...
-  producer_gpus: [0] # ... all on gpu0
-  trainer_gpu: 1 # trainer on gpu1
-  base_seed: 0
-  bus_maxsize: 256 # backpressure bound
-  resample_every: 20 # reload scene+sensors every N episodes; trajectory refreshes every episode
-  # The loader ships raw events [x, y, t_anchor - t, p]; process_batch normalizes
-  # them to the model frame sizes. event_time_window_us is the normalization window
-  # and defaults to the model's frame T (ms) * 1000.
-  # randomization: optional domain_randomization dict (scenes + sensors).
+  trainer_gpu: 1 # trainer GPU (producers run on online_data.gpu_ids)
+
+  online_data:
+    base_settings: configs/apartment_1-settings.yaml # sensors, dynamics, controller, trajectory
+    num_producers: 8 # 8 simulators ...
+    gpu_ids: [0] # ... all on gpu0
+    base_seed: 0
+    bus_maxsize: 256 # backpressure bound
+    roles:
+      anchor: [depth_camera_1] # depth tick defines the sample boundary
+      stream: [event_camera_1] # events accumulate within each depth window
+    randomization:
+      resample_every: 20 # reload scene+sensors every N episodes; trajectory every episode
+      # scenes:  [{name: ..., path: ...}]   # DR scene pool (omit -> fixed base scene)
+      # sensors: {event_camera_1: {contrast_threshold_pos: {range: [0.1, 0.3]}}}
+      # trajectory: {v_avg: {range: [0.8, 1.5]}}
