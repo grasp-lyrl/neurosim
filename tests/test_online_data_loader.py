@@ -1,4 +1,4 @@
-"""Unit tests for the OnlineDataLoader consumer path (PR3). No Habitat / producer.
+"""Unit tests for the OnlineDataLoader consumer path. No Habitat / producer.
 
 The loader is built with ``start=False`` (no producer process); samples are fed
 into ``loader.bus`` directly so the consumer + batcher + façade are exercised

@@ -55,8 +55,8 @@ SENSOR_TYPE_TO_KIND: dict[str, SensorKind] = {
     "imu": SensorKind.VECTOR_STREAM,
 }
 
-# Batching strategy per kind. The batcher (added in PR3) dispatches on this; the
-# table must stay *total* over SensorKind (asserted in tests).
+# Batching strategy per kind. The batcher dispatches on this; the table must stay
+# *total* over SensorKind (asserted in tests).
 BATCH_STRATEGY_FOR_KIND: dict[SensorKind, str] = {
     SensorKind.FRAME: "stack",  # -> (B, …) / (B, L, …)
     SensorKind.VECTOR: "stack",  # -> (B, D)

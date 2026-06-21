@@ -2,18 +2,6 @@
 
 A torch-``DataLoader``-like façade fed by heterogeneous, time-aligned simulator
 producers. See ``scaling-online-depth-training-plan.md`` for the full design.
-
-Implemented so far:
-* PR1 — the wire unit (:class:`TimeAlignedSample`, :class:`SampleMeta`) and the
-  sensor schema (:class:`SampleSchema`, :class:`SensorKind`, :class:`SensorRole`,
-  :class:`SensorSpec`).
-* PR2 — anchor-driven assembly (:class:`AnchorAssembler`, :class:`StreamAccumulator`)
-  and the producer (:class:`SimulatorWorker`).
-* PR3 — transport (:class:`SampleBus`), batching (:class:`ShuffledBatcher`,
-  :class:`Batch`, :class:`BatchMeta`, :func:`shift_events`), and the
-  :class:`OnlineDataLoader` façade (single producer → single consumer).
-
-The multi-producer config and DDP sharding land in PR4+.
 """
 
 from .sample import SampleMeta, TimeAlignedSample, assert_owned_array
@@ -52,7 +40,7 @@ __all__ = [
     "infer_kind",
     "SENSOR_TYPE_TO_KIND",
     "BATCH_STRATEGY_FOR_KIND",
-    # Producer (PR2)
+    # Producer
     "AnchorAssembler",
     "StreamAccumulator",
     "SimulatorWorker",
@@ -60,7 +48,7 @@ __all__ = [
     # Offline H5 recorder
     "record_episodes",
     "record_dataset",
-    # Transport + batching (PR3)
+    # Transport + batching
     "SampleBus",
     "RoutingPolicy",
     "ShuffledBatcher",
@@ -68,7 +56,7 @@ __all__ = [
     "BatchMeta",
     "FrameBuffer",
     "shift_events",
-    # Façade (PR3) + multi-producer (PR4)
+    # Façade + multi-producer
     "OnlineDataLoader",
     "ProducerSpec",
     "build_producer_specs",

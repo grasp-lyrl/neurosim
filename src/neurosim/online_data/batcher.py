@@ -164,7 +164,7 @@ class ShuffledBatcher(Batcher):
                 if spec.kind is not SensorKind.EVENT_STREAM:
                     raise NotImplementedError(
                         f"batching for kind {spec.kind.value!r} (sensor {uuid!r}) "
-                        "lands in PR7; v1 supports frame + event_stream."
+                        "is not supported; only frame + event_stream are."
                     )
                 self._event_uuids.append(uuid)
             else:  # pragma: no cover - dispatch table is total over kinds
