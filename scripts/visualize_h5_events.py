@@ -5,12 +5,17 @@ frames (default: 20 ms), and renders polarity frames where positive events are
 red and negative events are blue.
 """
 
+import sys
 import argparse
+from pathlib import Path
 from dataclasses import dataclass
 
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from build_ms_to_idx import build_ms_to_idx
 
 
 @dataclass
@@ -89,6 +94,34 @@ def add_events_to_frame(
         frame[yv[neg_mask], xv[neg_mask], 2] = 255
 
 
+def ensure_ms_to_idx(h5_path: str, sensor: str, chunk_events: int) -> None:
+    """Build the ms_to_idx lookup for the sensor group if it is missing."""
+    with h5py.File(h5_path, "a") as f:
+        if sensor not in f:
+            raise RuntimeError(f"Sensor group '{sensor}' not found in H5 file.")
+
+        grp = f[sensor]
+        if not isinstance(grp, h5py.Group):
+            raise RuntimeError(f"'{sensor}' exists but is not an HDF5 group.")
+        if not {"x", "y", "t", "p"}.issubset(set(grp.keys())):
+            raise RuntimeError(
+                f"Group '{sensor}' does not contain expected datasets x, y, t, p."
+            )
+        if "ms_to_idx" in grp:
+            return
+
+        print(f"ms_to_idx not found in '{sensor}'. Building it now...")
+        ms_to_idx = build_ms_to_idx(grp["t"], chunk_events)
+        grp.create_dataset(
+            "ms_to_idx",
+            data=ms_to_idx,
+            dtype=np.int64,
+            compression="lzf",
+            chunks=(min(1_000_000, ms_to_idx.shape[0]),),
+        )
+        print(f"Wrote {sensor}/ms_to_idx with length {ms_to_idx.shape[0]}")
+
+
 def main() -> None:
     args = parse_args()
 
@@ -98,6 +131,8 @@ def main() -> None:
         raise ValueError("--chunk-events must be > 0")
     if args.playback_speed <= 0:
         raise ValueError("--playback-speed must be > 0")
+
+    ensure_ms_to_idx(args.h5_path, args.sensor, args.chunk_events)
 
     with h5py.File(args.h5_path, "r") as f:
         if args.sensor not in f:
@@ -119,11 +154,6 @@ def main() -> None:
         x_ds = grp["x"]
         y_ds = grp["y"]
         p_ds = grp["p"]
-        if "ms_to_idx" not in grp:
-            raise RuntimeError(
-                "Missing ms_to_idx lookup. Run: "
-                "python scripts/build_ms_to_idx.py <h5_path> --sensor <group_name>"
-            )
         ms_to_idx_ds = grp["ms_to_idx"]
 
         bin_width_ms = args.bin_ms
