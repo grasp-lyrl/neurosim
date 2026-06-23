@@ -1,7 +1,7 @@
 """Online data-generation pipeline: many GPU-parallel simulators → DDP training.
 
 A torch-``DataLoader``-like façade fed by heterogeneous, time-aligned simulator
-producers. See ``scaling-online-depth-training-plan.md`` for the full design.
+producers.
 """
 
 from .sample import SampleMeta, TimeAlignedSample, assert_owned_array

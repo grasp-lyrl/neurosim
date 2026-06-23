@@ -46,7 +46,7 @@ def build_randomized_sim(
 def _to_host_array(x: Any) -> np.ndarray:
     """Convert a (possibly GPU) tensor/array to an OWNED, independent host array.
 
-    This is the §0.10 ownership boundary: the returned array never aliases a
+    This is the ownership boundary: the returned array never aliases a
     simulator buffer that a later step overwrites. ``copy=True`` guarantees
     independence even when ``tensor.numpy()`` would share memory with a reused
     host tensor.

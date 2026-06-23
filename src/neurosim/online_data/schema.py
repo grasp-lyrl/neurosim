@@ -35,7 +35,7 @@ class SensorKind(str, Enum):
 
 
 class SensorRole(str, Enum):
-    """How the producer's anchor assembler treats a sensor (see plan §6.1)."""
+    """How the producer's anchor assembler treats a sensor."""
 
     ANCHOR = "anchor"  # its tick defines a sample boundary
     STREAM = "stream"  # accumulated into packets between anchor ticks
