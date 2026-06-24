@@ -80,7 +80,7 @@ class TimeAlignedSample:
 def assert_owned_array(arr: np.ndarray, name: str = "payload") -> np.ndarray:
     """Assert ``arr`` owns its memory (not a view into a reused sim buffer).
 
-    A defensive guard for the §0.10 ownership rule. Returns ``arr`` unchanged so
+    A defensive guard for the ownership rule. Returns ``arr`` unchanged so
     it can be used inline. Note: ``OWNDATA`` being False is a *sufficient* signal
     of aliasing; ``True`` does not fully prove independence, but combined with the
     "copy on the way out" discipline in the worker it catches the common bug

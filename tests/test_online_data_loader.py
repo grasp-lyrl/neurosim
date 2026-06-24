@@ -261,6 +261,33 @@ def test_stall_watchdog_disabled_when_zero(caplog):
         loader.close()
 
 
+def test_from_config_passes_randomization_through():
+    # from_config forwards `randomization` verbatim to the producer specs; the
+    # scenes_glob -> scenes expansion happens downstream in DomainRandomizationConfig
+    # (so the loader AND the recorder both get it). See test_randomized_simulator.py.
+    cfg = {
+        "simulator": {"sim_time": 1.0},
+        "visual_backend": {
+            "sensors": {"depth_1": {"type": "depth", "height": H, "width": W}}
+        },
+        "online_data": {
+            "batch_size": 1,
+            "roles": {"anchor": ["depth_1"]},
+            "randomization": {
+                "resample_every": 5,
+                "scenes_glob": "data/hm3d/*/*.basis.glb",
+            },
+        },
+    }
+    loader = OnlineDataLoader.from_config(cfg, start=False)
+    try:
+        rand = loader._specs[0].randomization
+        assert rand["scenes_glob"] == "data/hm3d/*/*.basis.glb"  # passed through
+        assert rand["resample_every"] == 5
+    finally:
+        loader.close()
+
+
 def test_from_config_rejects_missing_block_and_anchor():
     import pytest
 

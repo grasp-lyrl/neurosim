@@ -97,6 +97,30 @@ class TestDomainRandomizationConfigSample:
         cfg.sample(base, np.random.default_rng(0))
         assert base["visual_backend"]["scene"] == orig_scene
 
+    def test_scenes_glob_expands_into_scenes(self, tmp_path):
+        # scenes_glob is expanded here -> works for loader AND recorder alike.
+        (tmp_path / "00000-AAA").mkdir()
+        (tmp_path / "00001-BBB").mkdir()
+        (tmp_path / "00000-AAA" / "AAA.basis.glb").write_text("")
+        (tmp_path / "00001-BBB" / "BBB.basis.glb").write_text("")
+
+        cfg = DomainRandomizationConfig.from_dict(
+            {"scenes_glob": str(tmp_path / "*" / "*.basis.glb")}
+        )
+        assert sorted(s["name"] for s in cfg.scenes) == ["AAA", "BBB"]
+        assert all(s["path"].endswith(".basis.glb") for s in cfg.scenes)
+
+    def test_scenes_glob_merges_with_explicit_scenes(self, tmp_path):
+        (tmp_path / "X.basis.glb").write_text("")
+        cfg = DomainRandomizationConfig.from_dict(
+            {
+                "scenes": [{"name": "explicit", "path": "given/e.glb"}],
+                "scenes_glob": str(tmp_path / "*.basis.glb"),
+            }
+        )
+        names = sorted(s["name"] for s in cfg.scenes)
+        assert names == ["X", "explicit"]
+
 
 class TestRandomizedSimulatorMocked:
     """Avoid Habitat by mocking SynchronousSimulator construction."""
@@ -118,6 +142,35 @@ class TestRandomizedSimulatorMocked:
         assert call_kw[1]["visualizer_disabled"] is True
         r.close()
         mock_inst.close.assert_called()
+
+    @patch(
+        "neurosim.sims.synchronous_simulator.randomized_simulator.SynchronousSimulator"
+    )
+    def test_build_bootstraps_empty_scene_from_pool(self, mock_cls):
+        # Empty base scene -> build() fills it from the DR scene pool (scenes[0]).
+        mock_cls.return_value = MagicMock()
+        base = _minimal_base_settings()
+        base["visual_backend"]["scene"] = ""
+        r = RandomizedSimulator(
+            base,
+            randomization={"scenes": [{"name": "a", "path": "boot.glb"}]},
+            visualizer_disabled=True,
+        )
+        settings_arg = mock_cls.call_args[0][0]  # SynchronousSimulator(settings, ...)
+        assert settings_arg["visual_backend"]["scene"] == "boot.glb"
+        r.close()
+
+    @patch(
+        "neurosim.sims.synchronous_simulator.randomized_simulator.SynchronousSimulator"
+    )
+    def test_build_empty_scene_without_pool_raises(self, mock_cls):
+        import pytest
+
+        mock_cls.return_value = MagicMock()
+        base = _minimal_base_settings()
+        base["visual_backend"]["scene"] = ""
+        with pytest.raises(ValueError, match="scenes/scenes_glob"):
+            RandomizedSimulator(base, randomization=None, visualizer_disabled=True)
 
     @patch(
         "neurosim.sims.synchronous_simulator.randomized_simulator.SynchronousSimulator"

@@ -58,7 +58,7 @@ def build_producer_specs(
 ) -> list[ProducerSpec]:
     """Build ``num_producers`` specs sharing one config, distinct seeds + GPUs.
 
-    Diversity follows the RL convention (plan §14): the *same* settings + DR with
+    Diversity follows the RL convention: the *same* settings + DR with
     ``seed = base_seed + i`` yields a different domain-randomization realization
     per producer (distinct scenes/sensor params + trajectories). ``gpu_ids`` is
     cycled (e.g. ``[0]`` places every producer on gpu0). Randomization cadence
@@ -145,11 +145,29 @@ def _run_producer_process(
         seed=spec.seed,
         ring_caps=spec.ring_caps,
     )
+
+    # Survive occasional bad episodes instead of dying.
+    max_consecutive_failures = 10
+    consecutive = 0
     try:
         while not stop_event.is_set():
-            worker.run_episode()
-    except Exception:  # pragma: no cover - surfaced via producer death in __iter__
-        logger.exception("producer %d crashed", worker_id)
+            try:
+                worker.run_episode()
+                consecutive = 0
+            except Exception:
+                consecutive += 1
+                logger.exception(
+                    "producer %d: episode failed (%d consecutive); retrying next episode",
+                    worker_id,
+                    consecutive,
+                )
+                if consecutive >= max_consecutive_failures:
+                    logger.error(
+                        "producer %d: %d consecutive episode failures; stopping producer",
+                        worker_id,
+                        consecutive,
+                    )
+                    break
     finally:
         worker.close()
 
@@ -257,6 +275,7 @@ class OnlineDataLoader:
               randomization:             # optional; same grammar as elsewhere
                 resample_every: 1
                 scenes:  [{name: ..., path: ...}]
+                scenes_glob: data/hm3d/*/*.basis.glb   # optional; expands to scenes
                 sensors: {...}
                 trajectory: {...}
 
@@ -431,11 +450,7 @@ class OnlineDataLoader:
         """Stop all producers and release the bus (idempotent).
 
         Producers are force-terminated because ``sim.run()`` is uninterruptible
-        mid-episode (it cannot poll ``stop_event``). A producer killed while blocked
-        in ``bus.put`` may leave samples buffered in the shared queue, so we **drain**
-        the queue before closing — that lets the queue's feeder thread and its POSIX
-        semaphores release cleanly instead of being reclaimed by the multiprocessing
-        ``resource_tracker`` at interpreter shutdown (the "leaked semaphore" warning).
+        mid-episode (it cannot poll ``stop_event``).
         """
         self._stop.set()
         for proc in self._procs:
@@ -448,17 +463,6 @@ class OnlineDataLoader:
         if self._procs:
             logger.info("terminated %d producer process(es)", len(self._procs))
         self._procs = []
-
-        # Drain whatever the (now-dead) producers left buffered, then close.
-        # Bounded: producers are already terminated (no new puts), so at most a
-        # bus-full's worth remains — the cap guarantees close() always terminates.
-        for _ in range(getattr(self.bus, "maxsize", 0) + 8):
-            try:
-                self.bus.get(timeout=0.0)
-            except queue.Empty:
-                break
-            except (OSError, ValueError):  # queue already closed/broken
-                break
         self.bus.close()
 
     def __enter__(self):

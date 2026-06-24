@@ -9,6 +9,7 @@ the ``neurosim`` conda env.
 
 import copy
 import itertools
+import signal
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,29 @@ BATCH = 4
 N_PRODUCERS = 2
 
 
+@pytest.fixture(autouse=True)
+def _hard_timeout():
+    """Fail (don't hang the suite) if a producer ever stalls or teardown blocks.
+
+    SIGALRM fires on the main thread (where pytest runs the test), interrupting
+    any blocking call so the test errors with a clear message instead of hanging.
+    """
+
+    def _handler(signum, frame):
+        raise TimeoutError(
+            "habitat loader test exceeded its hard time limit — likely a producer "
+            "stall or a teardown hang"
+        )
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(120)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
 def _short_settings(sim_time: float = 5.0) -> dict:
     with open(_SETTINGS) as f:
         settings = yaml.safe_load(f)
@@ -38,7 +62,9 @@ def _short_settings(sim_time: float = 5.0) -> dict:
 
 
 def test_loader_multi_producer_end_to_end():
-    settings = _short_settings()
+    settings = _short_settings(
+        sim_time=2.0
+    )  # ~40 samples/producer; plenty for 4 batches
     schema = SampleSchema.from_sensor_configs(
         {
             uuid: cfg

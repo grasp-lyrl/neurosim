@@ -72,9 +72,12 @@ class SampleBus:
             return -1
 
     def close(self) -> None:
-        """Close the underlying queue and stop its feeder thread."""
+        """Close the underlying queue without ever blocking."""
+        try:
+            self._queue.cancel_join_thread()
+        except Exception:  # best-effort teardown
+            pass
         try:
             self._queue.close()
-            self._queue.join_thread()
         except Exception:  # best-effort teardown
             pass
