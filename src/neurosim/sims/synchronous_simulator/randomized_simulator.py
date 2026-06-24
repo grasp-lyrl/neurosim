@@ -90,6 +90,12 @@ class DomainRandomizationConfig:
         resample_every: Episodes between scene/sensor reconfigures (same meaning as
             the RL ``domain_randomization.resample_every``).
         trajectory: Optional per-param ``{range|choices}`` specs for the trajectory.
+
+    A config may set ``scenes_glob`` (e.g. ``data/hm3d/*/*.basis.glb``) instead of (or
+    in addition to) ``scenes``; :meth:`from_dict` expands it into ``scenes`` entries so
+    a whole scene dataset can be referenced without enumerating paths. Because the
+    expansion lives here, **every** consumer of a randomization dict — the online
+    loader, the offline recorder, and direct ``RandomizedSimulator`` use — gets it.
     """
 
     scenes: list[dict[str, str]] = field(default_factory=list)
@@ -99,8 +105,18 @@ class DomainRandomizationConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DomainRandomizationConfig":
+        scenes = list(data.get("scenes", []))
+        pattern = data.get("scenes_glob")
+        if pattern:
+            import glob
+
+            matched = sorted(glob.glob(pattern))
+            if not matched:
+                logger.warning("scenes_glob %r matched no files", pattern)
+            scenes += [{"name": Path(p).stem.split(".")[0], "path": p} for p in matched]
+            logger.info("scenes_glob %r -> %d scene(s)", pattern, len(matched))
         return cls(
-            scenes=list(data.get("scenes", [])),
+            scenes=scenes,
             sensors=dict(data.get("sensors", {})),
             resample_every=max(1, int(data.get("resample_every", 1))),
             trajectory=dict(data.get("trajectory", {})),
@@ -211,6 +227,15 @@ class RandomizedSimulator:
         if self.sim is not None:
             self.sim.close()
         settings = copy.deepcopy(self._base_settings)
+        vb = settings.setdefault("visual_backend", {})
+        if not vb.get("scene"):
+            pool = self._rand_cfg.scenes if self._rand_cfg else []
+            if not pool:
+                raise ValueError(
+                    "visual_backend.scene is empty and randomization has no "
+                    "scenes/scenes_glob to bootstrap the initial scene from."
+                )
+            vb["scene"] = pool[0]["path"]
         self._last_sampled_settings = settings
         self._episode = 0
         self.sim = SynchronousSimulator(

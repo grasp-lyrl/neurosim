@@ -17,7 +17,7 @@ simulator:
 
 visual_backend:
   gpu_id: 0 # overridden per-producer by online_data.gpu_ids
-  scene: "data/hm3d/00000-kfPV7w3FaU5/kfPV7w3FaU5.basis.glb" # default; DR overrides per episode
+  scene: "" # bootstrapped from randomization.scenes_glob[0]; DR picks a scene per episode
   scene_dataset_config_file: "default"
   clear_color: [0.0, 0.0, 0.0, 1.0]
   default_agent: 0

@@ -35,29 +35,6 @@ from neurosim.online_data.schema import SampleSchema
 logger = logging.getLogger(__name__)
 
 
-def _expand_scene_globs(randomization: dict | None) -> dict | None:
-    """Expand a ``scenes_glob`` in a randomization dict into explicit ``scenes``.
-
-    ``{"scenes_glob": "data/hm3d/*/*.basis.glb"}`` appends one
-    ``{"name": <stem>, "path": <path>}`` per matched file to ``scenes`` (kept too).
-    Lets a config reference a whole scene dataset without enumerating it by hand.
-    """
-    if not randomization or "scenes_glob" not in randomization:
-        return randomization
-    import glob
-
-    rand = dict(randomization)
-    pattern = rand.pop("scenes_glob")
-    matched = sorted(glob.glob(pattern))
-    scenes = list(rand.get("scenes", []))
-    scenes += [{"name": Path(p).stem.split(".")[0], "path": p} for p in matched]
-    if not scenes:
-        logger.warning("scenes_glob %r matched no files", pattern)
-    rand["scenes"] = scenes
-    logger.info("scenes_glob %r -> %d scene(s)", pattern, len(matched))
-    return rand
-
-
 @dataclass(slots=True)
 class ProducerSpec:
     """One simulator producer's configuration (GPU, seed, diversity tag)."""
@@ -374,7 +351,7 @@ class OnlineDataLoader:
 
         kwargs = dict(
             base_settings=base_settings,
-            randomization=_expand_scene_globs(od.get("randomization")),
+            randomization=od.get("randomization"),
             num_producers=int(od.get("num_producers", 1)),
             gpu_ids=od.get("gpu_ids", [0]),
             base_seed=int(od.get("base_seed", 0)),

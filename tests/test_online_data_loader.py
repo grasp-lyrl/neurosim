@@ -261,15 +261,10 @@ def test_stall_watchdog_disabled_when_zero(caplog):
         loader.close()
 
 
-def test_from_config_scenes_glob_expands(tmp_path):
-    # Two fake scene files; scenes_glob should expand to one {name, path} each.
-    (tmp_path / "00000-AAA").mkdir()
-    (tmp_path / "00001-BBB").mkdir()
-    a = tmp_path / "00000-AAA" / "AAA.basis.glb"
-    b = tmp_path / "00001-BBB" / "BBB.basis.glb"
-    a.write_text("")
-    b.write_text("")
-
+def test_from_config_passes_randomization_through():
+    # from_config forwards `randomization` verbatim to the producer specs; the
+    # scenes_glob -> scenes expansion happens downstream in DomainRandomizationConfig
+    # (so the loader AND the recorder both get it). See test_randomized_simulator.py.
     cfg = {
         "simulator": {"sim_time": 1.0},
         "visual_backend": {
@@ -280,18 +275,15 @@ def test_from_config_scenes_glob_expands(tmp_path):
             "roles": {"anchor": ["depth_1"]},
             "randomization": {
                 "resample_every": 5,
-                "scenes_glob": str(tmp_path / "*" / "*.basis.glb"),
+                "scenes_glob": "data/hm3d/*/*.basis.glb",
             },
         },
     }
     loader = OnlineDataLoader.from_config(cfg, start=False)
     try:
-        scenes = loader._specs[0].randomization["scenes"]
-        names = sorted(s["name"] for s in scenes)
-        assert names == ["AAA", "BBB"]
-        assert all(s["path"].endswith(".basis.glb") for s in scenes)
-        assert "scenes_glob" not in loader._specs[0].randomization  # consumed
-        assert loader._specs[0].randomization["resample_every"] == 5
+        rand = loader._specs[0].randomization
+        assert rand["scenes_glob"] == "data/hm3d/*/*.basis.glb"  # passed through
+        assert rand["resample_every"] == 5
     finally:
         loader.close()
 
