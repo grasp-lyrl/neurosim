@@ -7,6 +7,7 @@ class TrajectoryType(Enum):
     MINSNAP = "minsnap"
     POLYNOMIAL = "polynomial"
     HABITAT_RANDOM_MINSNAP = "habitat_random_minsnap"
+    FREESPACE_MINSNAP = "freespace_minsnap"
 
 
 class TrajectoryProtocol(Protocol):

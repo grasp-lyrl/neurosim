@@ -78,7 +78,40 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
             v_avg=kwargs.get("v_avg", 1.0),
             start=kwargs.get("start", None),
             max_tries_per_waypoint=kwargs.get("max_tries_per_waypoint", 100),
+            max_path_attempts=kwargs.get("max_path_attempts", 6),
             coord_transform=kwargs.get("coord_transform", None),
+            min_altitude_m=kwargs.get("min_altitude_m", 0.0),
+            max_altitude_m=kwargs.get("max_altitude_m", None),
+            ceiling_margin_m=kwargs.get("ceiling_margin_m", 0.3),
+            lateral_margin_m=kwargs.get("lateral_margin_m", 0.0),
+            bounds_margin_m=kwargs.get("bounds_margin_m", 0.0),
+            collision_sim=kwargs.get("collision_sim", None),
+            trajectory_to_habitat=kwargs.get("trajectory_to_habitat", None),
+            static_clearance_m=kwargs.get("static_clearance_m", 0.0),
+            collision_sample_spacing_m=kwargs.get(
+                "collision_sample_spacing_m", 0.05
+            ),
+        )
+    elif model == TrajectoryType.FREESPACE_MINSNAP:
+        from .habitat_trajs import generate_freespace_traj
+
+        traj = generate_freespace_traj(
+            seed=kwargs.get("seed", 324),
+            box_lo=kwargs.get("box_lo"),
+            box_hi=kwargs.get("box_hi"),
+            target_length=kwargs.get("target_length", 20.0),
+            min_waypoint_distance=kwargs.get("min_waypoint_distance", 2.0),
+            max_waypoints=kwargs.get("max_waypoints", 100),
+            v_avg=kwargs.get("v_avg", 1.0),
+            start=kwargs.get("start", None),
+            coord_transform=kwargs.get("coord_transform", None),
+            max_path_attempts=kwargs.get("max_path_attempts", 6),
+            collision_sim=kwargs.get("collision_sim", None),
+            trajectory_to_habitat=kwargs.get("trajectory_to_habitat", None),
+            static_clearance_m=kwargs.get("static_clearance_m", 0.0),
+            collision_sample_spacing_m=kwargs.get(
+                "collision_sample_spacing_m", 0.05
+            ),
         )
     else:
         raise ValueError(f"Unsupported trajectory type: {model}")
