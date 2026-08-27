@@ -1,0 +1,902 @@
+# v10: off the position-tracking control path that loses the vehicle.
+#
+# Traced on v7 seed 9008: the expert commands a smooth 0.34 m dodge (largest
+# single-step command change 0.026 m, so the acceleration limiter is working),
+# the vehicle tilts 27.7 -> 97.2 deg, and deviation keeps growing 2.2 -> 5.3 m
+# AFTER the command has decayed to exactly 0.000, ending out_of_bounds. That
+# is loss of attitude control followed by free divergence, not a tracking lag.
+#
+# The repo already documents this, in velocity_rotorpy.py:
+#   "SE3Control builds F_des = m*(-kp_pos*(x-x_ref) - kd_pos*(v-v_ref) + a_ref
+#    + g) and then takes b3_des = normalize(F_des) with nothing keeping the
+#    vehicle upright... the controller commands an inverted attitude, thrust
+#    projects to ~zero and the vehicle free-falls without recovering.
+#    Measured in ~10-15% of episodes with *zero* policy action."
+# The oracle's out_of_bounds rate on v7/v7b is 15-25%, matching.
+#
+# residual_control mode: desired_body_offset shifts the POSITION reference,
+# which is exactly that path. velocity_delta_integrated commands a velocity
+# residual instead, where tipping requires a velocity error beyond ~g/k_v.
+#
+# Consequence for everything measured on v1-v9: the privileged oracle plans
+# sound 0.35 m dodges (median commanded offset 0.351 m, 80% of episodes
+# >= 0.30 m) and is then flown out of bounds by its own controller. Every
+# "blind beats sighted" result was scored against that. A smooth low-frequency
+# sine weave wins because it keeps F_des upright, not because weaving is a
+# better dodge.
+#
+# Gate: oracle_authority_probe should now show max tilt well under 90 deg and
+# achieved deviation close to commanded (v7: commanded p90 0.50 m vs achieved
+# p90 3.45 m). Only then are the oracle-vs-blind comparisons meaningful.
+
+# Dynamic dodging, v7: throws that actually lead the vehicle.
+#
+# lead_aim_probability was 0.0 -- NO throw led the drone. Every throw aimed
+# at where the vehicle was at spawn, so after 1.4-2.0 s of flight it arrived
+# 1.4-2.0 m behind a vehicle cruising at 1 m/s. Guaranteed misses. That is
+# why obstacles outnumbered genuine threats 4:1 in every configuration
+# measured today, and why the only throws that connected were head-on ones
+# where the vehicle advances into a stationary aim point.
+#
+# It also means the lead-prediction error measured earlier (median 0.31 m at
+# 1.4 s, 47% inside the 0.30 m hit radius) was the accuracy of a branch that
+# never executed at this setting.
+#
+# The v5/v6 pair brackets the problem, because spawn distance controls BOTH
+# threat density and reaction time when leading is off:
+#     v5 @3  spawn 7-10 m   1.4-2.0 s flight  0.80 threats/ep  control 35.0%  oracle cleared 85.7%
+#     v6 @3  spawn 4-5.5 m  0.8-1.1 s flight  1.75 threats/ep  control  0.0%  oracle cleared 24.2%
+# Long flight leaves time to dodge but the throws miss; short flight makes
+# them connect but leaves no time to react. No spawn distance gives both.
+#
+# Leading decouples them: the throw connects because it is aimed where the
+# vehicle WILL be, not because it arrives too fast to avoid. v7 turns leading
+# on and keeps a 5.5-7.5 m spawn (1.1-1.5 s flight), well above the 0.63 s a
+# 0.30 m dodge needs at 1.5 m/s^2.
+#
+# The known risk, recorded by whoever set this to 0.0: "aiming at all is what
+# made position itself a strategy". A led throw tracks a held offset, so
+# constant offsets stay defeated (unlike v2/v3, where one offset cleared
+# everything) -- but any sufficient MOVEMENT after launch evades, so
+# direction carries no information and only TIMING does. Whether timing alone
+# is learnable is the open question; oscillator_baseline.py is the falsifier,
+# and it must be run at a density where the ORACLE succeeds, which v4 was not.
+#
+# Measured at max_concurrent 3 (set below):
+#     control  5.0% episode, 0.0% of threats cleared
+#     oracle  30.0% episode, 39.3% cleared
+#     1.55 threats/ep, 1.45 bystanders (52% threat fraction)
+# First dynamic config of the session with BOTH a low passive floor and a
+# real oracle advantage (+25 points). The oracle's 39.3% is lower than the
+# physics suggests -- clearing 0.30 m takes ~0.64 s at 1.5 m/s^2 with the
+# 0.8 m/s rate cap, against 1.1-1.5 s of flight -- so the expert may not be
+# committing early enough. Worth checking before reading too much into the
+# gap.
+#
+# Gate, feasibility FIRST: oracle high, then control low, then blind
+# baselines (constant offsets AND weaves).
+
+# Dynamic dodging, v5: fewer obstacles, nearly all of them real threats.
+#
+# The v4 density sweep found no usable operating point -- the oracle degraded
+# faster than the control floor fell, so the gap shrank monotonically and
+# inverted:
+#     concur  control  oracle  oracle_cleared  threats/ep  bystanders/ep
+#          2    50.0%   80.0%           87.5%        0.40           1.60
+#          4    40.0%   55.0%           69.2%        0.65           3.35
+#          8    10.0%   20.0%           44.4%        1.35           6.65
+#         16     5.0%    0.0%           39.4%        3.05          12.75
+# Obstacles outnumbered genuine threats 4:1, so raising density bought a
+# little threat and a lot of clutter: the passive floor fell slowly while the
+# oracle's room to maneuver collapsed.
+#
+# Cause, measured rather than guessed: aim_scatter_m 0.4 samples uniformly in
+# a sphere, and against the 0.30 m combined hit radius only 42% of throws are
+# aimed to hit at all. The other 58% are bystanders by construction --
+# obstacles that constrain the dodger without ever threatening a passive
+# vehicle. At scatter <= 0.30 every throw is aimed within the hit radius.
+#
+# v5 therefore lowers scatter to 0.25 (all throws aimed to hit, but not all
+# identical) and drops max_concurrent 16 -> 5. The intent is ~3 genuine
+# threats per episode with ~1 bystander, instead of 3 threats buried in 13.
+# Density comes from the threat FRACTION, not the obstacle count.
+#
+# Gate before training, in this order -- feasibility FIRST:
+#   1. oracle episode success high (v4 at 16 concurrent was 0%: nothing
+#      solved it, which made every blind baseline uninterpretable)
+#   2. control low
+#   3. only then blind baselines: constant offsets AND oscillating weaves,
+#      since a drone-aimed config defeats constants but may fall to a weave
+#
+# Note the measurement limit inherited from drone-aiming: because throws are
+# aimed at wherever the vehicle actually is, there is NO policy-independent
+# threat set -- a weaving policy drags throws off the nominal path and simply
+# reduces the count (measured: 3.20 threats/ep for control, 0.64 for a 1 Hz
+# weave). Clearance rates are therefore not comparable across arms here;
+# episode success and bystander hits are.
+
+# Dynamic dodging, v4: drone-aimed throws at v2's density.
+#
+# Why not v2/v3 (nominal-aimed): throws all converge on the nominal path, so
+# stepping off it defeats everything. Measured -- best constant displacement
+# clears 0.991 (v2) / 1.000 (v3), 85% / 100% of episodes fully cleared by ONE
+# offset, const-0.80 clears 98.8% of threats. Worse, the privileged oracle
+# scored 35.8% against that arm's 98.8%, because the oracle RETURNS to the
+# nominal path and that is precisely where the throws are aimed: the task
+# inverts the incentive between dodging and recovering.
+#
+# Walls do not rescue it. With every termination active, const+0.80 scored
+# 43.3% against 40.0% with terminations disabled -- wall strikes rose to 23%
+# but merely replaced obstacle collisions, leaving net success unchanged.
+# (const+/-1.20 collapses to tracking_failure in 20-24 of 30 episodes, so the
+# controller, not the geometry, bounds the offset.)
+#
+# v4 returns to drone-aimed throws, where a held offset cannot work because
+# each throw is solved against wherever the vehicle actually is at spawn --
+# and keeps v2's density fixes (12 s episodes, 0.4 m scatter) that took v1
+# from 0.65 genuine threats/episode to ~3.
+#
+# The honest limitation: evading a throw aimed at your current position needs
+# only movement AFTER launch, so DIRECTION carries no information. What it
+# does require is TIMING -- moving when a throw is actually incoming -- and
+# timing is perceptual. v4 is therefore a bet that timing alone is a real
+# task, which oscillator_baseline.py is written to falsify: a blind
+# sinusoidal weave moves constantly without seeing anything, so if it matches
+# the oracle, timing is not informative either and this direction is finished.
+#
+# v1's other exploit, braking, is NOT addressed here (v1 along-track escape
+# 0.437 with zero braking-immune encounters). If v4 survives the oscillator
+# test, removing the along-track degree of freedom is the next change.
+
+# Dynamic dodging, v2: a task that actually poses the problem.
+#
+# Measured on v1 with the escape-set probe (pure geometry, 20 seeds):
+#   genuine threats to the nominal path : 0.65 per episode
+#   escape fraction (blind-guess success): 0.658, tight (p10 0.64, p90 0.71)
+# So most episodes required no dodge at all, and two thirds of the ones that
+# did were cleared by an arbitrary displacement. A blind policy scores about
+# 0.66^0.65 ~ 77% without using perception -- which is why four separate
+# blind ablations came back null. There was almost nothing to learn.
+#
+# Three changes, each aimed at one term in that number:
+#
+#  1. deterministic_obstacle_aim: throws aim at the seed-determined NOMINAL
+#     path rather than the live drone. This is NOT the aimed-obstacle
+#     degeneracy that v1's comments warn about: that one aimed at the DRONE,
+#     so the threat formation followed it and any displacement evaded. Aiming
+#     at the nominal path fixes the crossing point, so evasion requires
+#     knowing WHERE the throw will cross -- direction carries information.
+#  2. aim_scatter_m 1.5 -> 0.4: with 1.5 m of scatter against a 0.30 m hit
+#     radius most throws simply missed. Low scatter is only degenerate when
+#     combined with drone-aiming, which (1) removes.
+#  3. episode_seconds 6 -> 12: 0.65 threats/episode was partly just a short
+#     window. Twice the flight time is twice the encounters.
+#
+# Re-measure with escape_set_probe.py before training on this. The target is
+# 3-5 threats/episode with the escape fraction well below v1's 0.658 -- and
+# if the escape fraction instead goes UP, the change has made the task more
+# degenerate, not less, and must be reverted.
+
+# Straight PPO on the actual target policy: actor perceives obstacles only
+# through the event camera + its own state (obs_mode: combined,
+# privileged_actor: false). The critic keeps ground-truth nearest-obstacle
+# geometry (privileged_critic: true) for variance reduction, standard
+# asymmetric actor-critic -- the actor never sees it.
+seed: 42
+num_envs: 16
+# 4M: v14 (2M) never converged -- success by quarter ran 13.2 / 9.0 / 23.0
+# / 26.6%, a back-half slope of +7 points per 1M steps. Every "plateau"
+# called during that run was premature.
+total_timesteps: 4000000
+n_gpus: 2
+envs_on_gpu0: 6
+eval:
+  # Halved in frequency (was 16384) now that the budget is 2M and each eval
+  # runs 40 episodes: at the old cadence that is ~122 evaluations, enough
+  # blocking eval time to rival the training it is measuring.
+  freq: 32768
+  # Raised from 30: success here is a bursty, low-probability event, and
+  # small-n eval has repeatedly misled this project -- the v7 final policy
+  # scored 1/8 on one seed batch against 13/40 on a wide sweep. Any number
+  # quoted as definitive needs a wide, disjoint seed range.
+  episodes: 40
+  num_envs: 1
+vec_env:
+  type: auto
+  start_method: spawn
+env:
+  # Controller runs at control_rate (100 Hz); the policy is queried
+  # every Nth controller update, so 2 -> 50 Hz decisions. Slowing the
+  # controller itself instead cost attitude-loop phase margin and the
+  # vehicle intermittently tipped over and fell.
+  # 5 -> 20 Hz decisions (controller still 100 Hz). At 50 Hz the config's own
+  # use_sde note records the problem: i.i.d. exploration "reaches only ~11% of
+  # the displacement a sustained action would", which gSDE was then added to
+  # work around. A slower decision rate fixes that directly. It also cuts the
+  # credit-assignment horizon from 750 steps/episode to 300 for a dodge that
+  # occupies ~7 of them, and accumulates 50 ms of events per decision instead
+  # of 20. Cost is 50 ms of reaction latency against a ~250-350 ms usable
+  # detection window. Slowing the *controller* is what previously cost
+  # attitude phase margin; this leaves it untouched.
+  policy_decimation: 5
+  # Actor perceives the world through the event camera + its own state,
+  # not privileged geometry -- see privileged_actor/privileged_critic below.
+  obs_mode: combined
+  # 10 s at the scattered density gives 4.3 encounters/episode (measured,
+  # zero-action): success stays conjunctive but sensitive (0.63 at p=0.9 per
+  # encounter, vs 0.56 at 15 s), and 201 steps/episode against the old 750
+  # is most of the credit-assignment gain the 20 Hz change was for.
+  episode_seconds: 12.0
+  deterministic_obstacle_aim: false
+  init_speed_range:
+  - 0.0
+  - 0.0
+  safety:
+    enable_navigable_check: false
+  event_representation:
+    model: time_surface
+    log_compression: 1.0
+    downsample_factor: 1
+    # Matched to the 20 Hz decision period (50 ms). At 10 ms the surface
+    # decayed to nothing within a fifth of a control step, so most of the
+    # interval between decisions contributed nothing to what the policy saw.
+    #
+    # A 10->60 ms test under the *old* aimed obstacles made contrast worse
+    # (event mass 82k->239k but threat-vs-quiet ratio 1.118->1.014): a
+    # constant-bearing obstacle barely moves on the image plane, so longer
+    # integration added background egomotion and almost no signal. Scattered
+    # throws cross the field of view instead, accumulating a coherent streak
+    # at a velocity distinct from the background -- so that result is
+    # evidence about the old geometry, not a general law. Re-measure it.
+    ts_decay_ms: 50.0
+    sensor_uuid: null
+  task:
+    name: velocity_dodge
+    config:
+      # 0.25, down from 0.5. Measured directly: the privileged oracle earns
+      # LESS total reward than doing nothing (-347.2 vs -315.0 per episode)
+      # while succeeding 2.5x as often. It gains +100.9 by crashing less and
+      # pays -122.3 in tracking penalty for the displacement its dodges
+      # require -- so under the old weight, dodging competently was a losing
+      # trade and every policy correctly learned to stay near-passive. That
+      # is the common cause behind the whole v14-v18 sequence, not the
+      # separate optimisation failures each run appeared to show.
+      # Break-even is w_pos = 0.327; 0.25 leaves real margin.
+      w_pos: 0.25
+      # 0.15, between the original 0.3 and the 0.0 that replaced it, both
+      # of which failed in opposite directions:
+      #   0.3 made any displacement up to 0.3 m free, and v7 converged on
+      #   exactly that loophole -- a permanent ~0.35 m standing offset with
+      #   no threat modulation at all (0.345 m with obstacles *disabled*
+      #   vs 0.340 m during real threats), scoring 13/40 against a
+      #   do-nothing baseline's 14/40.
+      #   0.0 then priced *every* metre of pos_error, including the
+      #   controller lag and transient excursion a genuine dodge cannot
+      #   avoid. Measured on v8: -0.526 reward/step, so a full 751-step
+      #   survival scored -395 against -161 for crashing at step 192 --
+      #   the policy was paid 234 to die early, and did.
+      # Now 0.0. A 3-arm probe resumed from the same v11 checkpoint
+      # (150k steps each: no change / deadband 0.0 / w_clearance 2.0)
+      # measured the standing offset with obstacles *disabled* at 0.654
+      # unchanged, 0.572 here, and 0.600 for the clearance arm -- so
+      # neither term is what produces the offset. But this arm survived
+      # 321 steps against the unchanged arm's 250 (do-nothing is 256), so
+      # it earns its place on survival even though it does not remove the
+      # offset. Safe now in a way it was not at v8: w_survival is 0.10
+      # rather than 0.02 and the crash penalty scales with forfeited time,
+      # so quiet tracking still nets about +0.055/step.
+      w_pos_deadband_m: 0.0
+      # 0.08, down from 0.25 -- the term that actually punished dodging.
+      # Halving w_pos alone did NOT flip the ordering (oracle -313.3 vs
+      # do-nothing -312.6, still tied), because r_track bundles position
+      # AND velocity error and only the position half moved. Separating the
+      # two from measurements at w_pos 0.5 and 0.25 shows why: the oracle
+      # accumulates a velocity-error sum of 254 against the passive
+      # policy's 18, so a dodge is penalised ~14x more through velocity
+      # than the thing it is avoiding costs. At 0.08 the oracle finally
+      # scores above passive by ~40 per episode.
+      w_vel: 0.08
+      # Deliberately NOT raised alongside the deadband removal: this term
+      # prices correction *energy*, which a genuine transient dodge spends
+      # just as hard as the degenerate standing offset did, so raising it
+      # taxes the behaviour we want. The deadband removal above already
+      # separates the two by an order of magnitude on its own.
+      w_correction: 0.02
+      w_smooth: 0.01
+      # Raised from 0.02, which was far too small to make staying alive
+      # worth its own tracking cost: with competent tracking inside the
+      # deadband above, each step is now worth about +0.075 net, so a full
+      # episode of survival earns ~+56 instead of bleeding reward.
+      w_survival: 0.10
+      w_along_track: 1.0
+      # Explicitly answers "get back on the path when nothing is inbound".
+      # This could not work before: the drone was flagged in-threat on
+      # 96.2% of steps at the old obstacle density, so there was barely a
+      # no-threat condition to reward -- and with threat nearly always on,
+      # a permanent offset was very close to the correct policy, which is
+      # exactly what every run converged to. At the reduced density it is
+      # 73% / 27%, so this term now applies on roughly a quarter of steps.
+      # Now priced on pos_excess (the actual deviation) rather than the
+      # commanded offset. Measured on v24: no-threat steps ran pos_error
+      # 1.633 m against an offset_cmd of 0.280 m, so the old form charged
+      # 17% of the excursion and left the standing-offset exploit -- which
+      # lives in the other 83% -- completely free. Weight retuned for the
+      # ~6x larger quantity it now multiplies; see outputs/rl/no_threat_gate.json
+      # for the oracle-vs-nominal-vs-wander sweep that set it. Over 20
+      # episodes the oracle's margin over passivity erodes only 11% across
+      # the whole sweep (+163.6 at w=0 to +145.9 at w=0.5), so dodging still
+      # wins everywhere; 0.3 keeps 94% of that margin (+153.0) while adding
+      # +22 to the margin over a wandering arm. Charges ~0.49/step on the
+      # measured 1.63 m no-threat deviation, all of it escapable by
+      # returning to the path.
+      w_no_threat_offset: 0.3
+      # Braking removed: the correction is lateral + vertical only. The
+      # policy was spending ~36% of in-threat steps at FULL reverse with a
+      # near-zero mean forward command -- bang-bang braking, which is also
+      # what made the motion look like inching. Measured cost to a
+      # privileged oracle on this exact config: 43.3% -> 36.7% success, so
+      # braking is genuinely load-bearing for an optimal planner, but only
+      # worth 6.6 points, and our policies have never come near that
+      # ceiling anyway. In exchange the action space collapses from 3
+      # meaningful axes to 2 and the forward oscillation disappears.
+      # Headroom above the 5.0% do-nothing control is still 31.7 points.
+      lateral_only: false
+      # Stricter still: left/right only, zeroing vertical as well. Measured
+      # cost to the privileged oracle is 46.7% -> 43.3% (n=30, inside
+      # noise), so the vertical axis is nearly free to give up -- and it
+      # was the axis the policy abused, since obstacles skewed upward made
+      # a blanket duck profitable for a long stretch of this project. What
+      # remains is a single scalar: the smallest action space that can
+      # still express a dodge.
+      lateral_axis_only: false
+      # Lowered from 8.0. In the same 3-arm probe this arm survived 327
+      # steps against 250 for the unchanged reward -- the best of the
+      # three -- while trimming the standing offset from 0.654 to 0.600.
+      # At 8.0 the shaping plausibly paid for permanent displacement
+      # (a constant offset raises average clearance from a dense field)
+      # by more than the tracking term charged for it.
+      w_clearance: 2.0
+      clearance_threshold_m: 1.5
+      gamma_shaping: 0.994
+      # Was unset (defaults to 0.0): the potential-based clearance shaping
+      # below is 0 both before and after an encounter, so it telescopes to
+      # ~0 net reward over a full clean dodge -- it only ever punishes
+      # proximity, never rewards successfully surviving it. With no direct
+      # payoff for clearing an obstacle, the only thing discouraging a
+      # crash was the terminal -60 penalty: sparse, delayed, and hard to
+      # credit-assign through a CNN that hasn't learned to see obstacles
+      # yet. This is a dense, promptly-attributable reward fired the
+      # instant a threat is confirmed cleared.
+      w_encounter_clear: 8.0
+      # New: obstacles get dense potential-based shaping the whole way in
+      # (w_clearance above), but the scene boundary previously only had a
+      # sparse terminal penalty on out_of_bounds -- v3 (600k steps) showed
+      # this gap directly: encounter_clear_rate rose and held at ~60-70%
+      # (up from v2's flat 35-55%), confirming the exploration fix worked,
+      # but out_of_bounds terminations *worsened* over the run (2/6 -> 3/6
+      # between the 131k and 278k checkpoints, confirmed on video both
+      # times) as evasive corrections grew large enough to exit the scene
+      # with no graduated feedback on the way there. Same potential-based
+      # construction as w_clearance, aimed at the boundary instead.
+      w_boundary: 8.0
+      boundary_margin_threshold_m: 1.0
+      # Raised from 60: at that level a crash was cheap enough that ending
+      # the episode early beat paying per-step tracking cost to keep
+      # flying (v8: crashing at step 192 scored -161 against -395 for
+      # surviving to 751). 150 keeps dying decisively worse than living
+      # even in an episode spent mostly dodging.
+      crash_penalty_scene: 150.0
+      crash_penalty_obstacle: 150.0
+      # Charges a crash for the episode it forfeits, on top of the flat
+      # penalties above. 0.6/step comfortably out-prices the worst per-step
+      # rate either failed run produced (-0.51), putting the break-even at
+      # r < -0.85 instead of v9's -0.25, so exploration noise can no longer
+      # make dying the profitable move. See VelocityDodgeTask.crash_penalty.
+      crash_penalty_per_remaining_step: 0.6
+      # An oracle dodging at full authority achieves a median
+      # clearance of 0.064 m, so a 0.1 threshold made success
+      # unreachable by construction -- success_rate was pinned at 0
+      # for reasons unrelated to learning.
+      dodge_clearance_m: 0.02
+      # Asymmetric actor-critic: critic gets ground-truth nearest-obstacle
+      # geometry to reduce value-function variance; actor does not (see
+      # privileged_actor below) -- it must dodge from what it can actually
+      # perceive.
+      privileged_critic: true
+      require_obstacle_encounter: true
+      tracking_failure_pos_error_m: 3.0
+      tracking_failure_steps: 25
+      threat_distance_m: 1.5
+      # Raised from 1.0: a privileged, collision-checked scripted oracle
+      # (evaluate_velocity_dodge_oracle.py --expert) only cleared 20% of 30
+      # fresh-seed episodes under the old budget, with offset_tau_s=0.8s
+      # able to reach only ~71% of offset_max_m within a 1.0s reaction
+      # window -- that's close to a real feasibility ceiling, not a policy
+      # competence gap. 1.5s lets the same integrator reach ~85% of budget
+      # before impact, paired with slower/farther throws below so there's
+      # always enough flight time for the wider window to actually apply.
+      # Re-measured with the oracle after this change: 53.3% (16/30),
+      # landing in the intended 40-60% band -- enough headroom for the
+      # policy (event_actor_v6 plateaued at ~11% under the old budget) to
+      # actually climb toward, instead of asymptoting against a ~20% wall.
+      threat_time_horizon_s: 1.5
+      controller:
+        model: rotorpy_se3
+        vehicle: crazyflie
+      trajectory:
+        model: habitat_random_minsnap
+        target_length: 15.0
+        min_waypoint_distance: 2.0
+        max_waypoints: 100
+        max_path_attempts: 30
+        # Lowered from 1.0: a slower reference gives more reaction time
+        # relative to the 2-4 m/s obstacle throws and makes the reference
+        # itself easier to track, while staying well under throw_speed_range_mps
+        # so intercept solutions still exist (see the note on that below).
+        v_avg: 0.6
+        # Altitude is measured above the LOCAL floor at each sampled point,
+        # not the scene's global AABB -- the earlier global-bounds version
+        # let the drone fly at ~0.27 m above floor in places, well within
+        # furniture height, because the AABB-relative margin said nothing
+        # about what a couch's actual local floor clearance requires.
+        min_altitude_m: 1.0
+        ceiling_margin_m: 0.3
+        lateral_margin_m: 1.0
+        bounds_margin_m: 0.3
+        # Validate the finished MinSnap curve against Habitat's actual 3-D
+        # scene mesh. The navmesh alone cannot detect walls/furniture at flight
+        # altitude. This includes the Crazyflie body plus a safety margin.
+        static_clearance_m: 0.20
+        collision_sample_spacing_m: 0.05
+      # gated_cascaded_velocity was tried here and reverted. The appeal was
+      # structural: a closed gate actively restores the nominal path, so
+      # "stop deviating" would not have to be bought with reward, and it is
+      # the space the expert and the lost BC loss both speak. But with no
+      # displacement clip and the restoring loop switched off while the gate
+      # is open, even the privileged oracle wanders -- measured on this
+      # exact config it scored 23.3% / 492 steps against 36.7% / 535 here,
+      # with tracking_failure rising from 1 to 5 of 30 episodes. Training
+      # against an action space that costs a third of the achievable
+      # ceiling is not worth the alignment with BC; the expert can be
+      # re-expressed in this 3-dim space instead (oracle_action already
+      # has that branch).
+      residual_control:
+        # No integrator: the action IS the target displacement, scaled by
+        # offset_max_m, tracked with a short lag and a rate limit. With
+        # squash_output bounding the action to [-1, 1] the reachable set is
+        # exactly offset_max, so nothing needs an integrator to enforce it,
+        # and a constant action means "hold this offset" instead of "keep
+        # accelerating sideways" -- the coupling that forced the policy to
+        # sit saturated just to maintain a displacement.
+        # Measured: the privileged oracle scores 46.7% here against 36.7%
+        # under velocity_delta_integrated, with the do-nothing control
+        # unchanged at 5.0% -- so this widens the headroom band from 31.7
+        # to 41.7 points. First control-mode change this session that
+        # raised the ceiling rather than lowering it.
+        # Trade-off accepted: a position target couples speed to distance
+        # (initial speed = min(target/tau, rate_limit)), so the policy
+        # cannot ask to arrive slowly. Full 0.56 m arrives in ~0.5 s
+        # against a 1.5 s threat window, so that authority is not needed.
+        mode: velocity_delta_integrated
+        # Raised from 0.56/0.56/0.36. The expert's planner offers candidate
+        # displacements up to 1.00 m, so the old cap was clipping its choices
+        # -- but a 20-episode A/B on matched seeds scored 7/20 either way
+        # (failure mix near-identical), so the extra authority is free rather
+        # than load-bearing. Kept because nothing argues for the artificial
+        # limit, not because it was measured to help.
+        # Wide enough not to bind. The cap was a hard constraint standing in
+        # for something the reward already prices -- w_pos on pos_excess, the
+        # proximity-scaled no-threat term, and the boundary shaping all charge
+        # deviation. An oracle A/B at 0.56 vs 1.2 m scored 7/20 either way, so
+        # it was not load-bearing for capability.
+        #
+        # Cost: the action is tanh-squashed to [-1, 1] and scaled by this, so
+        # a wider cap lowers resolution for ordinary dodges (a 0.5 m dodge is
+        # an action of 0.17 here, against 0.42 at the old 1.2 m). Rate limits
+        # still bound how fast the offset can develop.
+        offset_max_m:
+        - 3.0
+        - 3.0
+        - 2.0
+        offset_command_tau_s: 0.2
+        # Bounds the reference-velocity feedforward handed to SE3 (the
+        # derivative of this offset); an unlimited step would spike it and
+        # Kd would turn that straight into acceleration.
+        # Measured in an empty scene with no expert and no obstacles: a
+        # 0.45 m sidestep flipped the vehicle past 109 deg on 4/4 seeds, and
+        # oracle episodes lost ~46 points of episode success to out_of_bounds
+        # that were this instability, not avoidance failures (control arm: 0
+        # bounds exits in 40 episodes).
+        #
+        # The boundary is the offset command's *velocity*, not its amplitude
+        # -- 0.75 m at 0.50 m/s is clean, 0.45 m at 1.20 m/s flips -- so this
+        # ceiling stays low. It still matters with the accel limit below,
+        # because the braking law permits sqrt(2*a*|e|), which reaches
+        # 1.55 m/s against a 3.0 m offset_max_m.
+        # 0.6 came from linear position ramps, which step the velocity --
+        # the exact condition the acceleration limit below now prevents. Under
+        # smooth shaping 0.75 m/s measures clean at 8 deg of tilt, against a
+        # 17.4 deg control-arm baseline. This ceiling also gags the planner:
+        # expert_for_task derives max_horizontal_speed_mps from it, so 0.6
+        # made the expert reject 92% of candidates and command zero action
+        # into collisions (visible on video at 0.10 m with a live THREAT).
+        offset_rate_limits_mps:
+        - 0.8
+        - 0.8
+        - 0.5
+        # Bounding velocity alone is not enough: a plain rate limiter at
+        # 0.6 m/s still flipped 4/4, because it steps the velocity (bounded
+        # speed, unbounded acceleration). Bounding acceleration is what makes
+        # the reference physically realisable -- SE3 is handed x and x_dot
+        # shifted by the offset while x_ddot stays nominal, so a velocity
+        # step arrives as an error it has no feedforward for and it answers
+        # with attitude.
+        #
+        # 0.4 m/s^2 with the sqrt(2*a*|e|) approach law: tilt 4.9-6.2 deg and
+        # the command lands on 0.451 m against a 0.45 m target. The simpler
+        # fix of offset_command_tau_s 0.8 also stabilises it, but costs 0.6 s
+        # of response and reaches only 0.419 m.
+        # 0.8 completes a 0.45 m dodge in 1.10-1.20 s, inside the ~1.5 s
+        # threat horizon; 0.4 took 1.55-1.65 s and could not finish in time.
+        # 1.6 flipped one seed of four (87 deg) -- rejected, since sporadic
+        # per-seed divergence is precisely how this bug stayed hidden.
+        offset_accel_limit_mps2: 1.5
+        action_filter_tau_s: 0.15
+      # Not a diagnostic run: the actor sees only its own state + events,
+      # matching what a real drone could actually perceive.
+      privileged_actor: false
+  # skokloster only, for training and eval alike. apartment_1's rooms are
+  # tight enough that clearing an obstacle and staying in bounds are in
+  # direct tension (the privileged oracle itself went out of bounds in
+  # 3-4 of 30 episodes there), so a large fraction of episodes had no
+  # good answer available. env.py takes scenes[0], so listing one scene
+  # is also what actually makes the choice take effect.
+  scenes:
+  - name: skokloster
+    path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
+  sensors:
+    event_camera_1:
+      type: event
+      position:
+      - 0.0
+      - 0.0
+      - 0.05
+      orientation:
+      - 0.0
+      - -1.5707963267948966
+      - 0.0
+      width: 640
+      height: 480
+      hfov: 120
+      zfar: 20.0
+      backend: cuda
+      contrast_threshold_neg: 0.15
+      contrast_threshold_pos: 0.15
+      anti_aliasing: 8
+  visual_backend:
+    enable_physics: true
+    agent_radius: 0.15
+    # Keep shortest paths away from wall/furniture boundaries; the finished
+    # curve is independently checked against the 3-D mesh below.
+    navmesh_agent_radius: 0.25
+    dynamic_obstacles:
+      enabled: true
+      # Switched from the scripted intercept scheduler (guaranteed-hit
+      # throws solved against the nominal trajectory) to this simpler,
+      # organic spawner: throws are aimed at wherever the drone actually is
+      # at spawn time, plus noise, with no solve against a future path.
+      # Less scripted, more naturalistic obstacle field for a straight PPO
+      # run.
+      intercept_schedule:
+        enabled: false
+      # 14 concurrent (v8) was too dense to be learnable: ~15 throws per
+      # episode against a success criterion that is conjunctive over every
+      # one of them pinned success_rate at 0 regardless of skill, and left
+      # no quiet stretch in which tracking well was even possible -- the
+      # threat flag was true on 100% of sampled steps. 6 keeps the field
+      # busy while leaving gaps to track through, so the reward can tell
+      # dodging and loitering apart.
+      spawn_interval_s: 0.30
+      # +/-60%: waits land in [1.0, 4.0] s. At a fixed 2.5 s the policy's
+      # speed swung 78% of its mean with phase in the spawn cycle while its
+      # commanded action barely changed -- it was riding the clock, not
+      # reacting to what it saw.
+      spawn_interval_jitter: 0.6
+      # Raised from 3 with scattered aim. Density and *threat* density are no
+      # longer the same thing: an aimed field makes nearly every throw a
+      # threat, while scattered throws mostly pass by, so 10 concurrent here
+      # is far less punishing than the 14 aimed that pinned success at 0.
+      # 5, from a concurrency sweep under re-aiming (control/oracle, throw
+      # rate held constant): the gap peaks here at +18.8 points and inverts
+      # by 8. Too many re-aiming throws and the whole threat formation
+      # follows the drone, leaving the relative geometry invariant to its
+      # motion -- evasion is then impossible in principle. Too few and
+      # passivity survives anyway.
+      #   2 concurrent: control 75.0%  oracle 81.2%  gap  +6.2
+      #   3 concurrent: control 62.5%  oracle 75.0%  gap +12.5
+      #   5 concurrent: control 50.0%  oracle 68.8%  gap +18.8
+      #   8 concurrent: control 50.0%  oracle 43.8%  gap  -6.2
+      # 12 @ 0.45 s. Measured with matched arms: control success falls
+      # 45.8% -> 29.2% -> 8.3% across 5/8/12 concurrent, so this is the first
+      # setting with real headroom. Non-degeneracy is unaffected -- re-aiming
+      # makes every constant offset score 0% regardless of density.
+      max_concurrent: 3
+      # Slowed from [2.0, 4.0] and spawns moved farther out below: paired
+      # with threat_time_horizon_s above, this guarantees enough total
+      # flight time (min ~7m/3.0mps=2.33s) for the widened reaction window
+      # to actually be reachable rather than clipped by the throw arriving
+      # first. See threat_time_horizon_s comment for the oracle evidence.
+      throw_speed_range_mps:
+      - 1.5
+      - 3.0
+      angular_speed_range_radps:
+      - 0.0
+      - 1.0
+      azimuth_range_deg:
+      - -45.0
+      - 45.0
+      radial_distance_range_m:
+      - 5.5
+      - 7.5
+      # Symmetric about the drone (was [-0.25, 1.0], skewed strongly
+      # upward). That skew put 61% of obstacles above the vehicle, and the
+      # v12 policy found the blanket answer: its mean offset was
+      # [+0.009, +0.094, -0.290] in world axes -- 95% of it straight down.
+      # Ducking beats the whole obstacle distribution without perceiving
+      # anything, which is why it persisted with obstacles disabled and why
+      # the deadband, clearance-shaping and lead-aim changes each moved it
+      # by under 10%: none of them touched the asymmetry paying for it.
+      # Symmetric spawning leaves no free direction -- descending now helps
+      # against half the throws and hurts against the other half, so only
+      # reacting to the specific incoming obstacle works.
+      relative_height_range_m:
+      - -0.6
+      - 0.6
+      aim_noise_std_m: 0.3
+      # Half the throws lead the drone, half aim where it is at spawn time.
+      # Aiming only at the current position made motion itself evasive:
+      # over a 1.4-2.0 s flight a drone drifting at ~1.1 m/s displaces
+      # several times the 0.30 m hit radius, so v10 survived above the
+      # do-nothing control (318 vs 254 steps) while holding a 0.72 m
+      # standing offset and never modulating it for threats -- it was
+      # rewarded for wandering, not for seeing. A pure lead solve would
+      # just invert the exploit (hold still and the intercept degenerates),
+      # so the two are mixed per throw.
+      #
+      # Raised 0.5 -> 0.8. At an even split, half of all throws still aimed
+      # where the drone was at spawn time, and for those a sustained drift
+      # remains genuinely evasive -- so the ~0.6 m standing offset was not a
+      # reward hack but a rational answer to half the obstacle population,
+      # which is why neither reward change above removed it. At 0.8 drifting
+      # only answers one throw in five, while keeping enough
+      # current-position aim that simply freezing (which degenerates the
+      # intercept solve) is not a blanket answer either.
+      # Aiming at all is what made position itself a strategy, so both aim
+      # modes are off and throws scatter through the neighbourhood instead.
+      lead_aim_probability: 1.0
+      # Scatter is now a diversity term, not the difficulty knob: re-aiming
+      # is what makes throws threatening, so the spread only keeps them from
+      # arriving identically.
+      # 0.3, down from 1.0. Preserving each throw's scatter offset through
+      # re-aiming meant throws tracked faithfully to a point ~0.75 m from the
+      # drone -- well outside the ~0.3 m combined hit radius -- so they were
+      # aimed to miss by construction, and a passive drone still survived
+      # 57.5% of episodes.
+      #
+      # Wide scatter was only ever needed because aiming once at spawn made a
+      # tight aim escapable by drifting. Re-aiming removes that coupling, so
+      # the aim can be tight again: the offset now supplies variety, not a
+      # built-in miss.
+      # UNAIMED FIELD (2026-08-24). Throws aimed at the drone made the task
+      # solvable without perception: a BC clone with its event frames ZEROED
+      # scored 58.3% vs 56.7% sighted, because any displacement evades a
+      # homing throw and direction carries no information. Measured value of
+      # motion vs perception, by aim_scatter_m at n=40:
+      #   0.3 (aimed):  motion +30.0  perception  +7.5
+      #   1.5:          motion  -7.5  perception +27.5
+      #   2.5:          motion -10.0  perception +10.0, oracle == control
+      # 1.5 is the optimum: threats are real but do not track the vehicle,
+      # so blind motion becomes harmful and knowing where obstacles are is
+      # what pays. Same asymmetry seen on the static task, where vision was
+      # worth +11.5 per-encounter points against -1.3 here.
+      aim_scatter_m: 0.25
+      # Throws steer toward their aim point until 0.5 s before arrival, then
+      # go ballistic. Drifting stops paying (they follow), while a late
+      # decisive dodge still works -- and that puts the required reaction in
+      # the window where the event signal is strongest (SNR 0.014-0.020 at
+      # 0.25-0.5 s, against 0.008 further out).
+      # Commit immediately: any homing at all re-introduces the exploit,
+      # and no commit window fixes it (a dodge needs ~1.1 s to complete, so
+      # any window long enough to dodge in is long enough to drift out of).
+      reaim_commit_time_s: 10.0
+      reaim_max_turn_rate_radps: 2.0
+      seed: 7
+      # Mixed motion models. With every obstacle on a straight line aimed at
+      # the drone, the approach is constant-bearing: the obstacle barely
+      # translates in the image and only looms, sitting at 9-18 px for most
+      # of its flight and filling the frame in the last ~0.2 s. That is the
+      # weakest possible signal for an event camera, which fires on
+      # image-plane motion -- so the thing the policy most needs to see is
+      # nearly invisible until it is too late to act on.
+      #
+      # A parabola curves, so its bearing changes throughout the flight and
+      # it sweeps across the image. Gravity is 3.0 rather than 9.81 on
+      # purpose: the ballistic solve launches upward to compensate, and at
+      # Earth gravity that pushes true speed to 8.5-11 m/s (vs the nominal
+      # 5). At 3.0 the arc is pronounced while speed stays 5.4-5.8 m/s.
+      templates:
+      - handle: uvSphereSolid
+        scale:
+        - 0.15
+        - 0.15
+        - 0.15
+        motion_mode: kinematic_line
+        mass: 0.2
+        ttl_s: 4.5
+        collision_radius: 0.15
+        kinematic_speed_mps: 5.0
+      - handle: uvSphereSolid
+        scale:
+        - 0.15
+        - 0.15
+        - 0.15
+        motion_mode: kinematic_parabola
+        mass: 0.2
+        ttl_s: 4.5
+        collision_radius: 0.15
+        kinematic_speed_mps: 5.0
+        parabola_gravity_mps2: 3.0
+      - handle: uvSphereSolid
+        scale:
+        - 0.15
+        - 0.15
+        - 0.15
+        motion_mode: kinematic_line
+        mass: 0.2
+        ttl_s: 6.0
+        collision_radius: 0.15
+        kinematic_speed_mps: 3.0
+  dynamics:
+    model: rotorpy_multirotor_euler
+    vehicle: crazyflie
+    control_abstraction: cmd_ctbr
+    max_speed_mps: 3.0
+    ctbr_rate_limits:
+      roll: 7.0
+      pitch: 7.0
+      yaw: 5.0
+    domain_randomization:
+      enabled: true
+      resample_every: 50
+      scales:
+        mass:
+        - 0.85
+        - 1.15
+        k_eta:
+        - 0.9
+        - 1.1
+        k_m:
+        - 0.9
+        - 1.1
+        rotor_speed_min:
+        - 1.0
+        - 1.0
+        rotor_speed_max:
+        - 0.95
+        - 1.05
+  simulator:
+    world_rate: 1000
+    control_rate: 100
+    sim_time: 30
+    coord_transform: rotorpy_to_hm3d
+    sensor_rates:
+      event_camera_1: 50
+    viz_rates:
+      event_camera_1: 50
+    domain_randomization:
+      enabled: false
+      resample_every: 50
+      sensors:
+        event_camera_1:
+          contrast_threshold_neg:
+            range:
+            - 0.1
+            - 0.3
+          contrast_threshold_pos:
+            range:
+            - 0.1
+            - 0.3
+          hfov:
+            choices:
+            - 90
+            - 120
+ppo:
+  learning_rate: 0.0003
+  n_steps: 512
+  batch_size: 128
+  n_epochs: 4
+  gamma: 0.994
+  gae_lambda: 0.95
+  clip_range: 0.2
+  # Was 0.0: nothing was counteracting PPO's tendency to shrink action
+  # variance once it settles anywhere, even a degenerate "don't act" optimum
+  # -- which 600k steps of the previous run (v2) settled into exactly,
+  # producing behavior identical to the zero-action baseline throughout.
+  # v3+v4 (~1.2M combined steps) then sat at this constant 0.01 too long:
+  # log_std barely moved (-0.60 -> -0.67 over v4's 600k), stochastic-rollout
+  # encounter_clear_rate stayed healthy (noise-assisted dodges) while
+  # deterministic eval success stayed flat near 0% -- the mean policy never
+  # had to converge because the entropy bonus kept propping up exploration
+  # noise indefinitely. ent_coef_final below anneals this to 0 over the
+  # resumed run instead of holding it constant.
+  ent_coef: 0.01
+  ent_coef_final: 0.0
+  target_kl: 0.02
+  # Raised from -1.0: with a still-random CNN and no reward for successfully
+  # clearing an obstacle (see w_encounter_clear below), the policy needs
+  # enough exploration variance to ever sample a real dodge attempt, or
+  # gradient descent has nothing obstacle-correlated to reinforce.
+  # Back to -0.5 (std 0.61) from -0.2 (std 0.82). On a [-1, 1] action space
+  # 0.82 is close to uniform-random: v9 ran correction_energy 0.86 and
+  # pos_error ~1.05 against 0.09 for pure tracking, i.e. exploration was not
+  # perturbing a trajectory so much as replacing it with noise, and 5/8 eval
+  # episodes ended out_of_bounds rather than in a collision. 0.61 still
+  # explores widely, and ent_coef_final anneals it down over the run.
+  log_std_init: -0.5
+  # Only read on the --resume-checkpoint path, where log_std would
+  # otherwise come back from the checkpoint already converged and narrow
+  # (v7 finished at -0.85 / std 0.43), silently making log_std_init above
+  # dead config. Inert for a from-scratch run.
+  reset_log_std_on_resume: true
+  # Independent per-step Gaussian exploration is almost entirely cancelled
+  # by the residual-control leaky integrator before it ever becomes a real
+  # offset: at the 50Hz policy rate against offset_tau_s=0.8s, i.i.d.
+  # resampling reaches only ~sqrt(dt/2*tau) =~11% of the displacement a
+  # sustained action would -- measured to match: peak in-threat offsets of
+  # ~0.06-0.09m against a 0.56m budget, right at that ratio. SDE holds
+  # exploration noise correlated across sde_sample_freq steps instead of
+  # resampling it every step, so it survives the integrator instead of
+  # being averaged out by it.
+  # Tightened from 40 to 20 (~0.4s, half offset_tau_s instead of matching
+  # it): v3 confirmed the exploration fix worked (encounter_clear_rate rose
+  # and held at 60-70%) but also grew a large, worsening out_of_bounds
+  # failure mode -- a 40-step hold lets one uncorrelated SDE sample commit
+  # to a large push for close to a full integrator time constant with no
+  # chance to recorrect mid-swing. 20 keeps most of the averaging fix
+  # (dt/tau moves from 0.025 to 0.4/0.8=0.5, attenuation factor
+  # sqrt(0.5/2)=0.5 instead of the original 0.11, still a ~4.5x improvement)
+  # while resampling twice as often, so a bad direction gets corrected
+  # sooner instead of riding out the full swing.
+  # Only meaningful with --bc-warm-start: holds the cloned actor still while
+  # the value head fits its returns. v15 warm-started without this and lost
+  # the clone inside ~8 updates (explained_variance -0.003 -> 0.7 over that
+  # span), dropping below its own starting success rate before recovering.
+  actor_freeze_updates: 15
+  # L2 on the pre-tanh action mean. squash_output bounds the action but not
+  # the mean behind it, and both v23 and v24 died the same way: v24's mean
+  # |mu| held at 0.001-0.002 through 131k steps, then hit 0.567 (max 3.661,
+  # 18.5% of components past 1) by 229k, with success collapsing to 0.0% and
+  # train/entropy_loss crossing zero at 164k on the way to v23's +10.9. Past
+  # |mu| ~ 2 the tanh derivative is under 0.08 and the gradient stops
+  # arriving. Watch train/pretanh_abs_mean and train/pretanh_frac_gt1.
+  # Supervises the actor's event encoder with an obstacle distance map --
+  # something proprioception cannot supply, so the term can only be satisfied
+  # through vision. Measured as the only mechanism that taught this encoder to
+  # see: held-out distance R2 0.334 with it, ~0.0 without.
+  distance_aux_weight: 5.0
+  pretanh_penalty: 0.01
+  use_sde: true
+  sde_sample_freq: 20
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  # Was cpu, left over from the earlier tiny-MLP (18-dim state) baseline.
+  # Now that the actor runs a CNN over full-resolution (2, 480, 640) event
+  # frames, CPU-side conv passes were almost certainly the dominant cost --
+  # envs_on_gpu0 was already deliberately kept lower than GPU1's share
+  # specifically to leave GPU0 headroom for "policy inference and the PPO
+  # update" (see its comment in train_sb3.py), which only makes sense if
+  # the model actually runs on GPU0. It didn't; this was silently unused.
+  device: cuda:0
+vecnormalize:
+  normalize_obs: true
+  normalize_reward: true
