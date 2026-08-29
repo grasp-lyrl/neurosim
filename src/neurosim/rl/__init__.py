@@ -1,13 +1,19 @@
 from .env import BaseNeurosimRLEnv, HoverStopEnv
 from .env_reactive_dodge import ReactiveDodgeEnv
 from .representations import EventRepresentationManager
-from .sb3_features import CombinedEventStateExtractor, EventCnnExtractor
+from .sb3_features import (
+    AsymmetricActorCriticPolicy,
+    AsymmetricRecurrentActorCriticPolicy,
+    CombinedEventStateExtractor,
+    EventCnnExtractor,
+)
 from .tasks import (
     HoverStopTask,
     ReactiveDodgeTask,
     RewardOutcome,
     RLTask,
     TaskStep,
+    VelocityDodgeTask,
     build_task,
 )
 from .vehicles import RLVehicle, RotorpyCtbrVehicle, build_vehicle
@@ -16,6 +22,8 @@ from .vehicles import RLVehicle, RotorpyCtbrVehicle, build_vehicle
 ENV_BY_TASK = {
     "hover_stop": HoverStopEnv,
     "reactive_dodge": ReactiveDodgeEnv,
+    # Same env: the residual mode differs, not the machinery around it.
+    "velocity_dodge": ReactiveDodgeEnv,
 }
 
 
@@ -38,6 +46,8 @@ __all__ = [
     "BaseNeurosimRLEnv",
     "HoverStopEnv",
     "ReactiveDodgeEnv",
+    "AsymmetricActorCriticPolicy",
+    "AsymmetricRecurrentActorCriticPolicy",
     "EventCnnExtractor",
     "EventRepresentationManager",
     "CombinedEventStateExtractor",
@@ -46,6 +56,7 @@ __all__ = [
     "RewardOutcome",
     "HoverStopTask",
     "ReactiveDodgeTask",
+    "VelocityDodgeTask",
     "build_task",
     "RLVehicle",
     "RotorpyCtbrVehicle",

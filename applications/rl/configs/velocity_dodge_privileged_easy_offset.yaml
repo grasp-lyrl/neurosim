@@ -1,0 +1,56 @@
+# Phase 0 learnability diagnostic. One slow frontal encounter, exact obstacle
+# geometry for the actor, direct desired-offset control, and no event camera.
+experiment_config: applications/rl/configs/velocity_dodge_privileged_baseline.yaml
+
+overrides:
+  seed: 314
+  total_timesteps: 1000000
+  eval:
+    freq: 16384
+    episodes: 40
+  vecnormalize:
+    # Behavioral-cloning observations and PPO observations must share the
+    # same scale. Raw state geometry is already well bounded in this phase.
+    normalize_obs: false
+    normalize_reward: true
+
+  env:
+    obs_mode: state
+    episode_seconds: 8.0
+    scenes:
+      - name: skokloster
+        path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
+    task:
+      config:
+        w_clearance: 8.0
+        w_encounter_clear: 4.0
+        clearance_threshold_m: 1.5
+        gamma_shaping: 0.994
+        privileged_actor: true
+        privileged_critic: false
+        threat_distance_m: 1.5
+        threat_time_horizon_s: 5.0
+        residual_control:
+          mode: desired_body_offset
+          offset_max_m: [0.45, 0.45, 0.25]
+          offset_command_tau_s: 0.40
+          offset_rate_limits_mps: [0.30, 0.30, 0.20]
+
+    visual_backend:
+      dynamic_obstacles:
+        intercept_schedule:
+          enabled: true
+          first_intercept_s: 3.0
+          interval_s: 20.0
+          interval_jitter_s: 0.0
+          speed_range_mps: [2.0, 2.5]
+          lead_distance_range_m: [6.0, 7.0]
+          azimuth_range_deg: [-20.0, 20.0]
+          elevation_range_deg: [-5.0, 5.0]
+          aim_offset_std_m: 0.10
+          require_line_of_sight: true
+          max_attempts: 12
+
+    dynamics:
+      domain_randomization:
+        enabled: false

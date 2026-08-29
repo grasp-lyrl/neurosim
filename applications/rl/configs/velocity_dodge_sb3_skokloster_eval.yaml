@@ -1,0 +1,9 @@
+# Rollout-only override for inspecting the full event policy in the second
+# training scene. This leaves the active experiment configuration unchanged.
+experiment_config: applications/rl/configs/velocity_dodge_sb3_experiment.yaml
+
+overrides:
+  env:
+    scenes:
+      - name: skokloster
+        path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb

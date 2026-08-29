@@ -1,0 +1,304 @@
+# PPO training config for the velocity_dodge task.
+#
+# Architecture:
+#   - action  : 3-D body-frame velocity correction, integrated (with leak)
+#               into an offset on the SE3 reference POSITION. A correction
+#               applied to the reference velocity alone cannot deviate
+#               further than (Kd/Kp)*dv ~= 0.6*dv, whatever the limit.
+#   - actor   : event frame + body-frame state, no obstacle ground truth.
+#   - critic  : additionally sees nearest-obstacle geometry (privileged).
+#   - encoder : spatial softmax, so obstacle bearing is a linear readout
+#               instead of something a global average pool has thrown away.
+
+seed: 42
+num_envs: 16
+total_timesteps: 5000000
+n_gpus: 2
+# GPU 0 also runs policy inference and the PPO update, so the right number
+# of simulators to leave on it depends on the network input size. Measured:
+# 6 envs -> GPU0 93% / GPU1 0% (GPU0 bound); 2 envs -> GPU0 ~0% / GPU1 100%
+# (GPU1 bound). 4 is the midpoint of those two brackets.
+envs_on_gpu0: 4
+
+eval:
+  freq: 32768
+  episodes: 30          # small-n eval is noise-dominated for rare successes
+  num_envs: 1
+
+vec_env:
+  type: auto
+  start_method: spawn
+
+env:
+  # Controller runs at control_rate (100 Hz); the policy is queried
+  # every Nth controller update, so 2 -> 50 Hz decisions. Slowing the
+  # controller itself instead cost attitude-loop phase margin and the
+  # vehicle intermittently tipped over and fell.
+  policy_decimation: 2
+  obs_mode: combined
+  episode_seconds: 15.0
+  init_speed_range: [0.0, 0.0]
+  safety:
+    enable_navigable_check: false
+
+  event_representation:
+    model: time_surface
+    log_compression: 1.0
+    # Full 480x640 into the policy. A 0.2 m obstacle at its 3-5 m spawn
+    # distance is only 3-5 px once downsampled 4x, which is very little to
+    # detect and localise; at full resolution it is 12-20 px. Note the
+    # sensor always renders at full res, so this costs CNN compute and
+    # rollout-buffer memory, not simulation throughput.
+    downsample_factor: 1
+    ts_decay_ms: 10.0
+    sensor_uuid: null
+
+  task:
+    name: velocity_dodge
+    config:
+      w_pos: 0.5
+      w_pos_deadband_m: 0.3      # dodges inside the corridor are free
+      w_vel: 0.25
+      w_correction: 0.02
+      w_smooth: 0.01
+      w_survival: 0.02
+      # Prices dodging by braking. A throw solved for a fixed arrival time
+      # is defeated by simply being late, and that shortcut needs no
+      # perception and risks no wall strike -- so without this the policy
+      # can collapse to "slow down for everything". Watch
+      # offset_along_track vs offset_cross_track to see if it has.
+      w_along_track: 1.0
+      # Potential-based (gamma*phi' - phi), so by the shaping theorem this
+      # cannot change the optimal policy at any weight -- it only sharpens
+      # the learning signal. At 1.0 the whole approach from 1.5 m to 0.4 m
+      # telescoped to ~0.54 of reward against a crash penalty of 60, i.e.
+      # ~1% of the sparse signal, so it was doing nothing.
+      w_clearance: 8.0
+      clearance_threshold_m: 1.5
+      gamma_shaping: 0.994       # must match ppo.gamma for correct shaping
+      crash_penalty_scene: 60.0
+      crash_penalty_obstacle: 60.0
+      # Success needs ||rel_pos|| > combined_radius + this = 0.4 m. At 0.25
+      # it needed 0.55 m, which exceeded the reachable offset entirely -- the
+      # metric was unachievable rather than merely hard.
+      # An oracle dodging at full authority achieves a median
+      # clearance of 0.064 m, so a 0.1 threshold made success
+      # unreachable by construction -- success_rate was pinned at 0
+      # for reasons unrelated to learning.
+      dodge_clearance_m: 0.02
+      privileged_critic: true
+      privileged_actor: false
+      require_obstacle_encounter: true
+      tracking_failure_pos_error_m: 3.0
+      # 0.5 s beyond a 3 m error at 50 Hz. At 10 steps (0.2 s) a transient
+      # during an aggressive dodge could end the episode outright.
+      tracking_failure_steps: 25
+      threat_distance_m: 1.5
+      threat_time_horizon_s: 1.0
+
+      controller:
+        model: rotorpy_se3
+        vehicle: crazyflie
+
+      trajectory:
+        model: habitat_random_minsnap
+        target_length: 15.0
+        min_waypoint_distance: 2.0
+        max_waypoints: 100
+        max_path_attempts: 30
+        # Match the validated privileged diagnostic. Changing the task
+        # dynamics at the perception handoff would confound the comparison.
+        v_avg: 0.6
+        min_altitude_m: 1.0
+        ceiling_margin_m: 0.3
+        lateral_margin_m: 1.0
+        bounds_margin_m: 0.3
+        static_clearance_m: 0.20
+        collision_sample_spacing_m: 0.05
+
+      residual_control:
+        mode: velocity_delta_integrated
+        # Authority within the ~1 s before contact is set by the initial
+        # slope (de/dt ~ dv), not the steady state. Kept below the values
+        # that put random-action episodes out of bounds (7/8 at an
+        # unfiltered 0.6).
+        delta_velocity_limits_mps: [0.7, 0.7, 0.45]
+        # tau and dv multiply: the sustainable offset is tau*dv = 0.56 m,
+        # which must clear the 0.3 m combined radius plus the success margin
+        # (0.4 m total). Reached ~0.45 m by 1.3 s, the median time to contact.
+        # while returning to the nominal path about twice as fast as 1.5 s
+        # did. Note tau does NOT set how quickly a dodge starts -- for small
+        # t the offset grows as dv*t regardless of tau.
+        offset_tau_s: 0.8
+        # Exactly tau * dv_limit: the clip sits at the natural steady state,
+        # bounding integrator windup without binding in normal operation.
+        offset_max_m: [0.56, 0.56, 0.36]
+        # Smooths the action before integration; without it the offset's
+        # derivative injects raw action noise into the SE3 reference
+        # velocity, which Kd turns into acceleration (7/8 -> 3/8 OOB).
+        action_filter_tau_s: 0.15
+
+  scenes:
+    - name: apartment_1
+      path: data/scene_datasets/habitat-test-scenes/apartment_1.glb
+    - name: skokloster
+      path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
+
+  sensors:
+    event_camera_1:
+      type: event
+      position: [0.0, 0.0, 0.05]
+      # Points the camera along body-forward; see
+      # tests/test_trajectory_yaw_alignment.py.
+      orientation: [0.0, -1.5707963267948966, 0.0]
+      width: 640
+      height: 480
+      hfov: 120
+      zfar: 20.0
+      backend: cuda
+      contrast_threshold_neg: 0.15
+      contrast_threshold_pos: 0.15
+      anti_aliasing: 8
+
+  visual_backend:
+    enable_physics: true
+    # Combined agent+obstacle radius is 0.15 + 0.15 = 0.3 m; that is the
+    # separation a dodge has to open up.
+    agent_radius: 0.15
+    # Planning margin is deliberately separate from the physical collision
+    # radius; the finished curve is then verified against the 3-D scene mesh.
+    navmesh_agent_radius: 0.25
+    dynamic_obstacles:
+      enabled: true
+      # Throws are solved to intersect the nominal trajectory, so a drone
+      # that does not dodge is hit by construction. Every parameter is
+      # randomised around that solved intercept -- the guarantee makes
+      # success measurable, the noise stops the policy memorising one
+      # canned attack. Reproducibility comes from the episode seed.
+      intercept_schedule:
+        enabled: true
+        # Episodes currently end ~2.5 s in, so a first intercept at 2.0 s
+        # meant exactly one obstacle ever materialised (encounters_total ~1.0
+        # every rollout). Start earlier and stack them denser.
+        first_intercept_s: 1.5
+        interval_s: 0.7
+        interval_jitter_s: 0.2
+        speed_range_mps: [2.0, 4.0]
+        # Longer leads mean longer flight times, and the number of obstacles
+        # airborne at once is roughly flight_time / interval -- so this is the
+        # knob that controls how many are visible simultaneously. Early
+        # intercepts are no longer dropped (they launch at t=0 from further
+        # out), so a long lead costs nothing.
+        lead_distance_range_m: [4.0, 7.0]
+        azimuth_range_deg: [-60.0, 60.0]   # relative to direction of travel
+        elevation_range_deg: [-10.0, 25.0]
+        # Wider spread: a dead-centre throw needs the full ~0.4 m of
+        # displacement to clear, which does not fit in these interiors
+        # (the oracle went out of bounds 12/20 trying).
+        aim_offset_std_m: 0.35
+        # Being inside the camera frustum is not the same as being visible:
+        # scene geometry occluded 2 of 3 sampled throws entirely (0 rendered
+        # pixels). Throws without a clear sight line from where the drone
+        # will be at launch are resampled, else that slot is skipped.
+        require_line_of_sight: true
+        max_attempts: 8
+      spawn_interval_s: 5.0        # unused while the intercept schedule is on
+      # ttl (4.5 s) / interval (1 s) means several throws are airborne at
+      # once; too low a cap silently drops scheduled intercepts.
+      max_concurrent: 8
+      # Obstacle speed must exceed the trajectory v_avg or no intercept
+      # solution exists and encounters never actually happen.
+      throw_speed_range_mps: [2.0, 4.0]
+      angular_speed_range_radps: [0.0, 1.0]
+      azimuth_range_deg: [-45.0, 45.0]
+      radial_distance_range_m: [3.0, 5.0]
+      relative_height_range_m: [-0.25, 1.0]
+      aim_noise_std_m: 0.3
+      seed: 7
+      templates:
+        # Spheres only. kinematic_line: position is spawn + velocity*t
+        # exactly, so the solved intercept is hit to the millimetre;
+        # dynamic_throw would run through Bullet with gravity and miss it.
+        - handle: uvSphereSolid
+          # Scale is set so the rendered radius matches collision_radius --
+          # otherwise the video shows contact at a different distance than
+          # the physics uses.
+          scale: [0.15, 0.15, 0.15]
+          motion_mode: kinematic_line
+          mass: 0.20
+          # Must outlive the longest flight (lead/speed <= 2.5 s) plus the
+          # fly-past, or the obstacle vanishes before the encounter.
+          ttl_s: 4.5
+          # Explicit, so clearance is not set by the AABB corner distance
+          # (which overestimates a sphere by up to sqrt(3)).
+          collision_radius: 0.15
+
+  dynamics:
+    model: rotorpy_multirotor_euler
+    vehicle: crazyflie
+    control_abstraction: cmd_ctbr
+    ctbr_rate_limits:
+      roll: 7.0
+      pitch: 7.0
+      yaw: 5.0
+
+    domain_randomization:
+      enabled: true
+      resample_every: 50
+      scales:
+        mass: [0.85, 1.15]
+        k_eta: [0.9, 1.1]
+        k_m: [0.9, 1.1]
+        rotor_speed_min: [1.0, 1.0]
+        rotor_speed_max: [0.95, 1.05]
+
+  simulator:
+    world_rate: 1000
+    # 50 Hz outer loop: halves the episode to 750 steps for the same 15 s,
+    # which shortens credit assignment and rollout cost. The vehicle's rate
+    # loop still runs at world_rate, so this is the outer loop only.
+    control_rate: 100
+    sim_time: 30
+    coord_transform: rotorpy_to_hm3d
+
+    sensor_rates:
+      event_camera_1: 1000
+
+    viz_rates:
+      event_camera_1: 20
+
+    domain_randomization:
+      enabled: true
+      resample_every: 50
+      sensors:
+        event_camera_1:
+          contrast_threshold_neg:
+            range: [0.1, 0.3]
+          contrast_threshold_pos:
+            range: [0.1, 0.3]
+          hfov:
+            choices: [90, 120]
+
+ppo:
+  learning_rate: 0.0003
+  n_steps: 512
+  batch_size: 128
+  n_epochs: 4
+  # ~2.3 s value half-life at 50 Hz. A dodge must be credited against a
+  # crash 1-2 s in the future, which 0.99 (0.7 s at 100 Hz) cannot do.
+  gamma: 0.994
+  gae_lambda: 0.95
+  clip_range: 0.2
+  # Entropy bonus let policy std drift upward over millions of steps until
+  # rollouts filled with exploration-noise crashes; target_kl caps per-update
+  # drift directly.
+  ent_coef: 0.0
+  target_kl: 0.02
+  log_std_init: -1.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  device: auto
+
+vecnormalize:
+  normalize_obs: true
+  normalize_reward: true

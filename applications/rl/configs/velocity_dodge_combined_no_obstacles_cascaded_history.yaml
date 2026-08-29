@@ -1,0 +1,10 @@
+experiment_config: applications/rl/configs/velocity_dodge_combined_no_obstacles_cascaded.yaml
+
+overrides:
+  env:
+    event_representation:
+      history_frames: 4
+  ppo:
+    event_presence_features: true
+    event_high_resolution: true
+

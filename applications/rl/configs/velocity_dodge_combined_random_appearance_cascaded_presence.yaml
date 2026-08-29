@@ -1,0 +1,9 @@
+# v3 perception-capacity experiment. Preserve the v2 controller, encounter
+# distribution, labels, and counterfactual curriculum while giving the event
+# encoder explicit feature-presence statistics and a 2x finer final map.
+experiment_config: applications/rl/configs/velocity_dodge_combined_random_appearance_cascaded.yaml
+
+overrides:
+  ppo:
+    event_presence_features: true
+    event_high_resolution: true

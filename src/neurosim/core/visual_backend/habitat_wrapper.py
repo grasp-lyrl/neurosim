@@ -117,7 +117,12 @@ class HabitatWrapper(VisualBackendProtocol):
         The pathfinding random seed is handled separately in the trajectory generation.
         """
         agent_height = self.settings["agent_height"]
-        agent_radius = self.settings["agent_radius"]
+        # The navigation mesh is a planning abstraction.  It may use a
+        # conservative radius without changing the physical/dynamic-obstacle
+        # collision radius of the vehicle.
+        agent_radius = self.settings.get(
+            "navmesh_agent_radius", self.settings["agent_radius"]
+        )
         agent_max_climb = self.settings["agent_max_climb"]
         agent_max_slope = self.settings["agent_max_slope"]
 
@@ -217,7 +222,15 @@ class HabitatWrapper(VisualBackendProtocol):
         else:
             camera_sensor_spec.resolution = resolution
 
-        position[1] += self.settings["agent_height"]  # Adjust for agent height
+        # No agent-height adjustment: the Habitat agent's position is set
+        # directly from the drone's true body-center state (see
+        # BaseNeurosimRLEnv._on_episode_reset), not a walking-agent "feet"
+        # position, so a sensor's configured local offset (e.g. the small
+        # body-mounted [0, 0, 0.05]) already means what it says. Adding
+        # `agent_height` (default 1.0 m) here mounted every camera -- both
+        # the real event sensor and any RGB pane that mirrors it for video
+        # -- exactly 1.0 m above the drone's true body, confirmed directly
+        # against Habitat's own sensor_states: Y-gap was exactly 1.000 m.
         if not isinstance(position, mn.Vector3):
             camera_sensor_spec.position = mn.Vector3(position)
         else:
@@ -564,7 +577,21 @@ class HabitatWrapper(VisualBackendProtocol):
         agent_pos = np.asarray(agent_state.position, dtype=np.float32)
         agent_quat = np.asarray(agent_state.rotation.components, dtype=np.float32)
 
-        self._dynamic_obstacles.step(sim_time, agent_pos, agent_quat)
+        # The agent's own raw orientation is not what the camera looks
+        # along -- the sensor has an additional local mount rotation (see
+        # its configured `orientation`), and measured directly, the agent's
+        # raw yaw diverges from the camera's actual view direction by 30 to
+        # over 100 degrees depending on the moment. Reading Habitat's own
+        # already-composed sensor rotation sidesteps re-deriving that
+        # composition (rotation order, Euler convention) by hand, which is
+        # exactly the class of mistake that produced the wrong "forward"
+        # reference the first time.
+        camera_quat = None
+        if agent_state.sensor_states:
+            first_sensor = next(iter(agent_state.sensor_states.values()))
+            camera_quat = np.asarray(first_sensor.rotation.components, dtype=np.float32)
+
+        self._dynamic_obstacles.step(sim_time, agent_pos, agent_quat, camera_quat)
 
         if (
             self.settings["enable_physics"]

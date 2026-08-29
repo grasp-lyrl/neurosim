@@ -1,5 +1,41 @@
 import numpy as np
+
+# Registers the `np.quaternion` dtype used in this module's signatures.
+# Without it, importing this module first (rather than after habitat_sim
+# has pulled it in) raises AttributeError at class-definition time.
+import quaternion  # noqa: F401
 from scipy.spatial.transform import Rotation
+
+
+def rotate_vector_by_quat(
+    vector: np.ndarray,
+    quat_xyzw: np.ndarray,
+    inverse: bool = False,
+) -> np.ndarray:
+    """Rotate ``vector`` by a quaternion in ``[x, y, z, w]`` order.
+
+    With ``inverse=True`` this maps a world-frame vector into the body
+    frame, which is the direction RL observations need: an egocentric
+    camera sees obstacles in body coordinates, so a policy fed world-frame
+    velocities would have to learn the yaw-dependent mapping itself.
+
+    Args:
+        vector: (3,) vector to rotate
+        quat_xyzw: (4,) unit quaternion in scipy's [x, y, z, w] order
+        inverse: Apply the conjugate rotation (world -> body)
+
+    Returns:
+        The rotated (3,) vector as float64.
+    """
+    vector = np.asarray(vector, dtype=np.float64).reshape(3)
+    x, y, z, w = np.asarray(quat_xyzw, dtype=np.float64).reshape(4)
+    if inverse:
+        x, y, z = -x, -y, -z
+
+    # v' = v + 2 * q_vec x (q_vec x v + w * v)
+    q_vec = np.array([x, y, z], dtype=np.float64)
+    t = np.cross(q_vec, vector) + w * vector
+    return vector + 2.0 * np.cross(q_vec, t)
 
 
 class CoordinateTransform:

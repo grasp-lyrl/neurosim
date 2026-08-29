@@ -1,0 +1,11 @@
+# Align privileged oracle onset with visual observability. At 2.5--3.0 m/s,
+# a 2 s horizon places the 15 cm projectile roughly 5--6 m away: large enough
+# for the 2x-downsampled event camera while leaving ample dodge time.
+experiment_config: applications/rl/configs/velocity_dodge_combined_random_appearance_gated_history.yaml
+
+overrides:
+  env:
+    task:
+      config:
+        threat_time_horizon_s: 2.0
+

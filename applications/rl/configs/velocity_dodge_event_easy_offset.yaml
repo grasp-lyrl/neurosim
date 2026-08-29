@@ -1,0 +1,40 @@
+# Phase 1 perception handoff.  Keep the validated easy encounter and
+# desired-offset controller, but make the actor infer obstacle motion from
+# events. The actor also receives its proprioceptive/reference state (including
+# body velocity and body-frame reference velocity); exact obstacle geometry is
+# exposed only through the asymmetric critic.
+experiment_config: applications/rl/configs/velocity_dodge_privileged_easy_offset.yaml
+
+overrides:
+  seed: 2718
+  # Event rollouts are substantially larger than state rollouts. At 2x
+  # downsampling eight workers retain enough parallelism without a multi-GB
+  # full-resolution rollout buffer.
+  num_envs: 8
+  envs_on_gpu0: 2
+  total_timesteps: 1000000
+  eval:
+    freq: 16384
+    episodes: 40
+  vecnormalize:
+    # Event tensors are already bounded in [0, 1].  Reward normalization is
+    # retained; the critic can learn the scale of its small geometry vector.
+    normalize_obs: false
+    normalize_reward: true
+
+  env:
+    obs_mode: combined
+    event_representation:
+      # The 0.15 m sphere remains roughly 6--10 pixels across at its spawn
+      # range, while rollout and imitation storage are 4x smaller than 640x480.
+      downsample_factor: 2
+    task:
+      config:
+        privileged_actor: false
+        privileged_critic: true
+
+  ppo:
+    # Preserve the low-exploration handoff used by the successful state
+    # clone. PPO can subsequently adapt this parameter.
+    log_std_init: -2.0
+    device: cuda

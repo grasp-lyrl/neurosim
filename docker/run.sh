@@ -16,8 +16,6 @@ case "${variant}" in
         ;;
 esac
 
-xhost +local:root
-trap 'xhost -local:root' EXIT
 
 docker run --privileged \
         -e NVIDIA_VISIBLE_DEVICES=all \

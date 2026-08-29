@@ -1,0 +1,9 @@
+# Zero-action negative examples for imitation: identical vehicle, scene,
+# trajectory, sensors and controller, with dynamic obstacles absent.
+experiment_config: applications/rl/configs/velocity_dodge_combined_random_appearance_cascaded.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        enabled: false

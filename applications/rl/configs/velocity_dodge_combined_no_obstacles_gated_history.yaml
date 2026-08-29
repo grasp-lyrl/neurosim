@@ -1,0 +1,9 @@
+experiment_config: applications/rl/configs/velocity_dodge_combined_no_obstacles_cascaded_history.yaml
+
+overrides:
+  env:
+    task:
+      config:
+        residual_control:
+          mode: gated_cascaded_velocity
+

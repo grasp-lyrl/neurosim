@@ -1,0 +1,10 @@
+# Temporal event input for motion-direction inference. Four consecutive 20 ms
+# policy-step surfaces expose projectile optical flow while retaining the
+# validated cascaded body-velocity controller and random-appearance curriculum.
+experiment_config: applications/rl/configs/velocity_dodge_combined_random_appearance_cascaded_presence.yaml
+
+overrides:
+  env:
+    event_representation:
+      history_frames: 4
+

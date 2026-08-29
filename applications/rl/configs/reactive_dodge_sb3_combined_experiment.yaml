@@ -70,6 +70,10 @@ env:
         min_waypoint_distance: 2.0
         max_waypoints: 100
         v_avg: 1.0
+        # 180 deg/s cap: MinSnap stretches segment durations to respect this,
+        # and a forward-facing camera cannot usefully track faster slews.
+        yaw_rate_max: 3.141592653589793
+        yaw_lookahead_dist: 2.0
 
       residual_control:
         mode: gated_ctbr_delta
@@ -86,7 +90,14 @@ env:
     event_camera_1:
       type: event
       position: [0.0, 0.0, 0.05]
-      orientation: [0.0, 0.0, 0.0]
+      # Point the camera along body-forward (+x in the dynamics frame).
+      # A Habitat sensor with orientation [0,0,0] looks along agent-local -Z,
+      # which under `rotorpy_to_hm3d` is body +y -- i.e. 90 deg to the left of
+      # travel. This -pi/2 yaw rotation cancels that, so the camera sees where
+      # the drone is going. Must be kept in sync with the dynamics-frame yaw
+      # convention in `calculate_smooth_yaw`; see
+      # tests/test_trajectory_yaw_alignment.py.
+      orientation: [0.0, -1.5707963267948966, 0.0]
       width: 640
       height: 480
       hfov: 120

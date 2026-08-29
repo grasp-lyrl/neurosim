@@ -26,6 +26,15 @@ class ReactiveDodgeContext:
     nominal_counterfactual_collision: bool = False
     correction_energy: float = 0.0
     gate_value: float = 1.0
+    offset_cmd: np.ndarray | None = None
+    delta_velocity: np.ndarray | None = None
+    active_obstacle_count: int = 0
+    obstacle_relative_states: list[dict[str, Any]] | None = None
+    bounds_margin_m: float = np.inf
+    # Policy steps left before truncation. Lets a terminal penalty price
+    # the remaining episode a crash forfeits (see
+    # VelocityDodgeTask.crash_penalty).
+    remaining_steps: float = 0.0
 
 
 def _yaw_from_quat_xyzw(q: np.ndarray) -> float:
@@ -42,9 +51,26 @@ def _angle_wrap(angle: float) -> float:
 class ReactiveDodgeTask(RLTask):
     """Track a nominal trajectory while learning sparse evasive corrections."""
 
+    # residual_control.mode -> default action width
+    RESIDUAL_MODES = {
+        "ctbr_delta": 4,
+        "gated_ctbr_delta": 5,
+        "velocity_delta_integrated": 3,
+        # Same integrator and displacement clip as the ungated mode; the
+        # only difference is that action[0] scales the correction, so a
+        # closed gate drives the delta to zero and the leaky integrator
+        # decays back to the nominal path on its own.
+        "gated_velocity_delta_integrated": 4,
+        "desired_body_offset": 3,
+        "cascaded_velocity": 3,
+        "gated_cascaded_velocity": 4,
+        "velocity_command": 3,
+    }
+
     def __init__(
         self,
         *,
+        threat_gated_actions: bool = False,
         w_survival: float = 0.2,
         w_pos: float = 1.5,
         w_vel: float = 0.5,
@@ -110,10 +136,10 @@ class ReactiveDodgeTask(RLTask):
         self.residual_control_config = dict(residual_control or {})
         rc = dict(self.residual_control_config)
         mode = str(rc.pop("mode", "ctbr_delta"))
-        if mode not in {"ctbr_delta", "gated_ctbr_delta"}:
+        if mode not in self.RESIDUAL_MODES:
+            allowed = ", ".join(sorted(self.RESIDUAL_MODES))
             raise ValueError(
-                "reactive_dodge residual_control.mode must be "
-                "'ctbr_delta' or 'gated_ctbr_delta'"
+                f"reactive_dodge residual_control.mode must be one of: {allowed}"
             )
         self.residual_control_mode = mode
         self.delta_thrust_fraction = float(rc.pop("delta_thrust_fraction", 0.2))
@@ -121,10 +147,91 @@ class ReactiveDodgeTask(RLTask):
             rc.pop("delta_rate_limits", [2.0, 2.0, 1.0]),
             dtype=np.float64,
         ).reshape(3)
+
+        # velocity_delta_integrated: the policy emits a body-frame velocity
+        # correction which is integrated (with leak) into an offset applied
+        # to the SE3 *reference position*. Adding a correction to the
+        # reference velocity alone cannot work: SE3's position-error term
+        # pulls back toward the un-shifted path, capping the achievable
+        # deviation at (Kd/Kp) * dv -- about 0.6 * dv with stock gains,
+        # regardless of how large the correction is made.
+        self.delta_velocity_limits_mps = np.asarray(
+            rc.pop("delta_velocity_limits_mps", [0.6, 0.6, 0.4]),
+            dtype=np.float64,
+        ).reshape(3)
+        # Leak time constant: a held correction settles at tau * dv, and the
+        # offset decays back to the nominal path with this time constant once
+        # the policy stops correcting -- so "return to the trajectory" is
+        # structural rather than something the reward has to enforce.
+        self.offset_tau_s = float(rc.pop("offset_tau_s", 1.5))
+        # First-order low-pass on the action before it is integrated. The
+        # offset itself averages zero-mean action noise away, but its
+        # derivative -- which is what is handed to SE3 as reference velocity
+        # -- reproduces that noise directly, and Kd amplifies it into
+        # acceleration. Measured: unfiltered random actions put 7/8 episodes
+        # out of bounds; filtering at 0.15 s cut that to 3/8 and max tracking
+        # error from 3.18 m to 0.99 m.
+        self.action_filter_tau_s = float(rc.pop("action_filter_tau_s", 0.15))
+        # desired_body_offset directly selects a bounded reference-position
+        # offset. Filtering and rate limiting retain a smooth SE3 reference.
+        self.offset_command_tau_s = float(rc.pop("offset_command_tau_s", 0.20))
+        # Bounds the offset command's acceleration. Zero keeps the original
+        # first-order lag, whose velocity steps to ~amp/tau immediately and
+        # flips the vehicle past 109 deg on a 0.45 m sidestep (4/4 seeds, no
+        # obstacles). See _control_from_desired_body_offset.
+        self.offset_accel_limit_mps2 = float(
+            rc.pop("offset_accel_limit_mps2", 0.0) or 0.0
+        )
+        self.offset_rate_limits_mps = np.asarray(
+            rc.pop("offset_rate_limits_mps", [0.8, 0.8, 0.5]),
+            dtype=np.float64,
+        ).reshape(3)
+        # velocity_command: v_cmd = v_ref + dv + k_return * (x_ref - x).
+        # A soft, bounded pull back toward the path replaces SE3's stiff
+        # position term -- enough to stop unbounded drift after a dodge,
+        # far too weak to rotate the thrust axis toward horizontal.
+        self.return_gain_hz = float(rc.pop("return_gain_hz", 1.0))
+        self.max_return_speed_mps = float(rc.pop("max_return_speed_mps", 1.0))
+        # cascaded_velocity: an explicit position outer loop produces a
+        # restoring velocity, then the policy adds a body-frame avoidance
+        # velocity.  The SE3 position reference is set to the measured
+        # position so its inner position term is exactly zero.
+        self.outer_position_gain_hz = np.asarray(
+            rc.pop("outer_position_gain_hz", [1.5, 1.5, 2.0]),
+            dtype=np.float64,
+        ).reshape(3)
+        self.max_outer_return_velocity_mps = np.asarray(
+            rc.pop("max_outer_return_velocity_mps", [0.8, 0.8, 0.5]),
+            dtype=np.float64,
+        ).reshape(3)
+        self.offset_max_m = np.asarray(
+            rc.pop("offset_max_m", [1.2, 1.2, 0.8]),
+            dtype=np.float64,
+        ).reshape(3)
+        if self.offset_tau_s <= 0.0:
+            raise ValueError("residual_control.offset_tau_s must be positive")
+        if self.offset_command_tau_s <= 0.0:
+            raise ValueError(
+                "residual_control.offset_command_tau_s must be positive"
+            )
+        if np.any(self.offset_rate_limits_mps <= 0.0):
+            raise ValueError(
+                "residual_control.offset_rate_limits_mps must be positive"
+            )
+        if np.any(self.outer_position_gain_hz <= 0.0):
+            raise ValueError(
+                "residual_control.outer_position_gain_hz must be positive"
+            )
+        if np.any(self.max_outer_return_velocity_mps <= 0.0):
+            raise ValueError(
+                "residual_control.max_outer_return_velocity_mps must be positive"
+            )
+
         if rc:
             unknown = ", ".join(sorted(rc))
             raise ValueError(f"Unknown residual_control keys: {unknown}")
-        default_dim = 5 if mode == "gated_ctbr_delta" else 4
+        self.threat_gated_actions = bool(threat_gated_actions)
+        default_dim = self.RESIDUAL_MODES[mode]
         self._action_dim = default_dim if action_dim is None else int(action_dim)
         self._context = ReactiveDodgeContext()
         self._last_termination_reason = ""
@@ -190,7 +297,16 @@ class ReactiveDodgeTask(RLTask):
             ),
             correction_energy=float(context.get("correction_energy", 0.0)),
             gate_value=float(context.get("gate_value", 1.0)),
+            offset_cmd=context.get("offset_cmd"),
+            delta_velocity=context.get("delta_velocity"),
+            active_obstacle_count=int(context.get("active_obstacle_count", 0)),
+            obstacle_relative_states=context.get("obstacle_relative_states"),
+            bounds_margin_m=float(context.get("bounds_margin_m", np.inf)),
+            remaining_steps=float(context.get("remaining_steps", 0.0)),
         )
+
+    def set_previous_action(self, action: np.ndarray | None) -> None:
+        self._context.previous_action = action
 
     def set_termination_reason(self, reason: str) -> None:
         self._last_termination_reason = str(reason)
@@ -250,10 +366,62 @@ class ReactiveDodgeTask(RLTask):
         ``action[1:5]`` to produce the delta.
         """
         action = np.asarray(action, dtype=np.float32).reshape(-1)
+        if self.threat_gated_actions and not self._context.obstacle_threat:
+            # Hard gate: with nothing inbound the policy commands nothing, so
+            # the vehicle returns to the nominal path mechanically rather than
+            # being taxed back onto it by a reward term.
+            #
+            # Reward shaping could not do this. Measured on v24, no-threat
+            # steps ran 1.633 m off the path while the commanded offset was
+            # only 0.280 m -- most of the excursion was SE3 chasing a
+            # reference that sampled actions were shaking, which no penalty on
+            # the *command* can reach. And the drift paid: obstacles are aimed
+            # once at spawn with no re-solve, so wandering ~1.6 m over their
+            # 1-2 s flight made them miss outright (threat fraction 51.5%
+            # deterministic vs 20.8% stochastic). The policy was collecting
+            # survival reward for not being where the throw was aimed.
+            #
+            # This uses the privileged threat flag, so a policy trained this
+            # way is not deployable as-is. It buys a clean separation of "when
+            # to act" from "which way to go": if dodging still fails with the
+            # timing given for free, the failure is direction inference from
+            # events, not detection.
+            # Zeroing the action and falling through keeps the returned shapes
+            # correct for every mode (the delta is 3 or 4 wide depending on
+            # mode, and gated modes derive their gate from action[0], which
+            # clips to 0 here).
+            action = np.zeros_like(action)
         if self.residual_control_mode == "gated_ctbr_delta":
             gate = float(np.clip(action[0], 0.0, 1.0))
             delta = (gate * action[1:5]).astype(np.float32, copy=False)
             return gate, delta
+        if self.residual_control_mode == "gated_cascaded_velocity":
+            gate = float(np.clip(action[0], 0.0, 1.0))
+            delta = (gate * action[1:4]).astype(np.float32, copy=False)
+            return gate, delta
+        if self.residual_control_mode == "gated_velocity_delta_integrated":
+            gate = float(np.clip(action[0], 0.0, 1.0))
+            delta = (gate * action[1:4]).astype(np.float32, copy=False)
+            return gate, delta
+        if self.residual_control_mode == "velocity_delta_integrated":
+            delta = action[:3].astype(np.float32, copy=True)
+            if getattr(self, "lateral_axis_only", False):
+                # Left/right only: body x is forward, body z is up.
+                delta[0] = 0.0
+                delta[2] = 0.0
+            elif getattr(self, "lateral_only", False):
+                # Body x is forward; zeroing it removes braking/accelerating
+                # and leaves only lateral + vertical evasion.
+                delta[0] = 0.0
+            return 1.0, delta
+        if self.residual_control_mode == "desired_body_offset":
+            delta = action[:3].astype(np.float32, copy=True)
+            if getattr(self, "lateral_axis_only", False):
+                delta[0] = 0.0
+                delta[2] = 0.0
+            elif getattr(self, "lateral_only", False):
+                delta[0] = 0.0
+            return 1.0, delta
         return 1.0, action[:4].astype(np.float32, copy=False)
 
     def _update_encounter_metrics(self, pos_norm: float) -> tuple[bool, float]:

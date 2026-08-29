@@ -1,0 +1,24 @@
+# Multi-encounter expert curriculum.  Intercepts are separated by enough time
+# for the cached local plan to depart, clear the projectile, and return before
+# the next threat becomes actionable.  This yields several useful expert
+# decisions per rollout without claiming simultaneous-obstacle competence.
+experiment_config: applications/rl/configs/velocity_dodge_combined_random_appearance_gated_visible.yaml
+
+overrides:
+  env:
+    episode_seconds: 15.0
+    visual_backend:
+      dynamic_obstacles:
+        max_concurrent: 4
+        intercept_schedule:
+          enabled: true
+          first_intercept_s: 3.0
+          interval_s: 4.5
+          interval_jitter_s: 0.25
+          speed_range_mps: [2.5, 3.0]
+          lead_distance_range_m: [5.0, 6.0]
+          azimuth_range_deg: [-30.0, 30.0]
+          elevation_range_deg: [-8.0, 8.0]
+          aim_offset_std_m: 0.10
+          require_line_of_sight: true
+          max_attempts: 24

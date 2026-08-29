@@ -1,0 +1,36 @@
+# Phase 2 curriculum: retain the learned perception/control interface while
+# increasing nominal speed and encounter diversity. Scene expansion and domain
+# randomization remain deferred so failures are attributable to this step.
+experiment_config: applications/rl/configs/velocity_dodge_event_easy_offset.yaml
+
+overrides:
+  seed: 1618
+  total_timesteps: 1000000
+  eval:
+    freq: 16384
+    episodes: 40
+
+  env:
+    episode_seconds: 10.0
+    task:
+      config:
+        # Faster reference flight than the 0.6 m/s learnability phase.
+        trajectory:
+          v_avg: 0.9
+        # Give the event actor enough horizon to respond to faster throws.
+        threat_time_horizon_s: 3.0
+
+    visual_backend:
+      dynamic_obstacles:
+        intercept_schedule:
+          enabled: true
+          first_intercept_s: 2.0
+          interval_s: 2.6
+          interval_jitter_s: 0.4
+          speed_range_mps: [2.5, 4.0]
+          lead_distance_range_m: [5.0, 7.0]
+          azimuth_range_deg: [-45.0, 45.0]
+          elevation_range_deg: [-10.0, 10.0]
+          aim_offset_std_m: 0.20
+          require_line_of_sight: true
+          max_attempts: 16

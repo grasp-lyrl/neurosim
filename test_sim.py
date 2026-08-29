@@ -51,8 +51,6 @@ def main():
     settings_path = Path(args.settings)
     sim = SynchronousSimulator(
         settings_path,
-        stream_only=args.stream_only,
-        profile=args.profile,
     )
     sim.run(display=args.display, log_h5=args.log_h5, log_rrd=args.log_rrd)
 

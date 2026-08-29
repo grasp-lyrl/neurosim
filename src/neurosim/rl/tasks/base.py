@@ -77,6 +77,17 @@ class RLTask(ABC):
     def set_context(self, context: dict[str, Any]) -> None:
         """Receive environment-computed context before reward/observation calls."""
 
+    def set_previous_action(self, action: np.ndarray | None) -> None:
+        """Refresh only the previous-action field of the current context.
+
+        The env populates context *before* computing reward, at which point
+        "previous action" still means the action before the one being
+        applied. The observation returned from that same step is consumed
+        by the *next* decision, for which the previous action is the one
+        just applied -- so it is refreshed here rather than leaving the
+        policy to act on a correction that is a step stale.
+        """
+
     def make_state_observation(
         self,
         *,
@@ -85,3 +96,32 @@ class RLTask(ABC):
     ) -> np.ndarray:
         """Build the vector observation for this task (used at reset)."""
         return np.asarray(base_state, dtype=np.float32)
+
+    @property
+    def privileged_observation_dim(self) -> int:
+        """Width of the critic-only observation; 0 disables the channel.
+
+        Asymmetric actor-critic: the value function may see ground-truth
+        quantities the actor cannot perceive, which cuts value-estimation
+        variance in exactly the states that drive the advantage signal.
+
+        Privilege the critic only with information that is *in principle*
+        recoverable from the actor's observation (e.g. obstacle geometry
+        that is visible in the event stream). Under partial observability
+        the variance-minimising baseline is ``E[V | actor observation]``,
+        not ``V(true state)`` -- feeding the critic genuinely unknowable
+        quantities makes it explain away variance the actor cannot act on,
+        which *raises* advantage variance instead of lowering it.
+        """
+        return 0
+
+    def make_privileged_observation(
+        self,
+        *,
+        state: dict[str, np.ndarray],
+    ) -> np.ndarray:
+        """Build the critic-only observation vector.
+
+        Only called when :attr:`privileged_observation_dim` is positive.
+        """
+        return np.zeros(0, dtype=np.float32)

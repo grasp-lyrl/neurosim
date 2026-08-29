@@ -1,0 +1,8 @@
+experiment_config: applications/rl/configs/velocity_dodge_combined_no_obstacles_gated_history.yaml
+
+overrides:
+  env:
+    task:
+      config:
+        threat_time_horizon_s: 2.0
+

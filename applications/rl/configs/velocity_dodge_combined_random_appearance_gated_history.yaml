@@ -1,0 +1,13 @@
+# Explicit threat gate followed by a body-frame velocity direction. The gate
+# prevents uncertain direction estimates from moving the vehicle in quiet
+# scenes; the existing cascaded velocity controller remains unchanged after
+# gate application.
+experiment_config: applications/rl/configs/velocity_dodge_combined_random_appearance_cascaded_history.yaml
+
+overrides:
+  env:
+    task:
+      config:
+        residual_control:
+          mode: gated_cascaded_velocity
+

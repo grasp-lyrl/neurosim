@@ -160,10 +160,9 @@ def test_check_not_navigable(checker):
 def _inject_fake_obstacle(sim, position, collision_radius=0.5, obj_id=9999):
     """Place a fake obstacle into the manager's active dict."""
     fake_obj = MagicMock()
-    # Active obstacle translations are stored with visual-backend agent-height offset.
-    agent_height = float(sim.visual_backend.settings["agent_height"])
+    # Obstacle translations are true Habitat positions, directly comparable
+    # to the drone's true position -- has_agent_collision applies no offset.
     pos = np.asarray(position, dtype=np.float32).copy()
-    pos[1] += agent_height
     fake_obj.translation = pos
     sim.visual_backend._dynamic_obstacles._active[obj_id] = ActiveObstacle(
         object_id=obj_id,
@@ -256,9 +255,11 @@ def test_check_obstacle_collision_with_spawned_obstacle():
 
         item = next(iter(active.values()))
         obstacle_pos = np.asarray(item.obj.translation, dtype=np.float32).copy()
-        obstacle_pos[1] -= float(cfg["visual_backend"]["agent_height"])
 
-        # Query in floor-referenced Habitat coordinates — must collide.
+        # Query at the obstacle's true rendered position — must collide.
+        # (has_agent_collision compares true positions directly; it does
+        # not apply any agent-height offset, since the Habitat "agent" node
+        # is set to the drone's true body center, not a feet position.)
         assert checker.has_obstacle_collision(obstacle_pos) is True
 
         # Query far away — no collision.

@@ -152,6 +152,9 @@ class BaseNeurosimRLEnv(gym.Env):
         self.steps_per_action = max(
             int(self.sim.config.world_rate / self.sim.config.control_rate), 1
         )
+        # World steps per controller update stays tied to control_rate; the
+        # policy is decimated on top of that.
+        self.policy_decimation = max(int(env_config.get("policy_decimation", 1)), 1)
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -261,12 +264,23 @@ class BaseNeurosimRLEnv(gym.Env):
         self.action_space = self._build_action_space()
         self.observation_space = self._build_observation_space()
 
+    @property
+    def privileged_dim(self) -> int:
+        """Width of the critic-only observation channel (0 when unused)."""
+        return int(getattr(self._task, "privileged_observation_dim", 0) or 0)
+
     def _build_observation_space(self) -> spaces.Space:
-        """Build observation_space from obs_mode and the task's state dim."""
+        """Build observation_space from obs_mode and the task's state dim.
+
+        When the task declares a privileged (critic-only) channel the space
+        becomes a Dict regardless of ``obs_mode``, with the extra vector
+        under ``"privileged"``. Splitting actor/critic access is the
+        policy's job -- see ``AsymmetricActorCriticPolicy``.
+        """
         event_space = spaces.Box(
             low=0.0,
             high=1.0,
-            shape=(2, self.event_height, self.event_width),
+            shape=(self._event_manager.output_channels, self.event_height, self.event_width),
             dtype=np.float32,
         )
         state_space = spaces.Box(
@@ -275,11 +289,26 @@ class BaseNeurosimRLEnv(gym.Env):
             shape=(self._task.state_observation_dim,),
             dtype=np.float32,
         )
-        if self.obs_mode == "events":
+
+        spaces_by_key: dict[str, spaces.Space] = {}
+        if self.obs_mode in {"events", "combined"}:
+            spaces_by_key["events"] = event_space
+        if self.obs_mode in {"state", "combined"}:
+            spaces_by_key["state"] = state_space
+
+        if self.privileged_dim > 0:
+            spaces_by_key["privileged"] = spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(self.privileged_dim,),
+                dtype=np.float32,
+            )
+        elif self.obs_mode == "events":
             return event_space
-        if self.obs_mode == "state":
+        elif self.obs_mode == "state":
             return state_space
-        return spaces.Dict({"events": event_space, "state": state_space})
+
+        return spaces.Dict(spaces_by_key)
 
     # ------------------------------------------------------------------
     # Subclass hooks: THESE ARE OVERRIDDEN BY TASK-SPECIFIC ENVS
@@ -349,6 +378,15 @@ class BaseNeurosimRLEnv(gym.Env):
         across substeps or read from another component).
         """
 
+    def _effective_previous_action(self) -> np.ndarray | None:
+        """The correction actually in effect, as the observation should see it.
+
+        Default: the raw action. Override when the env transforms the action
+        through state (e.g. a filter) so the policy observes what is really
+        being applied rather than what it nominally requested.
+        """
+        return self._prev_action
+
     def _step_info_extras(self, reward_terms: dict[str, float]) -> dict[str, Any]:
         """Extra fields to add to the step / reset info dict. Default: none.
 
@@ -395,26 +433,48 @@ class BaseNeurosimRLEnv(gym.Env):
         event_rep: np.ndarray | None,
         state: dict[str, np.ndarray],
     ) -> np.ndarray | dict[str, np.ndarray]:
-        if self.obs_mode == "events":
-            if event_rep is None:
-                raise ValueError("event representation required for obs_mode='events'")
-            return np.asarray(event_rep, dtype=np.float32)
+        needs_events = self.obs_mode in {"events", "combined"}
+        if needs_events and event_rep is None:
+            raise ValueError(
+                f"event representation required for obs_mode={self.obs_mode!r}"
+            )
 
-        state_vec = np.asarray(
+        privileged_dim = self.privileged_dim
+        if privileged_dim == 0:
+            if self.obs_mode == "events":
+                return np.asarray(event_rep, dtype=np.float32)
+            state_vec = self._task_state_vector(state)
+            if self.obs_mode == "state":
+                return state_vec
+            return {
+                "events": np.asarray(event_rep, dtype=np.float32),
+                "state": state_vec,
+            }
+
+        observation: dict[str, np.ndarray] = {}
+        if needs_events:
+            observation["events"] = np.asarray(event_rep, dtype=np.float32)
+        if self.obs_mode in {"state", "combined"}:
+            observation["state"] = self._task_state_vector(state)
+
+        privileged = np.asarray(
+            self._task.make_privileged_observation(state=state), dtype=np.float32
+        ).reshape(-1)
+        if privileged.shape[0] != privileged_dim:
+            raise ValueError(
+                "privileged observation width mismatch: task declares "
+                f"{privileged_dim}, produced {privileged.shape[0]}"
+            )
+        observation["privileged"] = privileged
+        return observation
+
+    def _task_state_vector(self, state: dict[str, np.ndarray]) -> np.ndarray:
+        return np.asarray(
             self._task.make_state_observation(
                 state=state, base_state=self._state_vector(state)
             ),
             dtype=np.float32,
         )
-        if self.obs_mode == "state":
-            return state_vec
-
-        if event_rep is None:
-            raise ValueError("event representation required for obs_mode='combined'")
-        return {
-            "events": np.asarray(event_rep, dtype=np.float32),
-            "state": state_vec,
-        }
 
     # ------------------------------------------------------------------
     # Reward / termination
@@ -432,7 +492,11 @@ class BaseNeurosimRLEnv(gym.Env):
             action=np.asarray(action, dtype=np.float32),
             prev_action=self._prev_action,
             sim_time=float(self.sim.time),
-            dt=float(self.steps_per_action / self.sim.config.world_rate),
+            dt=float(
+                self.policy_decimation
+                * self.steps_per_action
+                / self.sim.config.world_rate
+            ),
             event_manager=self._event_manager,
             obs_mode=self.obs_mode,
         )
@@ -505,7 +569,17 @@ class BaseNeurosimRLEnv(gym.Env):
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
-        rng = np.random.default_rng(seed)
+        # Independent streams. Randomization is skipped on most episodes
+        # (episode_count % resample_every), and when it is skipped it draws
+        # nothing -- so a single shared generator hands the *next* consumer a
+        # different value depending on where the episode falls in the
+        # randomization cycle. Measured: reset(seed=9001) put the drone 6.02 m
+        # apart on two calls in one process, so seed-matched A/B arms were
+        # never actually matched.
+        streams = np.random.SeedSequence(seed).spawn(3)
+        rng = np.random.Generator(np.random.PCG64(streams[0]))
+        start_rng = np.random.Generator(np.random.PCG64(streams[1]))
+        episode_rng = np.random.Generator(np.random.PCG64(streams[2]))
 
         if self._should_domain_randomize_now():
             if self._worker_log is not None:
@@ -530,14 +604,28 @@ class BaseNeurosimRLEnv(gym.Env):
             self._rr_needs_episode_stream_switch = True
 
         # Sample a valid navigable starting position in Habitat space.
-        hab_start = self.sim.safety.sample_habitat_start()
+        # The seed is derived from this episode's rng so that resetting with
+        # the same seed reproduces the same episode; with seed=None it stays
+        # random, preserving training diversity.
+        hab_start = self.sim.safety.sample_habitat_start(
+            seed=int(start_rng.integers(0, 2**31 - 1))
+        )
 
         self.sim.time = 0.0
         self.sim.simsteps = 0
 
+        # Obstacle timers are absolute sim_time values, so they must be
+        # cleared whenever the episode clock restarts (see
+        # DynamicObstacleManager.reset_episode).
+        dynamic_obstacles = getattr(self.sim.visual_backend, "_dynamic_obstacles", None)
+        if dynamic_obstacles is not None:
+            dynamic_obstacles.reset_episode(
+                seed=int(start_rng.integers(0, 2**31 - 1))
+            )
+
         # Subclass hook fills in self.sim.dynamics.state and any per-episode
         # components (e.g. nominal trajectory).
-        self._on_episode_reset(rng=rng, hab_start=hab_start)
+        self._on_episode_reset(rng=episode_rng, hab_start=hab_start)
 
         position, quaternion = self.sim.coord_trans.transform(
             self.sim.dynamics.state["x"], self.sim.dynamics.state["q"]
@@ -560,17 +648,27 @@ class BaseNeurosimRLEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         action = np.asarray(action, dtype=np.float32)
-        control = self._control_from_action(action)
 
         self._event_manager.begin_step()
         events_accum = self.obs_mode != "state"
 
-        for _ in range(self.steps_per_action):
-            self.sim.step(control)
-            measurements = self.sim._render_sensors()
-            if events_accum:
-                self._event_manager.accumulate(measurements.get(self.event_sensor_uuid))
-            self._maybe_visualize(measurements)
+        # The policy action is held across `policy_decimation` controller
+        # updates: the tracking controller keeps running at control_rate
+        # while the network is queried at control_rate / decimation.
+        # Slowing the controller itself instead costs attitude-loop phase
+        # margin -- SE3's attitude gains are stiff (kp_att 544), and at a
+        # halved rate the vehicle intermittently tips past 90 degrees, at
+        # which point thrust projects to ~zero and it falls out of the sky.
+        for _ in range(self.policy_decimation):
+            control = self._control_from_action(action)
+            for _ in range(self.steps_per_action):
+                self.sim.step(control)
+                measurements = self.sim._render_sensors()
+                if events_accum:
+                    self._event_manager.accumulate(
+                        measurements.get(self.event_sensor_uuid)
+                    )
+                self._maybe_visualize(measurements)
 
         event_rep = (
             None if self.obs_mode == "state" else self._event_manager.observation()
@@ -586,6 +684,9 @@ class BaseNeurosimRLEnv(gym.Env):
         reward = float(outcome.reward)
         reward_terms = outcome.terms
         self._prev_action = action.copy()
+        # The observation built below feeds the *next* decision, so the
+        # action just applied is what "previous action" must mean there.
+        self._task.set_previous_action(self._effective_previous_action())
 
         terminated, term_reason = self._check_terminated(state)
         truncated = self.sim.time >= self.episode_seconds

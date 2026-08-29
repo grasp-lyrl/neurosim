@@ -1,0 +1,30 @@
+# Perception-identification phase. The first obstacle appears well after reset
+# at a randomized time, preventing a policy from solving the task by initiating
+# a canned maneuver at episode start. Spawn-time retargeting still makes any
+# pre-existing offset part of the projectile intercept solution.
+experiment_config: applications/rl/configs/velocity_dodge_combined_easy_cascaded.yaml
+
+overrides:
+  seed: 1414
+  total_timesteps: 1000000
+
+  env:
+    task:
+      config:
+        threat_time_horizon_s: 5.0
+    visual_backend:
+      dynamic_obstacles:
+        intercept_schedule:
+          enabled: true
+          # With 5--6 m lead and 2.5--3.0 m/s speed, launch occurs roughly
+          # 1.4--4.2 seconds after reset rather than at t=0.
+          first_intercept_s: 5.2
+          interval_s: 20.0
+          interval_jitter_s: 1.0
+          speed_range_mps: [2.5, 3.0]
+          lead_distance_range_m: [5.0, 6.0]
+          azimuth_range_deg: [-25.0, 25.0]
+          elevation_range_deg: [-6.0, 6.0]
+          aim_offset_std_m: 0.10
+          require_line_of_sight: true
+          max_attempts: 20

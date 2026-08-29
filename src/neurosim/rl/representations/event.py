@@ -7,6 +7,7 @@ block one-for-one, so the env can splat the block straight in:
       model: time_surface
       log_compression: 1.0
       downsample_factor: 1
+      history_frames: 1
       ts_decay_ms: 10.0
       sensor_uuid: null              # consumed by the env, not the manager
 """
@@ -34,6 +35,7 @@ class EventRepresentationManager:
         raw_height: int,
         raw_width: int,
         downsample_factor: int = 1,
+        history_frames: int = 1,
         log_compression: float = 1.0,
         ts_decay_ms: float = 10.0,
         event_device: str | torch.device,
@@ -46,6 +48,7 @@ class EventRepresentationManager:
         self.raw_height = int(raw_height)
         self.raw_width = int(raw_width)
         self.downsample_factor = max(int(downsample_factor), 1)
+        self.history_frames = max(int(history_frames), 1)
         self.log_compression = float(log_compression)
         self.ts_decay_ms = float(ts_decay_ms)
         self._ts_tau_seconds = self.ts_decay_ms * 1e-3
@@ -59,13 +62,20 @@ class EventRepresentationManager:
         )
         self.step_event_count = 0
         self._last_update_time_s: float | None = None
+        self._history: list[torch.Tensor] = []
+        self._generation = 0
+        self._observation_generation = -1
 
     def reset_episode(self) -> None:
         self._raw.zero_()
         self.step_event_count = 0
         self._last_update_time_s = None
+        self._history.clear()
+        self._generation = 0
+        self._observation_generation = -1
 
     def begin_step(self) -> None:
+        self._generation += 1
         self.step_event_count = 0
         if self.model != "time_surface":
             self._raw.zero_()
@@ -140,7 +150,22 @@ class EventRepresentationManager:
         if self.model == "histogram":
             buf = self._normalize_torch(self._raw)
         obs = self._downsample_torch(buf)
-        return obs.detach().cpu().numpy().astype(np.float32, copy=False)
+        # A short sequence is essential when an action depends on image
+        # velocity: one event surface localises motion but does not reliably
+        # encode its direction amid ego-motion. Cache by policy step so a
+        # second observation() call cannot accidentally advance history.
+        if self._observation_generation != self._generation:
+            self._history.append(obs.detach().clone())
+            self._history = self._history[-self.history_frames :]
+            self._observation_generation = self._generation
+        padding = self.history_frames - len(self._history)
+        frames = [torch.zeros_like(obs)] * padding + self._history
+        stacked = torch.cat(frames, dim=0)
+        return stacked.cpu().numpy().astype(np.float32, copy=False)
+
+    @property
+    def output_channels(self) -> int:
+        return 2 * self.history_frames
 
     @property
     def downsampled_height(self) -> int:
@@ -152,7 +177,8 @@ class EventRepresentationManager:
 
     def to_rgb(self, event_rep: np.ndarray) -> np.ndarray:
         """Pack event polarity channels into an RGB uint8 image (R=neg, B=pos, G=0)."""
-        neg, pos = event_rep[0], event_rep[1]
+        # History is ordered oldest-to-newest; visualise the current surface.
+        neg, pos = event_rep[-2], event_rep[-1]
         rgb = np.zeros((neg.shape[0], neg.shape[1], 3), dtype=np.uint8)
         rgb[..., 0] = np.rint(255.0 * neg).astype(np.uint8)
         rgb[..., 2] = np.rint(255.0 * pos).astype(np.uint8)

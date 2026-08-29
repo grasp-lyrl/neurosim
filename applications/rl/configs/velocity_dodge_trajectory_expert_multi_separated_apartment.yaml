@@ -1,0 +1,11 @@
+# Held-out scene counterpart to the separated multi-encounter curriculum.
+# Keep encounter timing and controller settings identical; only replace the
+# static scene so policy transfer is measured without silently changing the
+# task distribution.
+experiment_config: applications/rl/configs/velocity_dodge_trajectory_expert_multi_separated.yaml
+
+overrides:
+  env:
+    scenes:
+      - name: apartment_1
+        path: data/scene_datasets/habitat-test-scenes/apartment_1.glb

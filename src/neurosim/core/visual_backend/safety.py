@@ -57,6 +57,28 @@ class HabitatSafetyChecker:
             and self._lo_z <= hz <= self._hi_z
         )
 
+    def bounds_margin(self, habitat_pos: np.ndarray) -> float:
+        """Distance from ``habitat_pos`` to the nearest scene-bounds face.
+
+        Negative once the point is actually outside a face. Used for
+        potential-based shaping toward staying inside bounds, symmetric to
+        how obstacle clearance is shaped toward staying away from spheres --
+        without this, the only feedback about the scene boundary is a
+        sparse terminal penalty on ``out_of_bounds``, which large evasive
+        corrections can reach before that penalty is ever felt.
+        """
+        hx, hy, hz = habitat_pos
+        return float(
+            min(
+                hx - self._lo_x,
+                self._hi_x - hx,
+                hy - self._lo_y,
+                self._hi_y - hy,
+                hz - self._lo_z,
+                self._hi_z - hz,
+            )
+        )
+
     def is_navigable(self, habitat_pos: np.ndarray) -> bool:
         """Check direct navigability at the provided Habitat-space point."""
         if not self._enable_navigable:
@@ -81,8 +103,19 @@ class HabitatSafetyChecker:
             return False, "obstacle_collision"
         return True, ""
 
-    def sample_habitat_start(self, max_tries: int = 200) -> np.ndarray:
-        """Sample a random valid starting position in Habitat space."""
+    def sample_habitat_start(
+        self, max_tries: int = 200, seed: int | None = None
+    ) -> np.ndarray:
+        """Sample a random valid starting position in Habitat space.
+
+        ``seed`` reseeds the pathfinder's internal RNG. Without it the RNG
+        simply advances on every call, so two episodes reset with the same
+        seed start from different points and follow different trajectories
+        -- which silently breaks any fixed-seed evaluation set and makes
+        A/B comparisons between checkpoints incomparable.
+        """
+        if seed is not None:
+            self._pathfinder.seed(int(seed) % (2**31 - 1))
         for _ in range(max_tries):
             nav_pt = np.array(
                 self._pathfinder.get_random_navigable_point(), dtype=np.float64

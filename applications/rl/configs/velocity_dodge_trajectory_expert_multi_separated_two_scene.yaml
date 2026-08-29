@@ -1,0 +1,15 @@
+# Broader training configuration used only after both individual scenes pass
+# expert and learned-policy smoke tests. Scene resampling is inherited from
+# the base experiment while the separated encounter curriculum stays fixed.
+experiment_config: applications/rl/configs/velocity_dodge_trajectory_expert_multi_separated.yaml
+
+overrides:
+  env:
+    scenes:
+      - name: apartment_1
+        path: data/scene_datasets/habitat-test-scenes/apartment_1.glb
+      - name: skokloster
+        path: data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
+    simulator:
+      domain_randomization:
+        enabled: true

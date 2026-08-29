@@ -1,0 +1,19 @@
+# Cascaded-controller learnability phase. The actor commands a transient
+# body-frame avoidance velocity. An explicit outer position loop produces the
+# return-to-path velocity; SE3 runs as the inner velocity/attitude controller
+# with its own position error zeroed.
+experiment_config: applications/rl/configs/velocity_dodge_event_easy_offset.yaml
+
+overrides:
+  seed: 5772
+  total_timesteps: 1000000
+
+  env:
+    task:
+      config:
+        residual_control:
+          mode: cascaded_velocity
+          delta_velocity_limits_mps: [0.70, 0.70, 0.30]
+          action_filter_tau_s: 0.14
+          outer_position_gain_hz: [1.5, 1.5, 2.5]
+          max_outer_return_velocity_mps: [0.8, 0.8, 0.5]
