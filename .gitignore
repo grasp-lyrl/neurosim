@@ -33,3 +33,9 @@ deps/*
 *.prof
 *.pdf
 hover_sb3_combined_experiment/
+
+# Habitat/EGL segfaults on teardown AFTER results are printed, dropping a
+# ~6.5 GB core into the repo root. The results are unaffected; the file is
+# not. Prefix long runs with `ulimit -c 0` to stop them being written at all.
+core
+core.*

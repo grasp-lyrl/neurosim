@@ -11,6 +11,12 @@ be defective (commit 5225691). Read this section only.
 
 ## 0. READ FIRST: `outputs/` was deleted
 
+> **RESOLVED 2026-08-29 (next session).** Nothing deleted it. The project was
+> moved to a different host, and `outputs/` -- along with `data/` -- is
+> gitignored, so neither travelled. The disk figures below are the old host's.
+> The practical consequence is unchanged: these artifacts must be regenerated.
+> See section 1 for the current host.
+
 At the end of this session `/home/odexter/neurosim/outputs/` no longer exists.
 Disk went 790G used / 79G avail -> 669G used / 200G avail, i.e. ~121 GB freed.
 I did not delete it and cannot say what did.
@@ -35,20 +41,48 @@ logs. That was not luck; keep doing it.
 are 82 uncommitted paths including all of this session's work. One more
 cleanup event and the configs go too.
 
+> Done in commit 5d5107c. The tree is clean; there is nothing left to rescue.
+
 ---
 
 ## 1. Environment setup (read before running anything)
 
-Work happens inside a Docker container. The host has no usable Python
-(`import numpy` fails on the host interpreter).
+> **The project moved hosts on 2026-08-29.** The machine described in the rest
+> of this file (2x RTX A5000, workspace on `/home`) is gone. Current host:
 
 ```
-container:  neurosim-noros   (id 4e35ac12bb62 at time of writing, image neurosim:noros)
+container:  neurosim-noros   (image neurosim:noros)
 python:     /opt/conda/envs/neurosim/bin/python
-workspace:  /home/odexter/neurosim  bind-mounted at the SAME path inside
+workspace:  /pool/odexter/neurosim   (ZFS, 19 TB free)
+            bind-mounted INTO the container at /home/odexter/neurosim
+GPUs:       8x Tesla V100-SXM2-32GB  (sm_70 -- NOT the A5000's sm_86)
+host user:  odexter = uid 2000023    (uid 1000 here is a different user, fclad)
 ```
 
-### The four traps that will cost you an hour each
+`/home/odexter/neurosim` still exists **on the host** as a 143 MB stale copy of
+the tree. It is not what the container sees. Do not edit it; the live tree is
+`/pool/odexter/neurosim`. This dual meaning of `/home/odexter/neurosim` --
+stale copy on the host, live workspace inside the container -- is the single
+most confusing thing about this setup.
+
+This also resolves the `outputs/` mystery in section 0: nothing deleted it, the
+work simply moved to a host that never had it. `data/` was lost the same way
+and had to be re-fetched.
+
+### Restoring the environment: run the script
+
+Everything below is now automated. After any container recreation:
+
+```bash
+docker exec -e HOST_UID=2000023 -e HOST_GID=2000023 \
+  -w /home/odexter/neurosim neurosim-noros bash docker/setup_container_env.sh
+```
+
+It installs torchvision/SB3/wandb, rebuilds both CUDA extensions **for the
+locally detected GPU arch**, re-fetches the Habitat scenes, and verifies the
+result. Read the traps below anyway -- they explain why each step is there.
+
+### The traps that will cost you an hour each
 
 **1. `PYTHONPATH` is mandatory.** Without it the container resolves `neurosim`
 to a stale copy at `/opt/neurosim` and you get
@@ -59,13 +93,13 @@ docker exec -w /home/odexter/neurosim <cid> bash -c \
   "PYTHONPATH=/home/odexter/neurosim/src /opt/conda/envs/neurosim/bin/python -u <script>"
 ```
 
-**2. Container deps are ephemeral.** `pip install`s and the CUDA event-sim
-build are NOT in the image and are lost whenever the container is recreated.
-After any recreation, reinstall. Verified working set:
+**2. Container deps are ephemeral.** `pip install`s and the CUDA extension
+builds are NOT in the image and are lost whenever the container is recreated.
+Verified working set:
 
 ```
 python 3.10.14   torch 2.9.1+cu128   torchvision 0.24.1+cu128
-stable_baselines3 2.9.0   sb3_contrib 2.9.0   h5py 3.14.0
+stable_baselines3 2.9.0   sb3_contrib 2.9.0   h5py 3.14.0   wandb
 ```
 
 `torchvision` **must** match torch. 0.28.0 against torch 2.9.1 fails at import
@@ -73,10 +107,42 @@ with `RuntimeError: operator torchvision::nms does not exist`. Pin 0.24.1.
 EfficientNet-B0 comes from torchvision, so nothing in `sb3_features.py` with
 `event_backbone: efficientnet_b0` runs without it.
 
+`train_sb3.py` imports `wandb` unconditionally at module scope, so **every**
+script that reaches it -- including `return_baseline.py` and the oracle
+evaluator, via `load_experiment_config` -- fails without wandb installed, even
+with `--no-wandb`.
+
+**2b. The image's `neurosim_cu_esim` is too old, and the failure does not say
+so.** The image ships v0.1, whose `EventSimulator` has no `mode` kwarg and no
+`DVSVoltmeterSimulator`. Every config with `backend: cuda` -- which is all of
+them -- dies at env construction with:
+
+```
+TypeError: EventSimulator.__init__() got an unexpected keyword argument 'mode'
+```
+
+That reads like a config error. It is a stale dependency. Reinstall from source
+(`https://github.com/grasp-lyrl/neurosim_cu_esim`, public); the setup script
+clones it to `deps/neurosim_cu_esim` and builds it. **Build for the local GPU
+arch** -- pass `TORCH_CUDA_ARCH_LIST`; a wheel built for the old sm_86 host is
+wrong on these V100s.
+
+Note `src/neurosim/core/event_sim/cu_rpg_vid2e_esim` is a *different*, unused
+backend (`esim_torch`/`esim_cuda`). Building it does not satisfy `backend: cuda`.
+
+**2c. `data/` is gitignored and does not travel.** The Habitat scene mesh
+`data/scene_datasets/habitat-test-scenes/skokloster-castle.glb` is a required
+input that no commit contains. Re-fetch with
+`python -m habitat_sim.utils.datasets_download --uids habitat_test_scenes`.
+It writes an **absolute** symlink pointing at the in-container path, which is
+broken when read from the host; replace it with a relative one.
+
 **3. Files written by the container are root-owned.** `rm -rf outputs/...`
 from the host fails with `Permission denied`. Delete from inside instead:
-`docker exec -w /home/odexter/neurosim <cid> rm -rf <path>`. Same for git:
-`docker exec <cid> chown -R 1000:1000 .git` if git starts refusing to write.
+`docker exec -w /home/odexter/neurosim <cid> rm -rf <path>`. To hand files back,
+`chown -R 2000023:2000023` -- **not** the `1000:1000` this file used to say.
+uid 1000 was odexter on the old host; here it is an unrelated user, and
+chowning to it silently gives your files away.
 
 **4. Long runs need `docker exec -d` + redirect.** Foreground execs die with
 the shell. Pattern used throughout:
@@ -89,8 +155,13 @@ docker exec -d -w /home/odexter/neurosim <cid> bash -c \
    > outputs/rl/train_<name>.log 2>&1"
 ```
 
-GPUs: 2x RTX A5000, 24.5 GB each. Config puts the learner on GPU 0
-(`device: cuda:0`) and env render workers on GPU 1 (`envs_on_gpu0: 0`).
+GPUs: 8x Tesla V100-SXM2-32GB. Configs put the learner on GPU 0
+(`device: cuda:0`) and env render workers on GPU 1 (`envs_on_gpu0: 0`), which
+still works but now leaves six idle GPUs -- there is far more headroom for
+parallel gate/baseline runs than any config in this repo assumes. V100s are
+sm_70: no bf16, and slower per-GPU than the A5000s for the CNN work, so
+**timings quoted in this file (e.g. "~4 h" for the encoder) are from the old
+host and have not been re-measured here.**
 
 ---
 
