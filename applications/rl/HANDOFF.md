@@ -441,10 +441,27 @@ why it cannot work here.
 - **The oracle is weak and is the ceiling.** It collides in 13/40 episodes
   (32.5%) and uses only ~23% of now-available authority
   (`peak_cross_track` 0.295 m median vs 1.275 m reachable). Its planner targets
-  minimum-sufficient dodges and has NOT been rescaled since the rate limits
-  were raised. **Cloning a weak expert caps the student at a weak policy** —
-  fixing the expert's planner is probably higher-value than any student-side
-  tuning, and should likely happen before step 2.
+  minimum-sufficient dodges. **Cloning a weak expert caps the student at a weak
+  policy** — fixing the expert's planner is probably higher-value than any
+  student-side tuning, and should likely happen before step 2.
+
+  > **Correction (next session).** The claim that the planner "has NOT been
+  > rescaled since the rate limits were raised" is wrong, and it is the same
+  > read-the-comment-not-the-code mistake this file warns about at the end.
+  > `TrajectoryExpertConfig` *was* rescaled: `max_horizontal_speed_mps: 1.5`
+  > and `max_vertical_speed_mps: 1.0`, with a comment saying they are matched
+  > to `offset_rate_limits_mps`. What was left behind is the *magnitude* menu,
+  > `candidate_offsets_m = (0.35, 0.50, 0.65, 0.80, 1.00)`, which still caps at
+  > 1.00 m against 1.275 m now reachable — and since candidate cost goes as
+  > `magnitude**2`, the planner takes the smallest sufficient dodge regardless.
+  > Whether that cap actually binds is a measurement, not an argument:
+  > `oracle_magnitude_probe.py` reports the smallest displacement that clears
+  > each encounter, over a full sphere of directions.
+
+  > Also note the encoder plan inherits this. `pretrain_encoder_oracle_vec.py`
+  > drives data collection with `oracle_action`, so the ~4 h encoder job is
+  > sampled from the expert too — not just the BC demos in step 2. Fixing the
+  > expert after regenerating the encoder means regenerating it again.
 - **Apply the right feasibility framework.** My kinematic sketch was ad-hoc;
   [Falanga RA-L 2019](https://rpg.ifi.uzh.ch/docs/RAL19_Falanga.pdf) derives
   `tau_max = (R - r_obs - d_safe) / v_max` for tolerable perception latency.
