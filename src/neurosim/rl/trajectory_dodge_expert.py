@@ -107,6 +107,26 @@ class TrajectoryExpertConfig:
     # that is both static-clear and reachable within the 2 s visual horizon.
     # 0.15 m is the largest tested buffer that retained those solutions.
     safety_margin_m: float = 0.15
+    # MEASURED 2026-08-29 (oracle_magnitude_probe.py, v20, 20 seeds, 16
+    # threatening encounters, 64 directions x magnitudes to 2.00 m):
+    #
+    #   smallest displacement that clears by >= 0.10 m
+    #     median 0.28 m   p75 0.30 m   p90 0.30 m   MAX 0.35 m
+    #   encounters needing more than 1.00 m:  0 (0%)
+    #   encounters unclearable within 2.00 m: 0 (0%)
+    #
+    # So the whole menu below is oversized: the largest displacement any
+    # encounter has ever required is 0.35 m, which is the SMALLEST entry.
+    # Do not widen this menu to "give the expert more authority" -- that was
+    # proposed on the strength of `peak_cross_track` 0.295 m sitting at 23%
+    # of the 1.275 m reachable, but 0.28 m is all the geometry asks for, so
+    # 0.295 m is the expert correctly taking a minimum-sufficient dodge, not
+    # under-committing. The expert's collisions are not magnitude-limited.
+    #
+    # Note escape_set_probe.py reports 2/16 (12%) "impossible" encounters.
+    # That is an artifact of its single cross-track axis: sweeping the full
+    # sphere clears all 16, so those two need an out-of-plane (vertical)
+    # component rather than being unwinnable.
     candidate_offsets_m: tuple[float, ...] = (0.35, 0.50, 0.65, 0.80, 1.00)
     minimum_rise_time_s: float = 0.55
     return_time_s: float = 1.0
