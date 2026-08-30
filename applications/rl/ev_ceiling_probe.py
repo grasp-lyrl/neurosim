@@ -57,11 +57,24 @@ def collect(model, vec_env, n_episodes, gamma, num_envs):
             values = model.policy.predict_values(obs_t).cpu().numpy().reshape(-1)
         action, _ = model.predict(obs, deterministic=False)
         raw = vec_env.get_original_obs()
+        # Dict observations carry "state" and a critic-only "privileged"
+        # channel. A privileged-ACTOR config has neither: obs_mode: state
+        # with privileged_critic: false gives a plain Box whose state vector
+        # ALREADY contains the obstacle features. Handle both, so this probe
+        # runs against the privileged teacher as well as the event configs.
+        if isinstance(raw, dict):
+            states_i, privs_i = raw["state"], raw.get("privileged")
+        else:
+            states_i, privs_i = raw, None
         for i in range(num_envs):
             open_traces[i].append(
                 {
-                    "state": np.asarray(raw["state"][i], dtype=np.float64),
-                    "priv": np.asarray(raw["privileged"][i], dtype=np.float64),
+                    "state": np.asarray(states_i[i], dtype=np.float64),
+                    "priv": (
+                        np.zeros(0, dtype=np.float64)
+                        if privs_i is None
+                        else np.asarray(privs_i[i], dtype=np.float64)
+                    ),
                     "value": float(values[i]),
                 }
             )
@@ -125,31 +138,90 @@ def ridge_ev(Xtr, ytr, Xte, yte, lam=1.0):
     return ev(yte, B @ w)
 
 
-def mlp_ev(Xtr, ytr, Xte, yte, epochs=400, hidden=256, seed=0):
-    """A deliberately over-powered fit -- we want the CEILING, not a
-    well-regularised model. If this cannot explain the return, nothing can."""
+def mlp_ev(Xtr, ytr, Xte, yte, groups_tr=None, epochs=400, hidden=256, seed=0):
+    """Nonlinear ceiling estimate, regularised and early-stopped.
+
+    The original version here was "deliberately over-powered -- we want the
+    CEILING, not a well-regularised model", trained 400 epochs with no weight
+    decay, no validation split and no early stopping. On ~14k rows with a
+    256-wide net that does not measure a ceiling, it measures overfitting:
+    it returned EV -1.26 and -0.67, i.e. WORSE THAN A CONSTANT, which is
+    impossible for a genuine ceiling (a constant is always achievable). Those
+    numbers were correctly flagged as unusable, leaving only the ridge rows.
+
+    An unregularised fit cannot bound what is explainable, because the
+    quantity it maximises is training fit, and test EV falls as it succeeds.
+    So: weight decay, and early stopping on a validation split held out BY
+    EPISODE. Grouping matters -- consecutive steps in one episode share
+    nearly all of their return, so a row-level split leaks the answer and
+    would report an optimistic ceiling.
+
+    ``groups_tr`` is the episode id per training row. Without it the split
+    falls back to row-level and the result is reported as untrustworthy by
+    the caller.
+    """
     th.manual_seed(seed)
-    dev = "cuda:1" if th.cuda.is_available() else "cpu"
-    mu, sd = Xtr.mean(0), Xtr.std(0) + 1e-8
-    ym, ys = ytr.mean(), ytr.std() + 1e-8
-    xtr = th.tensor((Xtr - mu) / sd, dtype=th.float32, device=dev)
+    dev = "cuda:0" if th.cuda.is_available() else "cpu"
+    rng = np.random.default_rng(seed)
+
+    # Validation split, held out by episode.
+    if groups_tr is not None:
+        gids = np.unique(groups_tr)
+        rng.shuffle(gids)
+        va_ids = set(gids[: max(1, len(gids) // 5)].tolist())
+        va_mask = np.array([g in va_ids for g in groups_tr])
+    else:
+        va_mask = rng.random(len(Xtr)) < 0.2
+    if va_mask.all() or not va_mask.any():
+        va_mask = rng.random(len(Xtr)) < 0.2
+
+    Xf, yf = Xtr[~va_mask], ytr[~va_mask]
+    Xv, yv = Xtr[va_mask], ytr[va_mask]
+
+    mu, sd = Xf.mean(0), Xf.std(0) + 1e-8
+    ym, ys = yf.mean(), yf.std() + 1e-8
+    xf = th.tensor((Xf - mu) / sd, dtype=th.float32, device=dev)
+    xv = th.tensor((Xv - mu) / sd, dtype=th.float32, device=dev)
     xte = th.tensor((Xte - mu) / sd, dtype=th.float32, device=dev)
-    yt = th.tensor((ytr - ym) / ys, dtype=th.float32, device=dev).unsqueeze(1)
+    yt = th.tensor((yf - ym) / ys, dtype=th.float32, device=dev).unsqueeze(1)
+    yvt = th.tensor((yv - ym) / ys, dtype=th.float32, device=dev).unsqueeze(1)
+
     net = th.nn.Sequential(
-        th.nn.Linear(xtr.shape[1], hidden), th.nn.ReLU(),
+        th.nn.Linear(xf.shape[1], hidden), th.nn.ReLU(),
+        th.nn.Dropout(0.1),
         th.nn.Linear(hidden, hidden), th.nn.ReLU(),
+        th.nn.Dropout(0.1),
         th.nn.Linear(hidden, 1),
     ).to(dev)
-    opt = th.optim.Adam(net.parameters(), lr=1e-3)
-    n = len(xtr)
+    opt = th.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
+
+    n = len(xf)
+    best_val, best_state, patience, since = float("inf"), None, 25, 0
     for _ in range(epochs):
+        net.train()
         perm = th.randperm(n, device=dev)
         for i in range(0, n, 1024):
             idx = perm[i : i + 1024]
-            loss = th.nn.functional.mse_loss(net(xtr[idx]), yt[idx])
+            loss = th.nn.functional.mse_loss(net(xf[idx]), yt[idx])
             opt.zero_grad(); loss.backward(); opt.step()
+        net.eval()
+        with th.no_grad():
+            v = float(th.nn.functional.mse_loss(net(xv), yvt))
+        if v < best_val - 1e-5:
+            best_val, since = v, 0
+            best_state = {k: t.detach().clone() for k, t in net.state_dict().items()}
+        else:
+            since += 1
+            if since >= patience:
+                break
+    if best_state is not None:
+        net.load_state_dict(best_state)
+    net.eval()
     with th.no_grad():
         pred = net(xte).cpu().numpy().reshape(-1) * ys + ym
+    # A ceiling can never be worse than a constant: report max(EV, 0) would
+    # hide a bug, so return the raw value and let a negative one stand as the
+    # signal that even a regularised fit found nothing.
     return ev(yte, pred)
 
 
@@ -205,15 +277,35 @@ def main():
     print("-" * 45)
     print(f"{'constant (reference)':<34} {0.0:>9.3f}")
     print(f"{'PPO critic (as trained)':<34} {ev(g_te, V[te]):>9.3f}")
-    for name, X in [
-        ("privileged(9) ridge", P),
-        ("privileged(9) MLP", P),
-        ("state+priv ridge", np.hstack([S, P])),
-        ("state+priv MLP", np.hstack([S, P])),
+    # With a privileged ACTOR the obstacle features live inside S and P is
+    # empty, so the "privileged only" rows are meaningless; skip them rather
+    # than print a fit on a zero-width matrix.
+    rows = []
+    if P.shape[1] > 0:
+        rows += [
+            (f"privileged({P.shape[1]}) ridge", P),
+            (f"privileged({P.shape[1]}) MLP", P),
+        ]
+    rows += [
+        (f"state+priv({S.shape[1] + P.shape[1]}) ridge", np.hstack([S, P])),
+        (f"state+priv({S.shape[1] + P.shape[1]}) MLP", np.hstack([S, P])),
         ("state+priv+HINDSIGHT MLP", np.hstack([S, P, H])),
-    ]:
-        fn = ridge_ev if "ridge" in name else mlp_ev
-        print(f"{name:<34} {fn(X[tr], g_tr, X[te], g_te):>9.3f}", flush=True)
+    ]
+    for name, X in rows:
+        if "ridge" in name:
+            val = ridge_ev(X[tr], g_tr, X[te], g_te)
+        else:
+            val = mlp_ev(X[tr], g_tr, X[te], g_te, groups_tr=E[tr])
+        print(f"{name:<34} {val:>9.3f}", flush=True)
+
+    print(
+        "\nMLP rows are now early-stopped on an episode-grouped validation\n"
+        "split with weight decay. The previous unregularised version returned\n"
+        "-1.26 and -0.67 -- worse than a constant, which is overfitting, not a\n"
+        "ceiling. Compare the ridge and MLP rows: if they agree, the return is\n"
+        "as linear as it is predictable, and the gap to HINDSIGHT is the part\n"
+        "no causal predictor can reach."
+    )
 
 
 if __name__ == "__main__":
