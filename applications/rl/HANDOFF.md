@@ -144,6 +144,25 @@ from the host fails with `Permission denied`. Delete from inside instead:
 uid 1000 was odexter on the old host; here it is an unrelated user, and
 chowning to it silently gives your files away.
 
+**3b. `pkill -f <config-name>` silently fails to kill the run.** The pattern
+appears in the command line of the very `bash -c` that runs pkill, so pkill
+matches its own parent shell and kills it mid-sequence; the training process
+can survive. This is nasty because the relaunch that follows appears to
+succeed while the OLD process is still running and still writing the log --
+a config change then looks applied when it is not, and the result is
+attributed to the wrong configuration.
+
+Symptom: the process's `etime` is much larger than the time since restart.
+**Always check `etime` after a restart.** Kill by PID instead:
+
+```bash
+docker exec <cid> bash -c "ps -eo pid,cmd | grep '[t]rain_sb3.py'"
+docker exec <cid> bash -c "kill -TERM <pid>; sleep 5; kill -KILL <pid>"
+```
+
+Note the `[t]` bracket trick, which stops grep matching its own command.
+Kill leftover `multiprocessing.spawn` workers too, or they hold GPU memory.
+
 **4. Long runs need `docker exec -d` + redirect.** Foreground execs die with
 the shell. Pattern used throughout:
 
