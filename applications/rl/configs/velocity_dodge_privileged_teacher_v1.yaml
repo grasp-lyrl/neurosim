@@ -306,6 +306,40 @@
 # So the question this config answers is the precondition, not the product:
 #   can ANY policy solve this task given perfect obstacle knowledge?
 #
+# DECISION CRITERIA, PRE-REGISTERED before the run produced a number. This
+# project has twice reached a conclusion by reading a curve after the fact --
+# see the total_timesteps comment below, where every plateau called during
+# v14 turned out to be premature, and the v20/v21/v22 "decline" that was
+# attributed to actor updates and then reproduced with the actor frozen.
+#
+#   PASS (usable teacher)      success >= 0.80 at any eval.
+#       Clone it. The reference's BC student retains ~80% of its teacher, so
+#       0.80 projects to ~0.64 -- comfortably clear of the 0.325 blind arm.
+#
+#   WEAK PASS (0.55 - 0.80)    privileged control works but not well.
+#       Diagnose before cloning: a 0.60 teacher projects to ~0.48, which
+#       beats 0.325 but not by enough to survive this task's eval noise
+#       (the v7 policy scored 1/8 on one seed batch against 13/40 on a wide
+#       sweep). Report both return AND success -- weave0.4 wins on return
+#       while weave0.8 wins on success, and scoring on success alone
+#       produced a full day of wrong conclusions in an earlier session.
+#
+#   FAIL (<= 0.35)             indistinguishable from the 0.325 blind arm.
+#       The finding is then about the TASK, not perception. Every event-based
+#       result from v16 on was measuring a ceiling, and the correct next move
+#       is to redesign the task -- not to train another encoder.
+#
+#   The floor to beat is the GATE, not zero: best blind arm is 32.5% success
+#   / -79.3 return (section 3 of HANDOFF). A privileged actor that cannot
+#   beat a blind sine weave has not demonstrated that its information is
+#   usable at all.
+#
+# WHEN TO CALL IT. Not before 2M steps. v14 ran 13.2 / 9.0 / 23.0 / 26.6%
+# by quarter -- a back-half slope of +7 points per 1M after looking flat and
+# even regressing through the first half. Call a plateau only when the slope
+# over the last 1M steps is under +2 points, and never off a single eval:
+# eval is 40 episodes, so a one-eval swing of +/-0.07 is one standard error.
+#
 #   reaches ~1.0  -> the task is sound, and this becomes the BC teacher in
 #                    place of the geometric planner. The planner's specific
 #                    failure (see below) is then irrelevant rather than
