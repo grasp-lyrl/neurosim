@@ -436,8 +436,23 @@ why it cannot work here.
 1. ~~**`git add -A && git commit`.**~~ Done, commit `5d5107c`.
 2. **Recreate `outputs/rl/` and regenerate the pretrained encoder** (step 1
    above). Nothing in the BC plan runs without it. — **ON HOLD, see 7a.**
-3. ~~**Re-run the v20 gates.**~~ Running; the control arm already reproduced
-   at `-124.3` / 12.5%, identical to section 3, so the restore is faithful.
+3. ~~**Re-run the v20 gates.**~~ **Done — all six arms reproduce EXACTLY**
+   (`outputs/rl/gate_v20_rerun.log`), on a different host, a rebuilt CUDA
+   event simulator and a re-downloaded scene mesh:
+
+   | arm | section 3 | re-run |
+   |---|---|---|
+   | control | -124.3 / 12.5% | **-124.3 / 12.5%** |
+   | const+0.40 | -143.0 / 15.0% | **-143.0 / 15.0%** |
+   | const+0.80 | -186.1 / 15.0% | **-186.1 / 15.0%** |
+   | weave0.4@0.5Hz | -79.3 / 17.5% | **-79.3 / 17.5%** |
+   | weave0.8@0.5Hz | -99.5 / 32.5% | **-99.5 / 32.5%** |
+   | oracle | -10.6 / 52.5% | **-10.6 / 52.5%** |
+
+   Section 3's numbers are trustworthy and the gate to beat stands unchanged:
+   **-79.3 return AND 32.5% success**. The environment is deterministic
+   across hosts given the seed, which also means any future disagreement with
+   these numbers is a real change, not drift.
 4. Then the BC pipeline (steps 2-4 above). — **ON HOLD, see 7a.**
 
 ---
