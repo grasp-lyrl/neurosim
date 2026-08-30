@@ -637,10 +637,27 @@ arrival). That is irreducible noise, not a modelling failure.
 | corr(return, length) | +0.958 | +0.897 |
 | `r_encounter_clear` share of return variance | 17.3% | **25.8%** |
 
-The causal ceiling went from indistinguishable-from-zero to **0.231**, with
-ridge and MLP now AGREEING rather than straddling zero. v22's actor-release
-gate of EV >= 0.08 -- which never once triggered in 24 updates -- is now well
-inside the achievable range.
+~~The causal ceiling went from indistinguishable-from-zero to **0.231**~~
+
+> **RETRACTED, same day.** Re-running the identical probe and config against
+> the v2 policy's own checkpoint gave ridge **-0.021**, MLP **0.011**. Across
+> four runs the state-ceiling estimate reads -0.033, 0.062, 0.231, 0.011 --
+> a spread of ~0.26 on a quantity that was quoted to three decimals off a
+> 30-episode test set. Either the ceiling depends on which policy generates
+> the rollouts, or the 0.231 was noise; a 400-episode reproduction is running
+> to separate those.
+>
+> **What survives the retraction, because it is stable across every run:**
+> `steps_remaining` alone explains 0.77-0.92 of return-to-go variance in
+> BOTH discount settings, so return is a survival-time proxy regardless of
+> gamma. And the between-episode share of variance dropped from 69-79% at
+> gamma 0.994 to 46-49% at 0.97, consistently. The gamma change did something
+> real to the variance structure. It has NOT been shown to raise what a
+> causal predictor can reach.
+>
+> Method note for whoever reads this next: a 30-episode held-out set cannot
+> resolve an EV difference of 0.1. Quote this probe with a repeat, or do not
+> quote it to more than one significant figure.
 
 Attribution matters here: the crash-penalty change moved the undiscounted
 correlation only modestly (0.958 -> 0.897); **gamma is what lifted the
