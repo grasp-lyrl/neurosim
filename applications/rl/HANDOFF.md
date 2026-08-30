@@ -650,11 +650,25 @@ critic's actual target**. Do not credit the wrong knob.
 20.6% -- below the 32.5% blind arm, on a lossless Markov obstacle channel.
 Exactly what a ~0 ceiling predicts.
 
-**WARNING: v2's return numbers are not comparable to section 3.** Changing
-the crash penalty changes episode returns, so the -79.3 blind-arm return does
-not apply. `return_baseline.py` is being re-run on v2 to restore a valid
-return gate. SUCCESS rates are unaffected by the reward change, so the 32.5%
-floor and the pre-registered success thresholds stand unchanged.
+**v2's gate, re-measured** (`outputs/rl/gate_v2_rerun.log`, 40 episodes):
+
+| arm | v1 return | v2 return | success (identical) |
+|---|---|---|---|
+| control | -124.3 | -59.1 | 12.5% |
+| const+0.40 | -143.0 | -78.7 | 15.0% |
+| const+0.80 | -186.1 | -119.6 | 15.0% |
+| **weave0.4@0.5Hz** | -79.3 | **-28.2** | 17.5% |
+| **weave0.8@0.5Hz** | -99.5 | -40.2 | **32.5%** |
+| **oracle** | -10.6 | **+19.0** | **52.5%** |
+
+**GATE FOR v2: beat -28.2 return AND 32.5% success.**
+
+Every success rate AND every termination count is identical to v1, so the
+reward edit rescaled scoring without perturbing a single episode outcome --
+which is why the pre-registered SUCCESS thresholds carry over unchanged. The
+oracle is now the only arm with positive return; its margin over the best
+blind arm narrowed from +68.7 to +47.2 return while holding +20 points of
+success.
 
 ### Why the oracle is weak (measured, so it need not be re-litigated)
 

@@ -342,10 +342,29 @@
 #       result from v16 on was measuring a ceiling, and the correct next move
 #       is to redesign the task -- not to train another encoder.
 #
-#   The floor to beat is the GATE, not zero: best blind arm is 32.5% success
-#   / -79.3 return (section 3 of HANDOFF). A privileged actor that cannot
-#   beat a blind sine weave has not demonstrated that its information is
-#   usable at all.
+#   The floor to beat is the GATE, not zero. RE-MEASURED ON THIS CONFIG
+#   (return_baseline.py, 40 episodes, outputs/rl/gate_v2_rerun.log), because
+#   crash_penalty_per_remaining_step: 0.0 changes episode returns:
+#
+#     arm              v1 return   v2 return   success
+#     control            -124.3      -59.1      12.5%
+#     const+0.40         -143.0      -78.7      15.0%
+#     const+0.80         -186.1     -119.6      15.0%
+#     weave0.4@0.5Hz      -79.3      -28.2      17.5%   <- best blind, RETURN
+#     weave0.8@0.5Hz      -99.5      -40.2      32.5%   <- best blind, SUCCESS
+#     oracle              -10.6      +19.0      52.5%
+#
+#   EVERY success rate and every termination count is unchanged from v1, so
+#   the reward edit rescaled scoring without perturbing a single episode
+#   outcome. That is why the success thresholds above stand as written.
+#
+#   GATE FOR THIS CONFIG: beat -28.2 return AND 32.5% success -- each blind
+#   arm on its own strongest metric. A privileged actor that cannot beat a
+#   blind sine weave has not demonstrated its information is usable at all.
+#
+#   Note the oracle is the only arm with POSITIVE return here (+19.0), and
+#   its margin over the best blind arm narrowed from +68.7 to +47.2 return
+#   while holding +20 points of success.
 #
 # WHEN TO CALL IT. Not before 2M steps. v14 ran 13.2 / 9.0 / 23.0 / 26.6%
 # by quarter -- a back-half slope of +7 points per 1M after looking flat and
