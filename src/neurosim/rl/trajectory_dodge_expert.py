@@ -128,6 +128,43 @@ class TrajectoryExpertConfig:
     # sphere clears all 16, so those two need an out-of-plane (vertical)
     # component rather than being unwinnable.
     candidate_offsets_m: tuple[float, ...] = (0.35, 0.50, 0.65, 0.80, 1.00)
+    # MEASURED 2026-08-29 (oracle_prediction_probe.py, v20, 40 episodes,
+    # seeds 9001+, reproducing the handoff's oracle at 14/40 collisions):
+    #
+    #   plans made 120, FAILED 666        -> 84.7% plan failure rate
+    #   peak_offset_m                      median 0.35 (the smallest
+    #                                      candidate), 1/68 near the 1.00 cap
+    #   rise_time_s                        median 1.07
+    #   predicted min clearance            median +0.298 m
+    #   ACHIEVED min clearance             median +0.202 m
+    #   gap (predicted - achieved)         median +0.114 m, p90 +0.556 m
+    #   predicted clear but made contact   7/68 (10%)
+    #   collisions: 7 on obstacles WITH a plan, 7 on obstacles with NONE
+    #
+    # Two distinct failures, roughly equal in weight:
+    #
+    # 1. FEASIBILITY. 85% of planning attempts find no admissible curve.
+    #    Note this is not contradicted by oracle_magnitude_probe.py finding
+    #    every encounter clearable by a 0.28 m constant displacement: that is
+    #    pure geometry on the nominal path, whereas the planner must fit a
+    #    dynamically feasible quintic FROM ITS CURRENT OFFSET AND VELOCITY
+    #    that clears every obstacle by safety_margin_m within the speed
+    #    envelope. Most of the time no such curve exists.
+    #
+    # 2. TIMING. rise_time_s median 1.07 s against a commit lead of 0.85 s
+    #    (oracle_commit_probe.py), so the bump PEAKS AFTER CLOSEST APPROACH.
+    #    The vehicle is only partway up when the obstacle arrives -- which is
+    #    the 0.35 m commanded / 0.20 m achieved shortfall, and why 10% of
+    #    encounters the planner predicted clear end in contact.
+    #    minimum_rise_time_s is a floor of 0.55; the realised 1.07 comes from
+    #    the magnitude/speed-limit schedule, not from this constant, so
+    #    lowering the floor alone will not fix it.
+    #
+    # Before changing any constant here, note both failures are structural to
+    # ONE-SHOT OPEN-LOOP PLANNING: a single curve committed per encounter,
+    # predicted against an idealised model, with no feedback on realised
+    # displacement. A closed-loop policy trained on the actual dynamics has
+    # neither problem by construction. See HANDOFF section 7a.
     minimum_rise_time_s: float = 0.55
     return_time_s: float = 1.0
     sample_dt_s: float = 0.04

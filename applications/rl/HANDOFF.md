@@ -507,11 +507,42 @@ first privileged-**actor** run on the task as corrected by commit 5225691.
 | **achieved by closest approach** | **0.23 m** vs 0.28 m needed | **undershoots** |
 
 It commits in time, picks a side, holds it — and still arrives 0.05 m short.
-It plans to the geometric minimum and the actuation chain delivers ~78% of
-command; `safety_margin_m` guards the *predicted* clearance, not execution
-error. That is the structural weakness of an open-loop hand-designed planner,
-and it is exactly what a closed-loop learned teacher avoids by construction.
 (Commit-probe sample is only 4 encounters — directional, not settled.)
+
+`oracle_prediction_probe.py` (40 episodes, reproducing the oracle at 14/40
+collisions) then supplied the mechanism, and it is **two** failures of
+roughly equal weight, not one:
+
+| quantity | measured |
+|---|---|
+| plans made / **failed** | 120 / **666 → 84.7% failure** |
+| `peak_offset_m` | median **0.35 m** (the smallest candidate), 1/68 near the cap |
+| `rise_time_s` | median **1.07 s** — against 0.85 s of commit lead |
+| predicted min clearance | +0.298 m |
+| **achieved** min clearance | **+0.202 m** |
+| predicted clear, made contact | 7/68 (10%) |
+| collisions | **7 with a plan, 7 with no plan** |
+
+1. **Feasibility.** 85% of planning attempts find no admissible curve, and
+   half the collisions are on obstacles that never got a plan. This does
+   *not* contradict `oracle_magnitude_probe.py` finding every encounter
+   clearable by a 0.28 m constant displacement: that is pure geometry on the
+   nominal path, while the planner must fit a dynamically feasible quintic
+   *from its current offset and velocity* clearing every obstacle by
+   `safety_margin_m` inside the speed envelope. Usually no such curve exists.
+
+2. **Timing.** `rise_time_s` 1.07 s exceeds the 0.85 s commit lead, so the
+   bump **peaks after closest approach** — the vehicle is partway up when the
+   obstacle arrives. That is the 0.35 m commanded / 0.20 m achieved
+   shortfall, and why 10% of encounters it predicted clear end in contact.
+   `minimum_rise_time_s` is only a 0.55 floor; the realised 1.07 comes from
+   the magnitude/speed schedule, so lowering the floor will not fix it.
+
+Both are structural to **one-shot open-loop planning** — a single curve per
+encounter, predicted against an idealised model, with no feedback on realised
+displacement. Neither is a constant worth tuning. A closed-loop policy
+trained on the actual dynamics has neither problem by construction, which is
+what the precondition test above is for.
 
 Also measured: the task is **not degenerate** — mean escape fraction 0.380,
 0/16 degenerate encounters, so a blind guess clears 38%, consistent with the
