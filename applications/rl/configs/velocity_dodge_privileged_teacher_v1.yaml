@@ -415,6 +415,28 @@ eval:
   # drawn across 8 seed streams instead of 1. These eval numbers are a
   # training curve, not a gate result -- the gate is measured separately and
   # reproducibly by return_baseline.py.
+  #
+  # RESULT, measured after the change: 353 s -> 239 s. That is 1.5x, NOT the
+  # 8x that 8 parallel envs implies, and the shortfall is worth understanding
+  # before anyone tunes this again.
+  #
+  # Each env runs at ~3.2 policy-steps/s NO MATTER HOW MANY ARE RUNNING --
+  # 16 training envs give 51 fps, i.e. 3.2 each; one eval env gave the same.
+  # The env is single-thread-bound per worker, not contention-bound (the host
+  # has 80 cores and load sits near 5 during eval). So 40 episodes over 8
+  # envs is 5 SEQUENTIAL episodes per env: 5 x 150 steps / 3.2 = ~234 s,
+  # which is what was measured.
+  #
+  # Consequences for anyone optimising this further:
+  #   * eval cost scales as ceil(episodes / num_envs), not as 1/num_envs.
+  #     Going 8 -> 20 would give ~94 s, but 20 more workers at ~800 MiB of
+  #     habitat context would not fit beside the 24 already on the GPU.
+  #   * raising eval freq is the free lever (no memory cost); 65536 halves
+  #     the overhead and still leaves 61 curve points over a 4M budget.
+  #   * for TRAINING throughput the tempting move is num_envs 16 -> 32 with
+  #     n_steps 256 -> 128 to hold the rollout at 4096. Do not: v16 ran
+  #     n_steps 128 and v17 moved to 256 precisely because the rollout must
+  #     exceed the episode length for GAE, taking EV -0.14 -> +0.05.
   num_envs: 8
 vec_env:
   type: auto
