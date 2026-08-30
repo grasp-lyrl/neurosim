@@ -568,6 +568,50 @@ despite its name — it has `privileged_actor: false`, `obs_mode: combined`.
 The name is a fossil and section 5's description of it is stale. This is the
 first privileged-**actor** run on the task as corrected by commit 5225691.
 
+### The EV ceiling, re-measured on the best possible information (2026-08-30)
+
+`ev_ceiling_probe.py` against the privileged teacher's own 54-dim state --
+three obstacle slots with position, velocity AND acceleration, i.e. a
+lossless Markov view. 150 episodes, held out by whole episodes:
+
+| predictor | EV(test) |
+|---|---|
+| constant (reference) | 0.000 |
+| PPO critic as trained | **-0.168** |
+| state+priv(54) ridge | 0.012 |
+| state+priv(54) MLP (regularised) | **0.062** |
+| state+priv+HINDSIGHT MLP | **0.819** |
+
+between-episode share of variance: **69.2%**
+
+**EV ~ 0 is CORRECT BEHAVIOUR, not a broken critic.** The return is highly
+predictable (0.819) but only from FUTURE facts -- `steps_remaining` and
+`crashed` -- that no causal predictor can have. From the present state, with
+ground truth about every obstacle, a regularised nonlinear fit reaches 0.062.
+
+This measurement contains no perception, no encoder, no expert. So the
+v16-v22 story has an explanation that never mentions any of them: PPO's
+advantage is `return - V(s)`, and if V can explain only ~6% of return
+variance then the policy gradient is dominated by episode-level noise --
+actions are credited for outcomes largely fixed by the episode's draw.
+
+Caveats, stated so nobody over-reads it: the checkpoint is early and weak
+(~15-20% success) and a stronger policy would vary less in episode length --
+though the oracle itself only reaches 52.5%, so length variance is large
+under every policy available here. 30 test episodes is a modest sample.
+
+**Note this supersedes the old 0.137 / 45% figures**, which were measured on
+the 9-dim single-obstacle channel AND with the defective unregularised MLP
+(that version returned -1.26 and -0.67, worse than a constant). The probe's
+MLP is now dropout + weight decay, early-stopped on a validation split held
+out by episode.
+
+If the decomposition shows `steps_remaining` alone carries the hindsight EV,
+the return is largely a survival-time proxy and the culprit is early
+termination rather than the reward's obstacle terms -- note
+`crash_penalty_per_remaining_step: 0.6` charges forfeited steps explicitly,
+injecting episode length straight into the return.
+
 ### Why the oracle is weak (measured, so it need not be re-litigated)
 
 `oracle_magnitude_probe.py` + `oracle_commit_probe.py` on v20:

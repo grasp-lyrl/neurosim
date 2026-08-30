@@ -286,9 +286,19 @@ def main():
             (f"privileged({P.shape[1]}) ridge", P),
             (f"privileged({P.shape[1]}) MLP", P),
         ]
+    # H = [steps_remaining, crashed, steps_remaining*crashed]. Decomposed,
+    # because the two carry different diagnoses. Under a dense per-step
+    # reward, return-to-go is close to steps_remaining * mean_reward BY
+    # CONSTRUCTION, so if length alone carries the hindsight EV then the
+    # return is largely a survival-time proxy and the culprit is early
+    # termination -- not the reward's obstacle terms. If "crashed" carries it
+    # independently of length, the outcome itself is what matters.
     rows += [
         (f"state+priv({S.shape[1] + P.shape[1]}) ridge", np.hstack([S, P])),
         (f"state+priv({S.shape[1] + P.shape[1]}) MLP", np.hstack([S, P])),
+        ("HINDSIGHT steps_remaining only", H[:, 0:1]),
+        ("HINDSIGHT crashed only", H[:, 1:2]),
+        ("state+priv+steps_remaining", np.hstack([S, P, H[:, 0:1]])),
         ("state+priv+HINDSIGHT MLP", np.hstack([S, P, H])),
     ]
     for name, X in rows:
