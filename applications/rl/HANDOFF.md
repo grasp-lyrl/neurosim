@@ -667,6 +667,15 @@ critic's actual target**. Do not credit the wrong knob.
 20.6% -- below the 32.5% blind arm, on a lossless Markov obstacle channel.
 Exactly what a ~0 ceiling predicts.
 
+**v2's own curve, so far (500k / 2M, i.e. 25% of budget): mean 14.2% over
+15 evals, NOT ahead of v1's 17.2% over its first 15.** A rise to 25% at
+229k was flagged in-session as "the first monotonic-looking trend" and
+should not have been -- it was followed by a drop to 5% and a return to the
+same noisy 5-25% scatter v1 showed throughout. This is the identical mistake
+v14 made and that this file already warns about (13.2/9.0/23.0/26.6% by
+quarter, every early plateau/trend call wrong). Do not read this curve again
+before 2M, per the pre-registered criteria above.
+
 **v2's gate, re-measured** (`outputs/rl/gate_v2_rerun.log`, 40 episodes):
 
 | arm | v1 return | v2 return | success (identical) |
