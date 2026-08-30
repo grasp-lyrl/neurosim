@@ -375,7 +375,12 @@ num_envs: 16
 # / 26.6%, a back-half slope of +7 points per 1M steps. Every "plateau"
 # called during that run was premature.
 total_timesteps: 4000000
-n_gpus: 1
+# 2, with envs_on_gpu0: 0 below -- v20's proven layout. The learner keeps
+# GPU 0 and every worker goes to GPU 1, which matters more now that 16
+# training workers and 8 eval workers coexist (~950 MiB of habitat context
+# each even with obs_mode: state, which still needs a GL context for scene
+# geometry and collision).
+n_gpus: 2
 # 6 -> 0. Three OOMs came from GPU 0 holding BOTH the learner and most of
 # the Habitat workers: main process 18.31 GiB plus six workers at ~820 MiB
 # each is 23.2 of 23.55 GiB, while GPU 1 sat at 3.3 GiB. Shaving n_steps was
@@ -392,7 +397,25 @@ eval:
   # scored 1/8 on one seed batch against 13/40 on a wide sweep. Any number
   # quoted as definitive needs a wide, disjoint seed range.
   episodes: 40
-  num_envs: 1
+  # 1 -> 8. MEASURED on the first attempt at this run: between 28672 and
+  # 32768 steps time_elapsed went 554 -> 987 s, of which only ~80 s was
+  # training -- a single 40-episode eval costs ~353 s single-env. At
+  # freq 32768 over a 4M budget that is 122 evals x 353 s = ~12 h of blocking
+  # evaluation against ~22 h of training. The comment above already worried
+  # about eval time "rivalling the training it is measuring"; it does.
+  #
+  # The fix is to parallelise eval, not to thin it out -- episodes stay at 40
+  # because small-n eval has repeatedly misled this project (the v7 policy
+  # scored 1/8 on one seed batch against 13/40 on a wide sweep). The eval
+  # env is a real SubprocVecEnv (train_sb3.py builds eval_num_envs workers,
+  # each seeded base_seed + 1000 with a distinct env_idx), so this is a
+  # throughput change only.
+  #
+  # NOTE the eval episode SET changes with this number, since episodes are
+  # drawn across 8 seed streams instead of 1. These eval numbers are a
+  # training curve, not a gate result -- the gate is measured separately and
+  # reproducibly by return_baseline.py.
+  num_envs: 8
 vec_env:
   type: auto
   start_method: spawn
