@@ -612,6 +612,50 @@ termination rather than the reward's obstacle terms -- note
 `crash_penalty_per_remaining_step: 0.6` charges forfeited steps explicitly,
 injecting episode length straight into the return.
 
+### THE FIX, and its verification (2026-08-30)
+
+The ceiling above was traced to the **discount horizon**, not the reward's
+obstacle terms. `gamma: 0.994` gives 1/(1-gamma) = **167 steps**, longer than
+the ~150-step episode, so the critic was asked to predict survival across
+obstacles that had not spawned yet (`spawn_interval_s: 0.30`, continuous
+arrival). That is irreducible noise, not a modelling failure.
+
+`velocity_dodge_privileged_teacher_v2.yaml` changes exactly two things:
+
+| | v1 | v2 | why |
+|---|---|---|---|
+| `gamma` | 0.994 | **0.97** | horizon 167 -> 33 steps = 1.65 s, matched to `threat_time_horizon_s: 1.5`. The expert's whole plan (0.55 s rise + 1.0 s return) fits inside it. |
+| `crash_penalty_per_remaining_step` | 0.6 | **0.0** | literally proportional to remaining length; charged ~79 on top of the flat 150 at a typical collision |
+
+**Verified BEFORE committing GPU time** (both probes, same checkpoint, ~15 min):
+
+| measurement | v1 | v2 |
+|---|---|---|
+| state+priv(54) ridge | 0.012 / -0.015 | **0.184** |
+| state+priv(54) MLP | 0.062 / -0.033 | **0.231** |
+| between-episode variance share | 79.4% | **49.0%** |
+| corr(return, length) | +0.958 | +0.897 |
+| `r_encounter_clear` share of return variance | 17.3% | **25.8%** |
+
+The causal ceiling went from indistinguishable-from-zero to **0.231**, with
+ridge and MLP now AGREEING rather than straddling zero. v22's actor-release
+gate of EV >= 0.08 -- which never once triggered in 24 updates -- is now well
+inside the achievable range.
+
+Attribution matters here: the crash-penalty change moved the undiscounted
+correlation only modestly (0.958 -> 0.897); **gamma is what lifted the
+critic's actual target**. Do not credit the wrong knob.
+
+**v1 control result**: 1M steps, 30 evals, overall mean 18.25%, last 8
+20.6% -- below the 32.5% blind arm, on a lossless Markov obstacle channel.
+Exactly what a ~0 ceiling predicts.
+
+**WARNING: v2's return numbers are not comparable to section 3.** Changing
+the crash penalty changes episode returns, so the -79.3 blind-arm return does
+not apply. `return_baseline.py` is being re-run on v2 to restore a valid
+return gate. SUCCESS rates are unaffected by the reward change, so the 32.5%
+floor and the pre-registered success thresholds stand unchanged.
+
 ### Why the oracle is weak (measured, so it need not be re-litigated)
 
 `oracle_magnitude_probe.py` + `oracle_commit_probe.py` on v20:
