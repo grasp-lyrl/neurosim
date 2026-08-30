@@ -30,7 +30,11 @@ echo "== building CUDA extensions for sm_${ARCH/./} ($(${PY} -c 'import torch;pr
 ${PIP} 'torch==2.9.1' 'torchvision==0.24.1' \
     --index-url https://download.pytorch.org/whl/cu128
 
-${PIP} 'stable_baselines3==2.9.0' 'sb3_contrib==2.9.0' wandb
+# tensorboard is not optional: every config sets a tensorboard_log, so SB3
+# raises ImportError from _setup_learn and the run dies AFTER building all
+# its envs -- several minutes in, with a traceback that names logging rather
+# than the missing package.
+${PIP} 'stable_baselines3==2.9.0' 'sb3_contrib==2.9.0' wandb tensorboard
 
 # The image ships neurosim_cu_esim 0.1, which predates the API the repo calls:
 # no `mode` kwarg ("single"/"multi") and no DVSVoltmeterSimulator. Every config

@@ -428,13 +428,95 @@ why it cannot work here.
 
 ## 7. Crucial next steps, in order
 
-1. **`git add -A && git commit`.** 82 uncommitted paths. Do this before
-   anything else.
+> **SUPERSEDED 2026-08-29 (next session) — see 7a below.** Steps 1 and 3 are
+> done. Steps 2 and 4 are on hold: the reference paper was re-read at source
+> and it implies a precondition this project has never tested, which both of
+> those steps depend on. The original list is kept for the record.
+
+1. ~~**`git add -A && git commit`.**~~ Done, commit `5d5107c`.
 2. **Recreate `outputs/rl/` and regenerate the pretrained encoder** (step 1
-   above). Nothing in the BC plan runs without it.
-3. **Re-run the v20 gates** to confirm the numbers in section 3 reproduce
-   after the environment churn, before trusting them.
-4. Then the BC pipeline (steps 2-4 above).
+   above). Nothing in the BC plan runs without it. — **ON HOLD, see 7a.**
+3. ~~**Re-run the v20 gates.**~~ Running; the control arm already reproduced
+   at `-124.3` / 12.5%, identical to section 3, so the restore is faithful.
+4. Then the BC pipeline (steps 2-4 above). — **ON HOLD, see 7a.**
+
+---
+
+## 7a. The precondition, and why steps 2/4 are on hold
+
+`https://arxiv.org/html/2603.07578v2` was re-read at source rather than from
+section 6's summary, because that summary had already been wrong once. Two
+numbers it omits change the plan:
+
+```
+teacher = PPO on PRIVILEGED STATE, success 1.00
+student = BC 0.80 | DAgger 0.30 | BC+DAgger 1.00 | approximate-IL 1.00
+```
+
+Two consequences.
+
+**1. Our teacher is too weak for the pipeline to produce a readable result.**
+Every system in section 6 has a control module that solves the task from
+clean obstacle state *before* perception is attached. Ours is a hand-designed
+planner at 0.525. A BC student retaining 80% of it lands near **0.42 against
+a 0.325 blind baseline** — inside the noise band, for reasons that have
+nothing to do with perception. The 4 h encoder job and the 2.5 h demo
+collection are both oracle-driven, so both inherit this. Running them as
+written cannot produce a measurable perception result whatever the outcome.
+
+**2. Plain BC caps at 0.80 of the teacher.** Section 6's "train BC, not
+DAgger" is right about DAgger alone (0.30) but wrong about the ceiling.
+Reaching 1.00 needed the online phase, and the paper's trick there is an
+**approximate student** — a state-based MLP trained to match the event
+student's features and actions — so the online phase never renders events.
+That is a **28x** speedup, 52.44 h -> 1.86 h. Habitat event rendering is this
+project's slowest loop (~7 env-steps/sec single-env), so this is worth
+adopting regardless of everything else.
+
+### The test now running
+
+`velocity_dodge_privileged_teacher_v1.yaml` — v20 with exactly three changes
+(`privileged_actor: true`, `obs_mode: state`, `privileged_critic: false`),
+so task, rewards, obstacles and control are untouched. It asks: **can any
+policy solve this task given perfect obstacle knowledge?**
+
+- **reaches ~1.0** — the task is sound. It becomes the BC teacher in place of
+  the geometric planner, and the planner's specific failure stops mattering.
+  Then proceed to BC + the approximate-student online phase.
+- **plateaus ~0.5** — the finding is about the **task**, not perception, and
+  every event-based result from v16 on was measuring a ceiling rather than a
+  perception gap. That would be the most important thing this project could
+  learn, and it would explain v16-v22 without appeal to encoders at all.
+
+Beware: `velocity_dodge_privileged_baseline.yaml` is **not** this test
+despite its name — it has `privileged_actor: false`, `obs_mode: combined`.
+The name is a fossil and section 5's description of it is stale. This is the
+first privileged-**actor** run on the task as corrected by commit 5225691.
+
+### Why the oracle is weak (measured, so it need not be re-litigated)
+
+`oracle_magnitude_probe.py` + `oracle_commit_probe.py` on v20:
+
+| quantity | measured | verdict |
+|---|---|---|
+| smallest displacement that clears | median 0.28 m, **max 0.35 m** | magnitude is NOT the limit |
+| encounters needing > 1.00 m (menu cap) | **0%** | widening the menu is pointless |
+| commit lead time | 0.85 s vs 0.64 s required | commits in time |
+| encounters committing late | **0%** | not a timing failure |
+| direction flips | **0%** | no thrash |
+| **achieved by closest approach** | **0.23 m** vs 0.28 m needed | **undershoots** |
+
+It commits in time, picks a side, holds it — and still arrives 0.05 m short.
+It plans to the geometric minimum and the actuation chain delivers ~78% of
+command; `safety_margin_m` guards the *predicted* clearance, not execution
+error. That is the structural weakness of an open-loop hand-designed planner,
+and it is exactly what a closed-loop learned teacher avoids by construction.
+(Commit-probe sample is only 4 encounters — directional, not settled.)
+
+Also measured: the task is **not degenerate** — mean escape fraction 0.380,
+0/16 degenerate encounters, so a blind guess clears 38%, consistent with the
+32.5% blind arm. And `escape_set_probe.py`'s "12% impossible" is an artifact
+of its single cross-track axis; sweeping the full sphere clears all 16.
 
 ### Considerations / open questions
 
