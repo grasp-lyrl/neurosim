@@ -1273,11 +1273,29 @@ ppo:
   # sqrt(0.5/2)=0.5 instead of the original 0.11, still a ~4.5x improvement)
   # while resampling twice as often, so a bad direction gets corrected
   # sooner instead of riding out the full swing.
-  # Only meaningful with --bc-warm-start: holds the cloned actor still while
-  # the value head fits its returns. v15 warm-started without this and lost
-  # the clone inside ~8 updates (explained_variance -0.003 -> 0.7 over that
-  # span), dropping below its own starting success rate before recovering.
-  actor_freeze_updates: 15
+  # 15 -> 0 for the privileged teacher run. The comment below is right that
+  # this is "only meaningful with --bc-warm-start" -- and this run does not
+  # use one, so a value of 15 freezes a RANDOMLY INITIALISED actor.
+  #
+  # Worse, it does not reliably thaw. With actor_release_explained_variance
+  # unset the callback defaults release_ev to 0.0 and waits for EV >= 0 on
+  # three consecutive updates; EV starts negative, so the actor can stay
+  # frozen indefinitely. That is exactly how v22 ran its entire length with
+  # the actor never released. Caught here at 20k steps by
+  # train/actor_frozen = 1 with approx_kl ~ -1e-10 and clip_fraction = 0 --
+  # the signature of a policy receiving no gradient at all. Success drifting
+  # 0.12 -> 0.18 was the critic and VecNormalize moving, not learning.
+  #
+  # Nothing in this run needs a warm-up: the freeze exists to protect an
+  # event encoder from early PPO gradients, and obs_mode: state has no
+  # encoder to protect (stock MlpPolicy).
+  #
+  # Original comment, retained: only meaningful with --bc-warm-start: holds
+  # the cloned actor still while the value head fits its returns. v15
+  # warm-started without this and lost the clone inside ~8 updates
+  # (explained_variance -0.003 -> 0.7 over that span), dropping below its own
+  # starting success rate before recovering.
+  actor_freeze_updates: 0
   # L2 on the pre-tanh action mean. squash_output bounds the action but not
   # the mean behind it, and both v23 and v24 died the same way: v24's mean
   # |mu| held at 0.001-0.002 through 131k steps, then hit 0.567 (max 3.661,
