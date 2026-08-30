@@ -107,8 +107,16 @@ def run(mode, amp=0.0, freq=0.0, const=0.0, label=None):
              dict(term.most_common(3))), flush=True)
 
 
-def maybe(label, *args, **kwargs):
-    if ONLY is None or label in ONLY:
+def maybe(_arm, *args, **kwargs):
+    # _arm (not "label") is deliberate: run()'s own label kwarg is forwarded
+    # through **kwargs for const/weave arms, and a same-named selector
+    # parameter here collides with it -- Python binds the keyword to THIS
+    # function's parameter before it ever reaches **kwargs, raising
+    # "maybe() got multiple values for argument 'label'". Caught the hard
+    # way: it silently killed every arm except control and oracle (the two
+    # calls that don't pass label=...), and the per-arm log files made that
+    # look like slow arms rather than five simultaneous crashes.
+    if ONLY is None or _arm in ONLY:
         run(*args, **kwargs)
 
 
