@@ -29,6 +29,23 @@ CFG = sys.argv[1] if len(sys.argv) > 1 else \
     "applications/rl/configs/velocity_dodge_dynamic_v7.yaml"
 SEED0 = 9001
 EPISODES = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+# Optional third argument: a comma-separated subset of arm labels to run.
+# The six arms are independent -- each resets the env to the same seeds and
+# shares no state -- so running them as separate processes is exact, not an
+# approximation, and cuts a gate from ~6 sequential arms to one wall-clock
+# arm. This project re-gates on every task change (obstacle count, speed,
+# spawn distance and the crash penalty have all moved), and a serial gate has
+# repeatedly been the slowest thing in the loop.
+#
+#   python return_baseline.py <cfg> 40 control
+#   python return_baseline.py <cfg> 40 oracle
+#   ... run concurrently, then concatenate the logs.
+#
+# Names: control, const+0.40, const+0.80, weave0.4@0.5Hz, weave0.8@0.5Hz,
+# oracle. Omit to run all six in one process, as before.
+ONLY = None
+if len(sys.argv) > 3 and sys.argv[3].strip():
+    ONLY = {a.strip() for a in sys.argv[3].split(",") if a.strip()}
 WEAVES = [(0.4, 0.5), (0.8, 0.5)]
 CONSTS = [0.4, 0.8]
 
@@ -90,10 +107,18 @@ def run(mode, amp=0.0, freq=0.0, const=0.0, label=None):
              dict(term.most_common(3))), flush=True)
 
 
-run("control")
+def maybe(label, *args, **kwargs):
+    if ONLY is None or label in ONLY:
+        run(*args, **kwargs)
+
+
+maybe("control", "control")
 for c in CONSTS:
-    run("const", const=c, label="const%+.2f" % c)
+    maybe("const%+.2f" % c, "const", const=c, label="const%+.2f" % c)
 for amp, freq in WEAVES:
-    run("weave", amp=amp, freq=freq, label="weave%.1f@%.1fHz" % (amp, freq))
-run("oracle")
+    maybe(
+        "weave%.1f@%.1fHz" % (amp, freq),
+        "weave", amp=amp, freq=freq, label="weave%.1f@%.1fHz" % (amp, freq),
+    )
+maybe("oracle", "oracle")
 env.close()
