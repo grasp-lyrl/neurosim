@@ -1178,6 +1178,17 @@ class ReactiveDodgeEnv(BaseNeurosimRLEnv):
                     "object_id": int(item.object_id),
                     "rel_pos": to_dynamics @ rel_pos,
                     "rel_vel": to_dynamics @ rel_vel,
+                    # Obstacle acceleration, dynamics frame. Zero for the
+                    # kinematic_line templates and -gravity for
+                    # kinematic_parabola. Without it, position and velocity
+                    # at a single instant cannot distinguish a straight throw
+                    # from a ballistic one -- and a parabola at 3.0 m/s^2
+                    # curves ~2.16 m over a 1.2 s flight, against a 0.30 m
+                    # contact radius. The agent's own acceleration is not
+                    # subtracted: it is a control input the policy already
+                    # knows through prev_action, whereas the obstacle's is
+                    # the unobservable half.
+                    "rel_accel": to_dynamics @ obstacle_acceleration(item),
                     "clearance": float(np.linalg.norm(rel_pos) - combined_radius),
                     "predicted_clearance": float(
                         predicted_center_distance - combined_radius

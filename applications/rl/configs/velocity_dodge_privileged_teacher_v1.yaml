@@ -905,6 +905,34 @@ env:
       # point. If dodging is not learnable from this, it is not learnable
       # from an event camera either, and no encoder or BC pipeline can help.
       privileged_actor: true
+      # 3 slots = max_concurrent, so the channel is LOSSLESS: no hidden
+      # obstacles, and no silently switching slot identity. The default of 1
+      # hides two of three obstacles and reassigns its meaning whenever the
+      # threat sort reorders.
+      privileged_obstacle_slots: 3
+      # Required for sufficiency, not a nicety. One of the three obstacle
+      # templates is kinematic_parabola at 3.0 m/s^2, which curves ~2.16 m
+      # over a 1.2 s flight against a 0.30 m contact radius. Position and
+      # velocity at a single instant cannot separate a line from a parabola,
+      # so without this a FEEDFORWARD policy provably cannot infer which it
+      # faces -- the channel would be "privileged" but not Markov, and a
+      # failure could not be attributed to the task.
+      #
+      # This is also why the reference architecture (arXiv 2603.07578) does
+      # NOT transfer here. Its teacher is a feedforward MLP reading a 10-bin
+      # angular distance map at a single instant, and that is sufficient for
+      # it because its obstacles are STATIC trees: all relative motion comes
+      # from ego-motion, which the teacher already observes. Its two GRU
+      # layers sit only in the student's event encoder, compensating for a
+      # poor sensor, not for a moving world. Adopting its distance map here
+      # would strictly REMOVE information (rel_vel has no representation in
+      # it) and make the task unsolvable feedforward.
+      privileged_obstacle_acceleration: true
+      # obs = 18 proprioception + 3 slots x 12 = 54.
+      #   proprioception: v_body, v_ref_body, pos_err_body, offset_body,
+      #                   omega_body, prev_action
+      #   slot:           valid, rel_pos(3), rel_vel(3), rel_accel(3),
+      #                   clearance, time_to_closest_approach
   # skokloster only, for training and eval alike. apartment_1's rooms are
   # tight enough that clearing an obstacle and staying in bounds are in
   # direct tension (the privileged oracle itself went out of bounds in

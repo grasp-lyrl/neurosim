@@ -37,6 +37,9 @@ from .reactive_dodge import ReactiveDodgeTask
 
 # [valid, rel_pos_body(3), rel_vel_body(3), clearance, time_to_closest_approach]
 PRIVILEGED_DIM = 9
+# With privileged_obstacle_acceleration, rel_accel_body(3) is inserted after
+# rel_vel_body, giving 12 per obstacle slot.
+PRIVILEGED_SLOT_DIM_WITH_ACCEL = 12
 
 
 class VelocityDodgeTask(ReactiveDodgeTask):
@@ -76,6 +79,22 @@ class VelocityDodgeTask(ReactiveDodgeTask):
         dodge_clearance_m: float = 0.25,
         privileged_critic: bool = True,
         privileged_actor: bool = False,
+        # How many obstacles the privileged channel describes, threat-sorted
+        # and zero-padded. Default 1 preserves the historical single-slot
+        # layout that every v16-v22 config and checkpoint assumes.
+        #
+        # 1 is LOSSY here: max_concurrent is 3, so a single slot hides two
+        # obstacles, and worse, the slot silently switches identity whenever
+        # the threat sort reorders -- the valid flag distinguishes "some
+        # obstacle" from "none", never "a different one". Set 3 to make the
+        # channel lossless.
+        privileged_obstacle_slots: int = 1,
+        # Include each obstacle's acceleration. Default False for backward
+        # compatibility, but note the channel is NOT sufficient state without
+        # it whenever kinematic_parabola templates are in the mix: position
+        # and velocity at one instant cannot separate a line from a parabola,
+        # so a feedforward policy cannot infer which it faces.
+        privileged_obstacle_acceleration: bool = False,
         **kwargs: Any,
     ):
         kwargs.setdefault("residual_control", {"mode": "velocity_delta_integrated"})
@@ -155,15 +174,31 @@ class VelocityDodgeTask(ReactiveDodgeTask):
         # is the bottleneck rather than the reward or the control mapping.
         # Never enable for a deployable policy.
         self.privileged_actor = bool(privileged_actor)
+        self.privileged_obstacle_slots = max(int(privileged_obstacle_slots), 1)
+        self.privileged_obstacle_acceleration = bool(privileged_obstacle_acceleration)
         self.on_reset()
 
     # ---- Observation ------------------------------------------------------
 
     @property
+    def privileged_slot_dim(self) -> int:
+        """Width of one obstacle slot in the privileged channel."""
+        return (
+            PRIVILEGED_SLOT_DIM_WITH_ACCEL
+            if self.privileged_obstacle_acceleration
+            else PRIVILEGED_DIM
+        )
+
+    @property
+    def privileged_channel_dim(self) -> int:
+        """Total privileged width: slots x slot width."""
+        return self.privileged_obstacle_slots * self.privileged_slot_dim
+
+    @property
     def state_observation_dim(self) -> int:
         # v_body, v_ref_body, pos_err_body, offset_body, omega_body, prev_action
         base = 3 * 5 + self.action_dim
-        return base + (PRIVILEGED_DIM if self.privileged_actor else 0)
+        return base + (self.privileged_channel_dim if self.privileged_actor else 0)
 
     def _to_body(self, vector: Any, quat: np.ndarray) -> np.ndarray:
         return rotate_vector_by_quat(vector, quat, inverse=True).astype(np.float32)
@@ -206,32 +241,57 @@ class VelocityDodgeTask(ReactiveDodgeTask):
 
     @property
     def privileged_observation_dim(self) -> int:
-        return PRIVILEGED_DIM if self.privileged_critic else 0
+        return self.privileged_channel_dim if self.privileged_critic else 0
+
+    def _obstacle_slot(
+        self, row: dict[str, Any] | None, quat: np.ndarray
+    ) -> np.ndarray:
+        """One obstacle's body-frame geometry, or zeros for an empty slot."""
+        if row is None:
+            return np.zeros(self.privileged_slot_dim, dtype=np.float32)
+
+        tca = float(row["time_to_closest_approach"])
+        parts = [
+            np.asarray([1.0], dtype=np.float32),
+            self._to_body(row["rel_pos"], quat),
+            self._to_body(row["rel_vel"], quat),
+        ]
+        if self.privileged_obstacle_acceleration:
+            parts.append(self._to_body(row.get("rel_accel", np.zeros(3)), quat))
+        parts.append(
+            np.asarray(
+                [
+                    float(row["clearance"]),
+                    # tca is non-finite when the constant-velocity solution
+                    # has no approach; the horizon stands in for "not closing".
+                    # Note this collides with a genuine 1.5 s approach -- the
+                    # policy cannot separate the two from this scalar alone,
+                    # which is another reason rel_pos/rel_vel/rel_accel are
+                    # the load-bearing entries and tca is a convenience.
+                    tca if np.isfinite(tca) else self.threat_time_horizon_s,
+                ],
+                dtype=np.float32,
+            )
+        )
+        return np.concatenate(parts, axis=0).astype(np.float32, copy=False)
 
     def _nearest_obstacle_features(self, state: dict[str, np.ndarray]) -> np.ndarray:
-        """Body-frame geometry of the most imminent obstacle, or zeros."""
-        obstacles = self._context.obstacle_relative_states or []
-        if not obstacles:
-            return np.zeros(PRIVILEGED_DIM, dtype=np.float32)
+        """Body-frame geometry of the N most imminent obstacles, zero-padded.
 
-        nearest = obstacles[0]
+        Rows arrive already sorted by ``obstacle_threat_priority``. That sort
+        keys on a CONSTANT-VELOCITY ``predicted_clearance``, so it misranks
+        ballistic obstacles -- a further reason to carry every obstacle rather
+        than trust the sort to surface the right one.
+        """
+        obstacles = self._context.obstacle_relative_states or []
         quat = np.asarray(state["q"], dtype=np.float64)
-        tca = float(nearest["time_to_closest_approach"])
-        return np.concatenate(
-            [
-                np.asarray([1.0], dtype=np.float32),
-                self._to_body(nearest["rel_pos"], quat),
-                self._to_body(nearest["rel_vel"], quat),
-                np.asarray(
-                    [
-                        float(nearest["clearance"]),
-                        tca if np.isfinite(tca) else self.threat_time_horizon_s,
-                    ],
-                    dtype=np.float32,
-                ),
-            ],
-            axis=0,
-        ).astype(np.float32, copy=False)
+        slots = [
+            self._obstacle_slot(
+                obstacles[i] if i < len(obstacles) else None, quat
+            )
+            for i in range(self.privileged_obstacle_slots)
+        ]
+        return np.concatenate(slots, axis=0).astype(np.float32, copy=False)
 
     def make_privileged_observation(
         self, *, state: dict[str, np.ndarray]
