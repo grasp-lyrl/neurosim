@@ -966,6 +966,7 @@ def build_vecnormalize_kwargs(
     normalize_obs: bool,
     normalize_reward: bool,
     training: bool,
+    gamma: float | None = None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "norm_obs": normalize_obs,
@@ -973,6 +974,19 @@ def build_vecnormalize_kwargs(
         "clip_obs": 10.0,
         "training": training,
     }
+    # VecNormalize keeps a running DISCOUNTED-return estimate and divides
+    # rewards by its standard deviation, so its gamma must match PPO's. It
+    # was never passed, leaving SB3's default 0.99 against whatever the
+    # config set. Return std scales roughly as 1/sqrt(1 - gamma**2), so at
+    # PPO gamma 0.97 the default 0.99 over-estimates it by ~1.7x: value
+    # targets come out ~1.7x too small and the value loss ~3x too small
+    # against a fixed vf_coef, which slows value learning precisely when the
+    # experiment is trying to measure whether the critic CAN learn.
+    #
+    # The mismatch was mild while configs used gamma ~0.99 (v16-v22 at 0.994
+    # is a 1.3x error) and only became material with the horizon fix.
+    if gamma is not None:
+        kwargs["gamma"] = float(gamma)
     if normalize_obs and obs_mode == "events":
         # Event tensors are normalized in the RL env.
         kwargs["norm_obs"] = False
@@ -990,6 +1004,7 @@ def maybe_wrap_vecnormalize(
     normalize_reward: bool,
     training: bool,
     enabled: bool | None = None,
+    gamma: float | None = None,
 ):
     """Return ``VecNormalize(vec_env, ...)`` when normalization is active.
 
@@ -1008,6 +1023,7 @@ def maybe_wrap_vecnormalize(
             normalize_obs=normalize_obs,
             normalize_reward=normalize_reward,
             training=training,
+            gamma=gamma,
         ),
     )
 
@@ -1167,6 +1183,7 @@ def main():
         normalize_obs=bool(vn["normalize_obs"]),
         normalize_reward=bool(vn["normalize_reward"]),
         training=True,
+        gamma=float(exp["ppo"]["gamma"]),
     )
     if args.resume_vecnormalize:
         if not isinstance(train_vec, VecNormalize):
@@ -1217,6 +1234,7 @@ def main():
         normalize_reward=False,
         training=False,
         enabled=bool(vn["normalize_obs"] or vn["normalize_reward"]),
+        gamma=float(exp["ppo"]["gamma"]),
     )
 
     # Detect the critic-only channel from the built space rather than the
