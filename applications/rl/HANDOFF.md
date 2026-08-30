@@ -509,10 +509,51 @@ adopting regardless of everything else.
 
 ### The test now running
 
-`velocity_dodge_privileged_teacher_v1.yaml` — v20 with exactly three changes
-(`privileged_actor: true`, `obs_mode: state`, `privileged_critic: false`),
-so task, rewards, obstacles and control are untouched. It asks: **can any
-policy solve this task given perfect obstacle knowledge?**
+`velocity_dodge_privileged_teacher_v1.yaml` — v20 with the task, rewards,
+obstacles and control untouched, and only the actor's *view* changed. It
+asks: **can any policy solve this task given perfect obstacle knowledge?**
+
+Observation is **54-dim**, feedforward `MlpPolicy` (verified by loading the
+running checkpoint: `Box(54,)`, first layer `in_features=54`):
+
+```
+18  proprioception  v_body, v_ref_body, pos_err_body, offset_body,
+                    omega_body, prev_action
+36  privileged      3 slots x [valid, rel_pos(3), rel_vel(3),
+                               rel_accel(3), clearance, tca]
+```
+
+Three slots because `max_concurrent: 3`, so the channel is lossless. The
+old single slot hid two obstacles AND silently switched identity whenever
+`obstacle_threat_priority` reordered.
+
+**Acceleration is required for sufficiency, not a nicety.** One of the three
+obstacle templates is `kinematic_parabola` at 3.0 m/s^2, curving ~2.16 m over
+a 1.2 s flight against a 0.30 m contact radius. Position and velocity at one
+instant cannot separate a line from a parabola, so without it a feedforward
+policy provably cannot infer which it faces — the channel would be
+"privileged" but not Markov, and a FAIL could not be attributed to the task
+rather than to the encoding.
+
+### Why the reference's distance map does NOT transfer
+
+Checked at source, not from a summary: arXiv 2603.07578's obstacles are
+**static trees**. Its teacher is a feedforward MLP reading a 10-bin angular
+distance map (11.25 deg each, 120 deg FOV) at a **single instant**, and its
+two GRU layers sit **only in the student's event encoder**.
+
+A snapshot distance map is sufficient there because every bit of relative
+motion comes from ego-motion, which the teacher already observes. Ours move
+at 5 m/s, so that map has no representation for closing speed at all —
+adopting it would strictly REMOVE information and make the task unsolvable
+feedforward. Their GRUs compensate for a poor sensor, not for a moving world.
+
+The lesson generalises: copy a reference's *structure* (decouple perception
+from control; teacher on privileged state; student cloned with aux
+supervision), not its *state encoding*, which is a function of its task.
+
+The GRU is still likely relevant later — on the **student**, where a single
+event frame genuinely cannot carry depth or closing speed.
 
 - **reaches ~1.0** — the task is sound. It becomes the BC teacher in place of
   the geometric planner, and the planner's specific failure stops mattering.
