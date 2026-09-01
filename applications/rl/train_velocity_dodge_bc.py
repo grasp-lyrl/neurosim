@@ -547,13 +547,14 @@ def evaluate(model, env, episodes: int, seed0: int, downsample_events: int = 1, 
     loss while being exactly the passive baseline. Only closed-loop
     success and survival separate them.
     """
-    successes, lengths, terminations = 0, [], {}
+    successes, lengths, returns, terminations = 0, [], [], {}
     peak_accelerations = []
     peak_command_accelerations = []
     device = next(model.parameters()).device
     for i in range(episodes):
         obs, _ = env.reset(seed=seed0 + i)
         steps = 0
+        episode_return = 0.0
         policy_dt = float(
             env.policy_decimation
             * env.steps_per_action
@@ -589,7 +590,8 @@ def evaluate(model, env, episodes: int, seed0: int, downsample_events: int = 1, 
                     action[1] = float(int(np.argmax(out)) - 1)
                 else:
                     action = out
-            obs, _, terminated, truncated, info = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
+            episode_return += float(reward)
             velocity = np.asarray(
                 env.sim.dynamics.state["v"], dtype=np.float64
             ).copy()
@@ -616,11 +618,13 @@ def evaluate(model, env, episodes: int, seed0: int, downsample_events: int = 1, 
                 terminations[reason] = terminations.get(reason, 0) + 1
                 successes += int(bool(info.get("is_success", False)))
                 lengths.append(steps)
+                returns.append(episode_return)
                 peak_accelerations.append(peak_acceleration)
                 peak_command_accelerations.append(peak_command_acceleration)
                 break
     return {
         "success_rate": successes / max(episodes, 1),
+        "mean_return": float(np.mean(returns)) if returns else 0.0,
         "mean_steps": float(np.mean(lengths)) if lengths else 0.0,
         "terminations": terminations,
         "mean_peak_acceleration_mps2": float(np.mean(peak_accelerations)),
@@ -651,6 +655,10 @@ def train_and_evaluate_dataset(args, cfg, dataset, weights, test_dataset=None) -
     env_cfg["enable_visualization"] = False
     env = env_class_for_task(env_cfg["task"]["name"])(env_config=env_cfg, train=False)
     model, action_dim = build_clone_net(cfg, env, args.downsample_events, args.discrete_actions)
+    if args.init_checkpoint:
+        payload = torch.load(args.init_checkpoint, map_location="cpu")
+        model.load_state_dict(payload["model"])
+        print(f"initialized clone from {args.init_checkpoint}", flush=True)
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
@@ -966,6 +974,11 @@ def main() -> None:
     p.add_argument("--experiment-config", required=True)
     p.add_argument("--dataset", nargs="+", required=True)
     p.add_argument("--output", default="outputs/rl/bc/clone.json")
+    p.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Optional clone .pt to fine-tune instead of starting from scratch",
+    )
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--learning-rate", type=float, default=3e-4)

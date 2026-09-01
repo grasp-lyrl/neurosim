@@ -174,11 +174,43 @@ acceleration telemetry:
 - `outputs/rl/videos/sampling_mpc_accel5/episode_00_seed9001.mp4` (near miss)
 - `outputs/rl/videos/sampling_mpc_accel5/episode_01_seed9101.mp4` (success)
 
-Active at handoff time: disjoint confirmation seeds 9101--9120 are running as
-`mpc_accel5_holdout_{a,b}`, while four parallel, fresh demonstration shards
-cover seeds 10001--10080 and write
+Disjoint confirmation seeds 9101--9120 scored +30.4 return / 95.0% success
+(19/20), with zero collisions and a 4.87 m/s^2 worst vehicle acceleration.
+Combined registered + held-out performance is 56/60 = 93.3% with zero
+collisions. Artifacts are `outputs/rl/mpc_accel5_holdout_{a,b}.{json,log}`.
+
+Fresh demonstration seeds 10001--10080 scored 77/80 = 96.2%; only successful
+episodes were retained, yielding 18,557 flat 30-D privileged state/action
+pairs (3,277 actionable) in
 `outputs/rl/bc/mpc_v4_accel5_demo_{a,b,c,d}.h5`. The old unconstrained partial
-HDF5 files are quarantined by name and must not be mixed into BC.
+HDF5 files remain quarantined by name and must not be mixed into BC.
+
+The privileged BC run used a 30-epoch MLP fit, balanced threat/quiet sampling,
+virtual onset copies with the flat layout's true `prev_action` slice
+(indices 15:18) blanked, and an episode-level 20% holdout. Its final held-out
+threat-action R2 was 0.883. Offline fit substantially overstated closed-loop
+quality: the internal 40-episode gate reached 37.5% success with 14 collisions;
+the return-instrumented, four-shard confirmation on the same 12001--12040
+range scored **-63.7 return / 35.0% success / 16 collisions**. Peak measured
+vehicle acceleration was 5.21 m/s^2 in the sharded gate (5.62 in the internal
+sequential gate). Artifacts are
+`mpc_v4_accel5_privileged_clone.{json,pt}`, `mpc_v4_accel5_train.log`, and
+`mpc_v4_accel5_clone_gate_{a,b,c,d}.{json,log}` under `outputs/rl/bc/`.
+
+That clone modestly passes the registered blind gate (-73.1 / 30.0%), so it
+seeded an independent PPO comparison named `privileged_teacher_v4_fast_bc` on
+physical GPUs 4--5. Its actor warm start loaded six tensors; only the clone's
+unused distance-decoder tensors were skipped. It completed its first 4,096
+steps normally. Keep it independent from the original PPO on GPUs 0--1 and do
+not interpret either curve before 2M steps.
+
+One DAgger correction round labelled all states visited by the first clone,
+adding 6,615 samples (3,319 actionable). Fine-tuning from the original clone
+then scored **-58.7 / 30.0% / 20 collisions** on fresh seeds 13001--13040.
+It became less aggressive but did not strictly beat the blind success gate and
+was worse than the original clone on success/collisions, so it is rejected and
+must not replace the PPO warm start. Artifacts use the
+`mpc_v4_accel5_dagger{1,2}_*` prefix under `outputs/rl/bc/`.
 
 ---
 
