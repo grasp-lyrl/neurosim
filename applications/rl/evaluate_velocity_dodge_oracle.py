@@ -587,7 +587,7 @@ def mpc_oracle_action(env) -> np.ndarray:
     to_dynamics = env.sim.coord_trans.pos_transform_inv
     predictions = []
     exact_tcas = []
-    for object_id, item in active.items():
+    for _simulator_object_id, item in active.items():
         position = to_dynamics @ np.asarray(item.obj.translation, dtype=np.float64)
         velocity = to_dynamics @ env.obstacle_velocity(item, now)
         acceleration = to_dynamics @ env.obstacle_acceleration(item)
@@ -605,7 +605,7 @@ def mpc_oracle_action(env) -> np.ndarray:
             continue
         predictions.append(
             MovingSpherePrediction(
-                object_id=int(object_id),
+                object_id=int(getattr(item, "encounter_id", item.object_id)),
                 position=position,
                 velocity=velocity,
                 acceleration=acceleration,
@@ -831,13 +831,14 @@ def oracle_action(env) -> np.ndarray:
 
     threat = actionable[0]
     object_id = int(threat["object_id"])
+    simulator_object_id = int(threat.get("simulator_object_id", object_id))
     tca = float(threat["time_to_closest_approach"])
 
     flat = env._nominal_flat()
     nominal_position_now = np.asarray(flat["x"], dtype=np.float64)
     nominal_velocity_now = np.asarray(flat["x_dot"], dtype=np.float64)
     active = env.active_obstacles()
-    item = active.get(object_id)
+    item = active.get(simulator_object_id)
     if item is None:
         return action
     to_dynamics = env.sim.coord_trans.pos_transform_inv

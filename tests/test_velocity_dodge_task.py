@@ -581,6 +581,31 @@ def test_encounter_metric_uses_closest_approach_not_last_seen():
     assert outcome.terms["encounters_cleared"] == 0
 
 
+def test_encounter_metric_distinguishes_recycled_simulator_object_ids():
+    """Sequential throws remain distinct when Habitat recycles object IDs."""
+    task = make_task(clearance_threshold_m=1.5, dodge_clearance_m=0.1)
+
+    for encounter_id, clearance in [(1, 0.8), (2, 0.05)]:
+        task.set_context(
+            {
+                "flat": {"x": np.zeros(3), "x_dot": np.zeros(3)},
+                "obstacle_relative_states": [
+                    {
+                        "object_id": 7,
+                        "encounter_id": encounter_id,
+                        "clearance": clearance,
+                    }
+                ],
+                "min_obstacle_distance": clearance,
+            }
+        )
+        outcome = task.compute_reward(make_step(task, make_state(), np.zeros(3)))
+
+    assert outcome.terms["encounters_total"] == 2
+    assert outcome.terms["encounters_cleared"] == 1
+    assert outcome.terms["encounter_clear_rate"] == pytest.approx(0.5)
+
+
 def test_crash_penalty_grows_with_the_episode_a_crash_forfeits():
     """Dying early must not out-earn flying on.
 

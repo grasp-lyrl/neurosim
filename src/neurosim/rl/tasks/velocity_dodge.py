@@ -400,7 +400,7 @@ class VelocityDodgeTask(ReactiveDodgeTask):
             self._min_clearance = min(self._min_clearance, clearance)
 
         for row in self._context.obstacle_relative_states or []:
-            oid = int(row["object_id"])
+            oid = int(row.get("encounter_id", row["object_id"]))
             self._encounter_min_clearance[oid] = min(
                 self._encounter_min_clearance.get(oid, np.inf),
                 float(row["clearance"]),
@@ -464,7 +464,7 @@ class VelocityDodgeTask(ReactiveDodgeTask):
 
         newly_cleared = 0
         for row in self._context.obstacle_relative_states or []:
-            oid = int(row["object_id"])
+            oid = int(row.get("encounter_id", row["object_id"]))
             if oid in self._encounter_clear_rewarded:
                 continue
             if "rel_pos" not in row or "rel_vel" not in row:

@@ -249,6 +249,10 @@ class ActiveObstacle:
     # Offset from the drone this throw was aimed at, preserved across
     # re-aims so a throw keeps its own miss distance instead of homing in.
     aim_offset: np.ndarray | None = None
+    # Habitat may recycle object_id as soon as an object is removed. This
+    # monotonic per-episode identity keeps sequential throws distinct in
+    # historical metrics while object_id still addresses the live object.
+    encounter_id: int = 0
 
 
 class DynamicObstacleManager:
@@ -277,6 +281,7 @@ class DynamicObstacleManager:
         self._resolved_templates: list[DynamicObstacleTemplate] = []
         self._intercept_schedule: list[dict[str, Any]] = []
         self._intercept_spawned = 0
+        self._encounter_serial = 0
         self._previous_drone_position: np.ndarray | None = None
         self._previous_drone_time: float | None = None
         # Wait until the next spawn; resampled after every spawn so the
@@ -344,6 +349,7 @@ class DynamicObstacleManager:
         self._next_spawn_wait = float(self.cfg.spawn_interval_s)
         self._intercept_schedule = []
         self._intercept_spawned = 0
+        self._encounter_serial = 0
         self._previous_drone_position = None
         self._previous_drone_time = None
         if seed is not None:
@@ -857,6 +863,7 @@ class DynamicObstacleManager:
             obj.linear_velocity = linear_velocity
             obj.angular_velocity = angular_velocity
 
+        self._encounter_serial += 1
         self._active[obj.object_id] = ActiveObstacle(
             object_id=obj.object_id,
             obj=obj,
@@ -870,6 +877,7 @@ class DynamicObstacleManager:
             # Where this throw was aimed relative to the drone, so re-aiming
             # preserves its own miss distance instead of homing in.
             aim_offset=aim_offset,
+            encounter_id=self._encounter_serial,
         )
 
     def _compute_ballistic_velocity(

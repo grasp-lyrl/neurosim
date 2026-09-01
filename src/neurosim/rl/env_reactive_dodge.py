@@ -1214,7 +1214,11 @@ class ReactiveDodgeEnv(BaseNeurosimRLEnv):
             )
             rows.append(
                 {
-                    "object_id": int(item.object_id),
+                    # Logical identity, stable across a throw but never
+                    # recycled during the episode. Keep the Habitat handle
+                    # separately for code that must retrieve the live object.
+                    "object_id": int(getattr(item, "encounter_id", item.object_id)),
+                    "simulator_object_id": int(item.object_id),
                     "rel_pos": to_dynamics @ rel_pos,
                     "rel_vel": to_dynamics @ rel_vel,
                     # Obstacle acceleration, dynamics frame. Zero for the
