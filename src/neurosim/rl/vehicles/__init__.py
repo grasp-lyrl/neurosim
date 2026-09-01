@@ -16,6 +16,9 @@ def build_vehicle(*, sim: Any, dynamics_config: dict[str, Any]) -> RLVehicle:
         return RotorpyVelocityVehicle(
             dynamics=sim.dynamics,
             max_speed_mps=float(dynamics_config.get("max_speed_mps", 3.0)),
+            max_acceleration_mps2=float(
+                dynamics_config.get("max_acceleration_mps2", 0.0)
+            ),
             domain_randomization=dynamics_config.get("domain_randomization"),
         )
     if abstraction != "cmd_ctbr":

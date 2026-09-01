@@ -5,6 +5,13 @@ experiment_config: applications/rl/configs/velocity_dodge_teacher_v4_fast.yaml
 
 overrides:
   env:
+    dynamics:
+      # RotorPy's cmd_vel controller converts velocity error into desired
+      # acceleration with k_v=10. Command slew alone did not bound this term:
+      # seed 9025 reached 2.89 m/s^2 under a 1.9 m/s^2 slew cap. Limit the
+      # controller's desired acceleration directly, with headroom for attitude
+      # and rigid-body tracking error under the 2.0 m/s^2 measured gate.
+      max_acceleration_mps2: 1.7
     task:
       config:
         trajectory:
@@ -16,6 +23,7 @@ overrides:
             # rollout reached 2.056 m/s^2 under a nominal 2.0 limit because
             # command slew is not identical to measured rigid-body response.
             max_residual_command_acceleration_mps2: 1.9
+            max_vehicle_acceleration_mps2: 1.7
             # v4's 0.22 m planning target produced several 0.05--0.10 m
             # realized clearances. Ask for a materially larger miss distance.
             safety_margin_m: 0.40
@@ -40,8 +48,11 @@ overrides:
       dynamic_obstacles:
         # The castle cannot reliably place 10--12 m throws (the smoke seed
         # produced no encounter). Keep the validated 7--9 m placement region
-        # and reduce projectile speed instead. At 6 m/s this supplies
-        # 1.17--1.50 s for a smooth, larger-margin avoidance manoeuvre.
+        # and reduce projectile speed instead. The 6 m/s smoke stayed at only
+        # 0.114 m realized clearance once controller acceleration was truly
+        # bounded. At 5 m/s this supplies 1.40--1.80 s for a smooth,
+        # larger-margin avoidance manoeuvre while remaining over 8x faster
+        # than the 0.6 m/s nominal vehicle.
         radial_distance_range_m: [7.0, 9.0]
         templates:
           - handle: uvSphereSolid
@@ -50,14 +61,14 @@ overrides:
             mass: 0.2
             ttl_s: 3.0
             collision_radius: 0.15
-            kinematic_speed_mps: 6.0
+            kinematic_speed_mps: 5.0
           - handle: uvSphereSolid
             scale: [0.15, 0.15, 0.15]
             motion_mode: kinematic_parabola
             mass: 0.2
             ttl_s: 3.0
             collision_radius: 0.15
-            kinematic_speed_mps: 6.0
+            kinematic_speed_mps: 5.0
             parabola_gravity_mps2: 3.0
           - handle: uvSphereSolid
             scale: [0.15, 0.15, 0.15]
@@ -65,4 +76,4 @@ overrides:
             mass: 0.2
             ttl_s: 3.5
             collision_radius: 0.15
-            kinematic_speed_mps: 6.0
+            kinematic_speed_mps: 5.0

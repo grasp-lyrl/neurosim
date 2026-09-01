@@ -138,3 +138,39 @@ def test_rollout_projects_each_command_onto_acceleration_ball():
         target_gap = (action - filtered) * limits
         assert np.linalg.norm(target_gap) <= maximum_gap + 1e-9
         filtered += filter_alpha * (action - filtered)
+
+
+def test_rollout_respects_modeled_vehicle_acceleration_limit():
+    config = RecedingHorizonConfig(
+        samples_per_mode=16,
+        iterations=1,
+        max_vehicle_acceleration_mps2=1.7,
+        seed=29,
+    )
+    expert = RecedingHorizonDodgeExpert(config)
+    times = config.step_dt_s * (
+        np.arange(int(round(config.horizon_s / config.step_dt_s))) + 1
+    )
+    initial_velocity = np.zeros(3)
+    plan = expert.make_plan(
+        now=0.0,
+        time_to_closest_approach=0.70,
+        initial_offset=np.zeros(3),
+        initial_relative_velocity=initial_velocity,
+        initial_filtered_action=np.zeros(3),
+        body_to_world=np.eye(3),
+        delta_velocity_limits=np.array([1.2, 1.2, 0.8]),
+        action_filter_alpha=0.67232,
+        max_target_delta_velocity_mps=0.15,
+        return_gain_hz=1.0,
+        max_return_speed_mps=1.0,
+        nominal_positions=np.column_stack(
+            [0.6 * times, np.zeros_like(times), np.zeros_like(times)]
+        ),
+        nominal_velocity=np.array([0.6, 0.0, 0.0]),
+        obstacles=(_head_on(),),
+    )
+
+    velocities = np.vstack([initial_velocity, plan.relative_velocities])
+    acceleration = np.linalg.norm(np.diff(velocities, axis=0), axis=1) / config.step_dt_s
+    assert np.max(acceleration) <= config.max_vehicle_acceleration_mps2 + 1e-9

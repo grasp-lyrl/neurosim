@@ -48,6 +48,11 @@ class RecedingHorizonConfig:
     # clearance to reduce marginal full-vehicle misses.
     safety_margin_m: float = 0.22
     velocity_response_tau_s: float = 0.10
+    # Optional bound on the predicted vehicle velocity change. Zero preserves
+    # the historical first-order response. Low-acceleration pipelines set it
+    # to the controller-layer desired-acceleration cap so MPC does not plan
+    # trajectories the execution shield will subsequently slow down.
+    max_vehicle_acceleration_mps2: float = 0.0
     static_shortlist: int = 24
     # The first two terms make collision slack lexicographically more
     # important than nominal tracking.  Unlike a hard feasibility filter,
@@ -272,7 +277,17 @@ class RecedingHorizonDodgeExpert:
             )
             return_velocity *= scale[:, None]
             target_velocity = world_delta + return_velocity
-            velocity += response_alpha * (target_velocity - velocity)
+            velocity_change = response_alpha * (target_velocity - velocity)
+            max_acceleration = float(cfg.max_vehicle_acceleration_mps2)
+            if max_acceleration > 0.0:
+                change_norm = np.linalg.norm(velocity_change, axis=1)
+                maximum_change = max_acceleration * cfg.step_dt_s
+                scale = np.minimum(
+                    1.0,
+                    maximum_change / np.maximum(change_norm, 1e-12),
+                )
+                velocity_change *= scale[:, None]
+            velocity += velocity_change
             offset += cfg.step_dt_s * velocity
             offsets[:, step] = offset
             velocities[:, step] = velocity

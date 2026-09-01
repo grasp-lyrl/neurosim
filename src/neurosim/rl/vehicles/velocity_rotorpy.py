@@ -40,11 +40,15 @@ class RotorpyVelocityVehicle(RLVehicle):
         self,
         dynamics: Any,
         max_speed_mps: float = 3.0,
+        max_acceleration_mps2: float = 0.0,
         domain_randomization: dict[str, Any] | None = None,
     ):
         self._dynamics = dynamics
         self._multirotor = dynamics._multirotor
         self._max_speed = float(max_speed_mps)
+        self._max_acceleration = float(max_acceleration_mps2 or 0.0)
+        if self._max_acceleration < 0.0:
+            raise ValueError("max_acceleration_mps2 must be non-negative")
         self._domain_randomization = domain_randomization or {}
         self._action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(3,), dtype=np.float32
@@ -88,6 +92,14 @@ class RotorpyVelocityVehicle(RLVehicle):
         speed = float(np.linalg.norm(cmd))
         if speed > self._max_speed:
             cmd = cmd * (self._max_speed / speed)
+        if self._max_acceleration > 0.0:
+            current = np.asarray(self._dynamics.state["v"], dtype=np.float64)
+            gain = np.asarray(self._multirotor.k_v, dtype=np.float64)
+            desired_acceleration = gain * (cmd - current)
+            acceleration_norm = float(np.linalg.norm(desired_acceleration))
+            if acceleration_norm > self._max_acceleration:
+                desired_acceleration *= self._max_acceleration / acceleration_norm
+                cmd = current + desired_acceleration / gain
         merged = dict(control)
         merged["cmd_v"] = cmd
         return merged

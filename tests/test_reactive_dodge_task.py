@@ -11,6 +11,7 @@ pytest.importorskip("magnum", reason="Habitat runtime dependencies not available
 
 from neurosim.rl.tasks import ReactiveDodgeTask, TaskStep, build_task
 from neurosim.rl.vehicles.ctbr_rotorpy import RateLimits, RotorpyCtbrVehicle
+from neurosim.rl.vehicles.velocity_rotorpy import RotorpyVelocityVehicle
 
 
 def _step(
@@ -210,6 +211,26 @@ def test_ctbr_delta_control_clips_to_vehicle_bounds():
     assert cmd[1] == pytest.approx(high[1])
     assert cmd[2] == pytest.approx(low[2])
     assert cmd[3] == pytest.approx(high[3])
+
+
+def test_velocity_vehicle_limits_controller_desired_acceleration():
+    fake_multirotor = SimpleNamespace(k_v=10.0)
+    dynamics = SimpleNamespace(
+        _multirotor=fake_multirotor,
+        state={"v": np.array([0.2, -0.1, 0.0])},
+    )
+    vehicle = RotorpyVelocityVehicle(
+        dynamics=dynamics,
+        max_speed_mps=3.0,
+        max_acceleration_mps2=1.7,
+    )
+
+    control = vehicle.clip_control({"cmd_v": np.array([2.0, 2.0, 0.0])})
+    desired_acceleration = fake_multirotor.k_v * (
+        np.asarray(control["cmd_v"]) - dynamics.state["v"]
+    )
+
+    assert np.linalg.norm(desired_acceleration) == pytest.approx(1.7)
 
 
 def test_gated_ctbr_delta_returns_nominal_when_gate_is_zero():
