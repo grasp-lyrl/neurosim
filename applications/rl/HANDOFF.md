@@ -458,6 +458,40 @@ criterion. Preserving the original strict requirement means moving next to
 direction-constraining geometry, such as a randomized coordinated gap; no
 single ballistic sphere can remove its broad open-space escape set.
 
+#### Velocity-command yaw fix — 2026-09-01
+
+Video inspection found that the quad snapped to one scene-fixed heading after
+every reset. This was a real controller mismatch. The trajectory correctly
+initialised yaw to its local tangent, but upstream RotorPy's `cmd_vel` branch
+hard-codes its desired horizontal body axis to world +X. It therefore ignored
+the trajectory yaw as soon as the first velocity command reached the motors.
+
+Neurosim's local RotorPy models now accept `cmd_yaw`. The velocity-dodge
+environment passes the nominal trajectory yaw with every world-frame velocity
+command; policy corrections remain three-dimensional and cannot steer yaw.
+The desired thrust and velocity calculation is unchanged. Direct vehicle users
+that omit yaw hold their current heading instead of snapping to +X. This is
+implemented for both the Euler and RK45 RotorPy models without modifying the
+installed dependency.
+
+A full-loop seed-9001 probe started at -1.161 rad, followed a turning nominal
+heading to -1.313 rad, and stayed within 0.017 rad (0.96 degrees) after 2.5 s;
+the physical heading remained 1.30 rad away from world +X. The relevant
+regression set passes 94/94. Monolithic suite attempts reached unrelated
+Habitat rendering tests and segfaulted natively inside
+`habitat_sim.get_observation`; no assertion failed, and the same real
+environment passed in an isolated process.
+
+A post-fix sampling-MPC inspection episode succeeded with 0.216 m minimum
+surface clearance and 2.889 m/s^2 peak measured acceleration:
+`outputs/rl/videos/telegraph_v16_yaw_fixed/episode_00_seed9001.mp4`.
+
+All earlier v4--v17 videos and gates used the scene-fixed yaw behavior. Their
+translational conclusions remain historical evidence, but camera FOV, event
+stream, body-frame action orientation, and exact spawn scenarios change under
+the fix. Treat those numbers as pre-yaw-fix and rerun any candidate gate before
+collecting demonstrations or starting BC/PPO.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted

@@ -476,7 +476,16 @@ class ReactiveDodgeEnv(BaseNeurosimRLEnv):
                 acceleration_limit,
                 dt,
             )
-        control = self._vehicle.clip_control({"cmd_v": v_cmd})
+        # RotorPy's stock cmd_vel controller hard-codes world +X as its
+        # desired heading. Carry the nominal path yaw explicitly so dodging
+        # does not steer the camera, while arbitrary scene/path headings are
+        # still respected.
+        control = self._vehicle.clip_control(
+            {
+                "cmd_v": v_cmd,
+                "cmd_yaw": float(flat.get("yaw", 0.0)),
+            }
+        )
         # Continue from what the vehicle actually received if its independent
         # speed bound clipped the slew-limited request.
         self._last_velocity_command = np.asarray(

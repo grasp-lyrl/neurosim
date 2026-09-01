@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 from gymnasium import spaces
+from scipy.spatial.transform import Rotation
 
 from .base import RLVehicle
 
@@ -102,6 +103,15 @@ class RotorpyVelocityVehicle(RLVehicle):
                 cmd = current + desired_acceleration / gain
         merged = dict(control)
         merged["cmd_v"] = cmd
+        # Direct vehicle users do not have a trajectory yaw to provide. Hold
+        # their current heading instead of falling back to RotorPy's implicit
+        # world-+X reference. ReactiveDodgeEnv supplies nominal yaw explicitly.
+        merged.setdefault(
+            "cmd_yaw",
+            float(
+                Rotation.from_quat(self._dynamics.state["q"]).as_euler("xyz")[2]
+            ),
+        )
         return merged
 
     def action_to_control(self, action: np.ndarray) -> dict[str, np.ndarray | float]:

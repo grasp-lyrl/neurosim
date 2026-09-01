@@ -6,9 +6,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 import yaml
+from scipy.spatial.transform import Rotation
 
 pytest.importorskip("magnum", reason="Habitat runtime dependencies not available")
 
+from neurosim.core.dynamics.multirotor_euler import MultirotorEuler
+from neurosim.core.dynamics.rotorpy_wrapper import YawAwareMultirotor
 from neurosim.rl.tasks import ReactiveDodgeTask, TaskStep, build_task
 from neurosim.rl.vehicles.ctbr_rotorpy import RateLimits, RotorpyCtbrVehicle
 from neurosim.rl.vehicles.velocity_rotorpy import RotorpyVelocityVehicle
@@ -217,7 +220,10 @@ def test_velocity_vehicle_limits_controller_desired_acceleration():
     fake_multirotor = SimpleNamespace(k_v=10.0)
     dynamics = SimpleNamespace(
         _multirotor=fake_multirotor,
-        state={"v": np.array([0.2, -0.1, 0.0])},
+        state={
+            "v": np.array([0.2, -0.1, 0.0]),
+            "q": np.array([0.0, 0.0, 0.0, 1.0]),
+        },
     )
     vehicle = RotorpyVelocityVehicle(
         dynamics=dynamics,
@@ -231,6 +237,63 @@ def test_velocity_vehicle_limits_controller_desired_acceleration():
     )
 
     assert np.linalg.norm(desired_acceleration) == pytest.approx(1.7)
+
+
+def test_velocity_vehicle_preserves_explicit_yaw_or_holds_current_heading():
+    yaw = 1.1
+    dynamics = SimpleNamespace(
+        _multirotor=SimpleNamespace(k_v=10.0),
+        state={
+            "v": np.zeros(3),
+            "q": Rotation.from_euler("z", yaw).as_quat(),
+        },
+    )
+    vehicle = RotorpyVelocityVehicle(dynamics=dynamics)
+
+    explicit = vehicle.clip_control(
+        {"cmd_v": np.zeros(3), "cmd_yaw": -0.4}
+    )
+    implicit = vehicle.clip_control({"cmd_v": np.zeros(3)})
+
+    assert explicit["cmd_yaw"] == pytest.approx(-0.4)
+    assert implicit["cmd_yaw"] == pytest.approx(yaw)
+
+
+@pytest.mark.parametrize("model_cls", [MultirotorEuler, YawAwareMultirotor])
+def test_cmd_vel_models_track_requested_yaw_instead_of_world_x(model_cls):
+    from rotorpy.vehicles.crazyflie_params import quad_params
+
+    model = model_cls(
+        quad_params,
+        control_abstraction="cmd_vel",
+        aero=False,
+    )
+    state = {
+        key: np.asarray(value).copy() for key, value in model.initial_state.items()
+    }
+    state["q"] = Rotation.from_euler("z", np.pi / 2.0).as_quat()
+    state["w"] = np.zeros(3)
+    state["v"] = np.zeros(3)
+
+    hold_heading = model.get_cmd_motor_speeds(
+        state,
+        {"cmd_v": np.zeros(3), "cmd_yaw": np.pi / 2.0},
+    )
+    force_world_x = model.get_cmd_motor_speeds(
+        state,
+        {"cmd_v": np.zeros(3), "cmd_yaw": 0.0},
+    )
+    upstream_world_x = model.get_cmd_motor_speeds(
+        state,
+        {"cmd_v": np.zeros(3)},
+    )
+
+    # A matched heading needs hover thrust and no yaw moment: all motors are
+    # equal. The old hard-coded world-X behavior instead produces the second,
+    # strongly differential command from this same pi/2 initial attitude.
+    assert np.ptp(hold_heading) < 1e-8
+    assert np.ptp(force_world_x) > 1.0
+    np.testing.assert_allclose(force_world_x, upstream_world_x)
 
 
 def test_gated_ctbr_delta_returns_nominal_when_gate_is_zero():

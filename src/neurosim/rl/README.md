@@ -108,6 +108,13 @@ velocity, the policy's own dodge would swing the camera, changing what it
 sees, changing the next action: a perception/action feedback loop that makes
 credit assignment much harder.
 
+For `cmd_vel`, Neurosim passes that nominal yaw as `cmd_yaw` to its local
+RotorPy dynamics wrapper. Upstream RotorPy otherwise fixes the desired
+horizontal body axis to world +X, which makes every reset snap toward one
+scene-fixed direction and ignores the trajectory yaw. The local extension
+changes only this otherwise-free heading; the velocity/thrust calculation is
+unchanged. Direct vehicle users that omit `cmd_yaw` hold their current heading.
+
 ---
 
 ## 3. Mapping the correction onto the controller

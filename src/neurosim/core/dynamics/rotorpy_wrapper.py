@@ -5,8 +5,13 @@ from rotorpy.vehicles.multirotor import Multirotor
 
 from .types import DynamicsProtocol, DynamicsType
 from neurosim.core.coord_trans import CoordinateTransform
+from .multirotor_euler import YawAwareVelocityMixin
 
 logger = logging.getLogger(__name__)
+
+
+class YawAwareMultirotor(YawAwareVelocityMixin, Multirotor):
+    """RK45 RotorPy model with Neurosim's explicit cmd_vel yaw reference."""
 
 
 def get_vehicle_params(vehicle_name: str = "crazyflie") -> dict[str, Any]:
@@ -28,7 +33,7 @@ def get_multirotor_model(
     control_abstraction: str = "cmd_motor_speeds",
 ) -> Multirotor:
     if dynamics_type == DynamicsType.ROTORPY_MULTIROTOR:
-        quadsim = Multirotor(
+        quadsim = YawAwareMultirotor(
             vehicle_params,
             control_abstraction=control_abstraction,
             aero=False,
