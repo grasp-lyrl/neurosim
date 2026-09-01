@@ -212,6 +212,25 @@ was worse than the original clone on success/collisions, so it is rejected and
 must not replace the PPO warm start. Artifacts use the
 `mpc_v4_accel5_dagger{1,2}_*` prefix under `outputs/rl/bc/`.
 
+Interim PPO audit on 2026-09-01 (still below the registered 2M-step decision
+gate): scratch PPO was at about 1.12M steps and BC-warm PPO at about 0.72M.
+The last five built-in 40-episode evaluations averaged 31.0% success for
+scratch and 33.0% for BC-warm; the curves remain noisy and neither learner is
+separating from the blind/BC baselines. Fresh visual-audit seeds 14001--14003
+scored 1/3 for scratch checkpoint 1,081,344 and 0/3 for BC-warm checkpoint
+688,128. More importantly, the learned policies are not acceleration bounded:
+measured vehicle peaks were 8.81--10.59 m/s^2 for scratch and 6.72--10.57
+m/s^2 for BC-warm, with residual-command peaks as high as 18.03 m/s^2. The
+teacher's 5 m/s^2 projection therefore does not by itself constrain PPO.
+Inspection artifacts (including acceleration telemetry) are:
+
+- `outputs/rl/videos/ppo_scratch_step1081344/`
+- `outputs/rl/videos/ppo_bc_warm_step688128/`
+
+Continue both jobs to 2M for the registered comparison, but treat explicit
+action-rate projection/limiting in the learned-policy path as required before
+promoting either checkpoint for deployment.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted
