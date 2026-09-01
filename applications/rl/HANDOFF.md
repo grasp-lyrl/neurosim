@@ -492,6 +492,51 @@ stream, body-frame action orientation, and exact spawn scenarios change under
 the fix. Treat those numbers as pre-yaw-fix and rerun any candidate gate before
 collecting demonstrations or starting BC/PPO.
 
+#### Post-yaw-fix v16 gate — rejected 2026-09-01
+
+The selected v16 telegraph smoke was rerun on the original matched seeds after
+the yaw fix. `evaluate_velocity_dodge_blind.py` now makes the previously
+unsaved blind evaluator reproducible: zero action, +0.8 body-lateral offset,
+0.8-amplitude / 0.5 Hz body-lateral weave, and uniformly random actions in
+`[-0.8, 0.8]` held for 0.25 or 0.50 s. Action energies match the historical
+one-off evaluator.
+
+| arm | mean return | episode success | encounter clear rate |
+|---|---:|---:|---:|
+| zero control | -126.5 | 0% | 12.5% (2/16) |
+| held +0.8 offset | -146.8 | 0% | 26.3% (5/19) |
+| blind weave | -21.4 | 30% | 84.1% (37/44) |
+| held-random 0.25 s | -85.8 | 10% | 53.8% (14/26) |
+| held-random 0.50 s | -54.6 | 40% | 81.1% (30/37) |
+| **sampling-MPC oracle** | **+78.5** | **5/5 (100%)** | **100%** |
+
+The oracle remains physically feasible: zero collisions, 0.309 m median
+clearance, 0.235 m p10, 0.216 m minimum, 2.915 m/s^2 worst measured
+acceleration, and 31.1 m/s^3 mean per-episode peak vehicle jerk (35.9 worst).
+It still passes the small oracle gate.
+
+The task nevertheless fails the blind-motion gate more decisively than before.
+Correct tangent-tracking yaw makes a body-frame lateral weave stay genuinely
+cross-track to the nominal path; under the old scene-fixed yaw, the same action
+often had a useless along-track component. Correcting the controller therefore
+exposed rather than caused the underlying single-sphere degeneracy. Weave gains
+71.6 encounter-clear points over zero, versus the registered maximum of 15.
+Do not run the 40-episode gate, collect demonstrations, or launch BC/PPO from
+v16.
+
+Artifacts are `outputs/rl/telegraph_v16_yawfix_*.{json,log}`. Every worker
+wrote and flushed its complete summary, then Habitat segfaulted during native
+process teardown (exit 139), the same renderer/context issue seen in the broad
+test suite; all JSON episode counts and rows were validated after exit. A
+representative blind-weave success is:
+`outputs/rl/videos/telegraph_v16_yawfix_blind_weave/episode_00_seed9007.mp4`.
+The post-fix oracle video remains
+`outputs/rl/videos/telegraph_v16_yaw_fixed/episode_00_seed9001.mp4`.
+
+Decision: preserve the strict non-degeneracy requirement and move to
+direction-constraining geometry (for example a randomized coordinated gap).
+More tuning of a single ballistic sphere is not justified by these results.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted

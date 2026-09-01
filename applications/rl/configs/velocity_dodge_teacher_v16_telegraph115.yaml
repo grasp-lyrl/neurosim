@@ -3,6 +3,13 @@
 # reached just 0.148 m clearance. This is still materially shorter than the
 # accepted v6 task's 1.4--1.8 s window and yields roughly 6--8 m/s launches
 # from the same camera-visible 7--9 m spawn range.
+#
+# Rejected after the 2026-09-01 yaw fix. On seeds 9001--9010, zero action
+# cleared 12.5% of encounters, while a blind body-lateral 0.8 / 0.5 Hz weave
+# cleared 84.1% and held-random 0.50 s actions cleared 81.1%. The sampling-MPC
+# oracle remained 5/5 with 0.309 m median clearance and 2.915 m/s^2 worst
+# measured acceleration, but teacher feasibility cannot rescue the failed
+# non-degeneracy gate. Do not collect BC data or launch PPO from this config.
 experiment_config: applications/rl/configs/velocity_dodge_teacher_v15_telegraph10.yaml
 
 overrides:
