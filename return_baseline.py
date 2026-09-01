@@ -43,7 +43,9 @@ EPISODES = int(sys.argv[2]) if len(sys.argv) > 2 else 20
 #   ... run concurrently, then concatenate the logs.
 #
 # Names: control, const+0.40, const+0.80, weave0.4@0.5Hz, weave0.8@0.5Hz,
-# oracle. Omit to run all six in one process, as before. An optional fourth
+# random0.8@0.25s, random0.8@0.50s, oracle. Omit to run all arms in one
+# process, as before. Held random actions are seeded per episode and therefore
+# exactly reproducible across task candidates. An optional fourth
 # argument applies an experimental peak advance to the oracle only:
 #
 #   python return_baseline.py <cfg> 40 oracle 0.25
@@ -63,6 +65,7 @@ ORACLE_CANDIDATES = (
 )
 WEAVES = [(0.4, 0.5), (0.8, 0.5)]
 CONSTS = [0.4, 0.8]
+RANDOMS = [(0.8, 0.25), (0.8, 0.50)]
 
 cfg = load_experiment_config(CFG)
 env_cfg = copy.deepcopy(cfg["env"])
@@ -77,7 +80,7 @@ print("%16s %12s %10s %9s %10s  %s"
       flush=True)
 
 
-def run(mode, amp=0.0, freq=0.0, const=0.0, label=None):
+def run(mode, amp=0.0, freq=0.0, const=0.0, hold=0.0, label=None):
     rets, steps_all, energies, wins = [], [], [], 0
     term = collections.Counter()
     for i in range(EPISODES):
@@ -98,6 +101,9 @@ def run(mode, amp=0.0, freq=0.0, const=0.0, label=None):
             env._trajectory_expert_failed_plans = 0
             env._trajectory_expert_plan_diagnostics = []
         total, n, energy = 0.0, 0, 0.0
+        action_rng = np.random.default_rng(SEED0 + i + 700_001)
+        held_random = np.zeros(dim, dtype=np.float32)
+        next_random_time = -np.inf
         while True:
             now = float(env.sim.time)
             if mode == "oracle":
@@ -108,6 +114,13 @@ def run(mode, amp=0.0, freq=0.0, const=0.0, label=None):
                     action[-2] = amp * np.sin(2.0 * np.pi * freq * now)
                 elif mode == "const":
                     action[-2] = const
+                elif mode == "random":
+                    if now >= next_random_time - 1e-9:
+                        held_random = action_rng.uniform(
+                            -amp, amp, size=dim
+                        ).astype(np.float32)
+                        next_random_time = now + hold
+                    action[:] = held_random
             _, reward, terminated, truncated, info = env.step(action)
             total += float(reward)
             # mean(action^2) -- the quantity w_correction prices, and the
@@ -152,6 +165,14 @@ for amp, freq in WEAVES:
     maybe(
         "weave%.1f@%.1fHz" % (amp, freq),
         "weave", amp=amp, freq=freq, label="weave%.1f@%.1fHz" % (amp, freq),
+    )
+for amp, hold in RANDOMS:
+    maybe(
+        "random%.1f@%.2fs" % (amp, hold),
+        "random",
+        amp=amp,
+        hold=hold,
+        label="random%.1f@%.2fs" % (amp, hold),
     )
 maybe("oracle", "oracle")
 env.close()

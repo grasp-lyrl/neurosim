@@ -1,0 +1,31 @@
+# Aggressive shorter-window bracket.  Inherits v8 and changes only projectile
+# speed from 7 to 8 m/s, reducing the 7--9 m reaction window to 0.875--1.125 s.
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v8_speed7.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        templates:
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 3.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 8.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_parabola
+            mass: 0.2
+            ttl_s: 3.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 8.0
+            parabola_gravity_mps2: 3.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 3.5
+            collision_radius: 0.15
+            kinematic_speed_mps: 8.0
