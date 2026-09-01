@@ -586,12 +586,43 @@ class HabitatWrapper(VisualBackendProtocol):
         # composition (rotation order, Euler convention) by hand, which is
         # exactly the class of mistake that produced the wrong "forward"
         # reference the first time.
+        camera_pos = None
         camera_quat = None
-        if agent_state.sensor_states:
-            first_sensor = next(iter(agent_state.sensor_states.values()))
-            camera_quat = np.asarray(first_sensor.rotation.components, dtype=np.float32)
+        camera_hfov = None
+        camera_aspect = None
+        camera_uuid = self._dynamic_obstacles.cfg.spawn_camera_uuid
+        sensors = self.settings.get("sensors", {})
+        if camera_uuid is None:
+            # Prefer the event stream consumed by the policy.  Falling back
+            # to another rendered camera keeps legacy non-policy scenes
+            # working when camera-FOV gating is not requested.
+            camera_uuid = next(
+                (name for name, cfg in sensors.items() if cfg.get("type") == "event"),
+                next(iter(agent_state.sensor_states), None),
+            )
+        camera_cfg = sensors.get(camera_uuid, {})
+        camera_state = agent_state.sensor_states.get(camera_uuid)
+        if camera_state is not None:
+            camera_pos = np.asarray(camera_state.position, dtype=np.float32)
+            camera_quat = np.asarray(
+                camera_state.rotation.components, dtype=np.float32
+            )
+            if camera_cfg.get("hfov") is not None:
+                camera_hfov = float(camera_cfg["hfov"])
+            width = float(camera_cfg.get("width", 0.0))
+            height = float(camera_cfg.get("height", 0.0))
+            if width > 0.0 and height > 0.0:
+                camera_aspect = width / height
 
-        self._dynamic_obstacles.step(sim_time, agent_pos, agent_quat, camera_quat)
+        self._dynamic_obstacles.step(
+            sim_time,
+            agent_pos,
+            agent_quat,
+            camera_quaternion=camera_quat,
+            camera_position=camera_pos,
+            camera_hfov_deg=camera_hfov,
+            camera_aspect_ratio=camera_aspect,
+        )
 
         if (
             self.settings["enable_physics"]

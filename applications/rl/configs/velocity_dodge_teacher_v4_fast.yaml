@@ -1172,6 +1172,14 @@ env:
     navmesh_agent_radius: 0.25
     dynamic_obstacles:
       enabled: true
+      # A perception policy can only be held responsible for threats it can
+      # observe.  Require every organic/scheduled throw to spawn inside the
+      # event camera's true 3-D pinhole frustum and with camera-to-obstacle
+      # line of sight.  Five degrees of inset keeps the finite sphere visibly
+      # inside the image instead of accepting a centre on the last pixel.
+      require_camera_fov: true
+      spawn_camera_uuid: event_camera_1
+      spawn_fov_margin_deg: 5.0
       # Switched from the scripted intercept scheduler (guaranteed-hit
       # throws solved against the nominal trajectory) to this simpler,
       # organic spawner: throws are aimed at wherever the drone actually is

@@ -604,6 +604,61 @@ def test_aim_scatter_decouples_throws_from_the_drone():
     assert parsed.aim_scatter_m == pytest.approx(3.5)
 
 
+def test_camera_frustum_uses_horizontal_and_vertical_intrinsics():
+    """A forward-cone azimuth is not enough to guarantee image visibility."""
+    mgr = DynamicObstacleManager.__new__(DynamicObstacleManager)
+    camera_position = np.zeros(3)
+    identity = np.array([1.0, 0.0, 0.0, 0.0])
+
+    # Identity Habitat camera looks along world -Z.  At 90 deg horizontal
+    # FOV and square aspect, both half angles are 45 deg.
+    assert mgr._is_in_camera_frustum(
+        [0.0, 0.0, -5.0], camera_position, identity, hfov_deg=90, aspect_ratio=1
+    )
+    assert not mgr._is_in_camera_frustum(
+        [6.0, 0.0, -5.0], camera_position, identity, hfov_deg=90, aspect_ratio=1
+    )
+    assert not mgr._is_in_camera_frustum(
+        [0.0, 6.0, -5.0], camera_position, identity, hfov_deg=90, aspect_ratio=1
+    )
+    assert not mgr._is_in_camera_frustum(
+        [0.0, 0.0, 5.0], camera_position, identity, hfov_deg=90, aspect_ratio=1
+    )
+
+    # A 5-degree inset rejects a centre at 42 degrees even though it is
+    # technically within the raw 45-degree image boundary.
+    edge = [5.0 * np.tan(np.deg2rad(42.0)), 0.0, -5.0]
+    assert mgr._is_in_camera_frustum(
+        edge, camera_position, identity, hfov_deg=90, aspect_ratio=1
+    )
+    assert not mgr._is_in_camera_frustum(
+        edge,
+        camera_position,
+        identity,
+        hfov_deg=90,
+        aspect_ratio=1,
+        margin_deg=5.0,
+    )
+
+
+def test_camera_gated_spawns_fail_closed_without_camera_metadata():
+    """Missing camera state must skip a threat, never make it unobservable."""
+    mgr = DynamicObstacleManager.__new__(DynamicObstacleManager)
+    mgr.cfg = DynamicObstaclesConfig.from_dict(
+        {"enabled": True, "require_camera_fov": True}
+    )
+    mgr._has_line_of_sight = lambda *_: True
+
+    assert not mgr._spawn_is_visible(
+        np.array([0.0, 0.0, -5.0]),
+        observer_position=np.zeros(3),
+        camera_position=None,
+        camera_quaternion=None,
+        camera_hfov_deg=None,
+        camera_aspect_ratio=None,
+    )
+
+
 def test_aim_scatter_is_uniform_inside_the_sphere():
     """Isotropic scatter, not concentrated on a shell.
 

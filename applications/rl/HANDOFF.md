@@ -282,10 +282,45 @@ separate `velocity_dodge_teacher_v6_accel3.yaml` inherits v5 and relaxes only
 the internal acceleration caps: 2.9 m/s^2 command slew and 2.7 m/s^2 modeled
 and controller desired acceleration. Seed 9101 smoked at 0.409 m clearance,
 2.519 m/s^2 peak measured acceleration, and zero MPC safety slack. Its matched
-40-seed gate is active in four shards, writing
+40-seed pre-FOV gate completed in four shards, writing
 `outputs/rl/mpc_accel3_gate_{a,b,c,d}.{json,log}`. Acceptance is unchanged
 except for the requested <=3.0 m/s^2 measured ceiling. Demonstrations remain
 blocked until the gate passes every criterion.
+
+#### Camera-observable spawning and acceleration-3 update — 2026-09-01
+
+The first acceleration-3 gate completed at 40/40 success, +26.2 mean return,
+zero collisions, 2.906 m/s^2 worst measured acceleration, 0.414 m median
+clearance, and 0.386 m clearance p10. It passed every numerical criterion,
+but is now a **pre-FOV baseline**, not the demonstration-collection gate.
+
+Video inspection exposed a separate jerk problem despite the acceleration
+ceiling. Seeds 9101/9102/9103 all succeeded with 0.396--0.417 m clearance and
+1.90--2.52 m/s^2 peak acceleration, but some avoidance looked indecisive.
+Across the full pre-FOV gate, mean per-episode peak vehicle jerk was 31.0
+m/s^3 (worst 42.5), and mean peak residual-command jerk was 82.1 m/s^3
+(worst 168.4). The acceleration limit is working; temporal command
+commitment is not. Videos are under
+`outputs/rl/videos/sampling_mpc_accel3/`.
+
+The organic spawner previously used the live rendered camera yaw plus a
+configured +/-45-degree azimuth range and scene line of sight. That was not a
+true visibility guarantee: it ignored pitch/roll, vertical FOV and image-edge
+margin, while scheduled intercepts bypassed the camera check completely.
+Dynamic-obstacle spawning now supports a fail-closed 3-D pinhole-frustum gate
+using the selected sensor's live Habitat pose, horizontal FOV, derived vertical
+FOV, and camera-origin raycast. v4 (therefore v5/v6) requires
+`event_camera_1`, with a 5-degree inset. Organic candidates are resampled;
+scheduled candidates outside the view are skipped. Missing camera metadata
+rejects the spawn instead of creating an unobservable threat.
+
+Targeted tests pass (5/5), including real-Habitat LOS and existing aim/lead
+behavior. Exact-spawn instrumentation on seeds 9301--9308 validated 8/8
+accepted obstacles inside the inset frustum with line of sight; all 8 also
+remained inside the raw camera FOV at the first policy observation. The
+numerical gate must be rerun under this corrected spawn contract before any
+demonstration collection. Keep jerk smoothing as a separate registered change
+so visibility and control-quality effects remain identifiable.
 
 ---
 

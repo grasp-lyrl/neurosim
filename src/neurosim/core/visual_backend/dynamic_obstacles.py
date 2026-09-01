@@ -155,6 +155,16 @@ class DynamicObstaclesConfig:
     # between the candidate and the drone.
     max_spawn_attempts: int = 12
     spawn_los_slack_m: float = 0.1
+    # When enabled, a dynamic obstacle may only be instantiated if its spawn
+    # centre lies inside the configured camera's true 3-D pinhole frustum and
+    # has an unobstructed sight-line from that camera.  The check is deliberately
+    # opt-in because generic simulator scenes may have no policy camera at all.
+    require_camera_fov: bool = False
+    spawn_camera_uuid: str | None = None
+    # Keep spawn centres away from the image boundary.  A centre exactly on a
+    # pinhole-frustum edge is technically visible but gives a finite-size object
+    # only a few pixels (or none after rasterisation/cropping).
+    spawn_fov_margin_deg: float = 0.0
     seed: int | None = None
     dataset_config_file: str | None = None
     templates: list[DynamicObstacleTemplate] = field(default_factory=list)
@@ -214,6 +224,9 @@ class DynamicObstaclesConfig:
             ),
             max_spawn_attempts=int(data.get("max_spawn_attempts", 12)),
             spawn_los_slack_m=float(data.get("spawn_los_slack_m", 0.1)),
+            require_camera_fov=bool(data.get("require_camera_fov", False)),
+            spawn_camera_uuid=data.get("spawn_camera_uuid"),
+            spawn_fov_margin_deg=float(data.get("spawn_fov_margin_deg", 0.0)),
             seed=data.get("seed"),
             dataset_config_file=data.get("dataset_config_file"),
             templates=templates,
@@ -369,6 +382,9 @@ class DynamicObstacleManager:
         drone_position: np.ndarray,
         drone_quaternion: np.ndarray,
         camera_quaternion: np.ndarray | None = None,
+        camera_position: np.ndarray | None = None,
+        camera_hfov_deg: float | None = None,
+        camera_aspect_ratio: float | None = None,
     ) -> None:
         if not self.cfg.enabled or self.cfg.static_obstacle_count > 0:
             # Pre-placed fields are fixed at reset; nothing spawns in flight.
@@ -384,7 +400,15 @@ class DynamicObstacleManager:
                 drone_velocity = (drone_position - self._previous_drone_position) / elapsed
 
         if self._intercept_schedule:
-            self._spawn_due_intercepts(sim_time, drone_position, drone_velocity)
+            self._spawn_due_intercepts(
+                sim_time,
+                drone_position,
+                drone_velocity,
+                camera_position=camera_position,
+                camera_quaternion=camera_quaternion,
+                camera_hfov_deg=camera_hfov_deg,
+                camera_aspect_ratio=camera_aspect_ratio,
+            )
         elif (
             sim_time - self._last_spawn_time >= self._next_spawn_wait
             and len(self._active) < self.cfg.max_concurrent
@@ -395,6 +419,9 @@ class DynamicObstacleManager:
                 drone_quaternion,
                 drone_velocity,
                 camera_quaternion,
+                camera_position,
+                camera_hfov_deg,
+                camera_aspect_ratio,
             )
             self._last_spawn_time = sim_time
             self._next_spawn_wait = self._sample_spawn_wait()
@@ -415,6 +442,11 @@ class DynamicObstacleManager:
         sim_time: float,
         drone_position: np.ndarray,
         drone_velocity: np.ndarray | None,
+        *,
+        camera_position: np.ndarray | None = None,
+        camera_quaternion: np.ndarray | None = None,
+        camera_hfov_deg: float | None = None,
+        camera_aspect_ratio: float | None = None,
     ) -> None:
         """Spawn scheduled throws whose launch time has arrived."""
         while self._intercept_spawned < len(self._intercept_schedule):
@@ -436,6 +468,16 @@ class DynamicObstacleManager:
                 spawn_position, velocity = solve_spawn_retarget(
                     entry, drone_position, drone_velocity
                 )
+            if not self._spawn_is_visible(
+                spawn_position,
+                observer_position=drone_position,
+                camera_position=camera_position,
+                camera_quaternion=camera_quaternion,
+                camera_hfov_deg=camera_hfov_deg,
+                camera_aspect_ratio=camera_aspect_ratio,
+            ):
+                logger.debug("Skipping intercept outside the policy-camera view")
+                continue
             self._instantiate(
                 template=template,
                 spawn_position=np.asarray(spawn_position, dtype=np.float32),
@@ -624,6 +666,9 @@ class DynamicObstacleManager:
         drone_quaternion: np.ndarray,
         drone_velocity: np.ndarray | None = None,
         camera_quaternion: np.ndarray | None = None,
+        camera_position: np.ndarray | None = None,
+        camera_hfov_deg: float | None = None,
+        camera_aspect_ratio: float | None = None,
     ) -> None:
         if not self._resolved_templates:
             return
@@ -645,7 +690,13 @@ class DynamicObstacleManager:
             )
         else:
             spawn_position = self._sample_spawn_position(
-                drone_position, drone_quaternion, drone_velocity, camera_quaternion
+                drone_position,
+                drone_quaternion,
+                drone_velocity,
+                camera_quaternion,
+                camera_position,
+                camera_hfov_deg,
+                camera_aspect_ratio,
             )
         if spawn_position is None:
             return
@@ -1009,6 +1060,9 @@ class DynamicObstacleManager:
         drone_quaternion: np.ndarray,
         drone_velocity: np.ndarray | None = None,
         camera_quaternion: np.ndarray | None = None,
+        camera_position: np.ndarray | None = None,
+        camera_hfov_deg: float | None = None,
+        camera_aspect_ratio: float | None = None,
     ) -> np.ndarray | None:
         drone_position = np.asarray(drone_position, dtype=np.float32)
 
@@ -1076,14 +1130,112 @@ class DynamicObstacleManager:
                 dtype=np.float32,
             )
             candidate = drone_position + offset
-            if self._has_line_of_sight(candidate, drone_position):
+            if self._spawn_is_visible(
+                candidate,
+                observer_position=drone_position,
+                camera_position=camera_position,
+                camera_quaternion=camera_quaternion,
+                camera_hfov_deg=camera_hfov_deg,
+                camera_aspect_ratio=camera_aspect_ratio,
+            ):
                 return candidate
 
         logger.debug(
-            "No line-of-sight obstacle spawn position found after %d attempts",
+            "No visible obstacle spawn position found after %d attempts",
             self.cfg.max_spawn_attempts,
         )
         return None
+
+    def _spawn_is_visible(
+        self,
+        candidate: np.ndarray,
+        *,
+        observer_position: np.ndarray,
+        camera_position: np.ndarray | None,
+        camera_quaternion: np.ndarray | None,
+        camera_hfov_deg: float | None,
+        camera_aspect_ratio: float | None,
+    ) -> bool:
+        """Apply the configured spawn observability contract.
+
+        The historical organic spawner only checked azimuth and a ray to the
+        drone body.  That is not equivalent to camera visibility once the
+        vehicle pitches/rolls or the sensor has a local mount transform.  In
+        camera-gated tasks missing camera metadata fails closed: silently
+        spawning an unobservable training threat is worse than skipping it.
+        """
+        if not self.cfg.require_camera_fov:
+            return self._has_line_of_sight(candidate, observer_position)
+        if (
+            camera_position is None
+            or camera_quaternion is None
+            or camera_hfov_deg is None
+            or camera_aspect_ratio is None
+        ):
+            logger.warning(
+                "Camera-FOV obstacle spawning requested but camera pose/intrinsics "
+                "are unavailable; rejecting the spawn"
+            )
+            return False
+        if not self._is_in_camera_frustum(
+            candidate,
+            camera_position,
+            camera_quaternion,
+            hfov_deg=float(camera_hfov_deg),
+            aspect_ratio=float(camera_aspect_ratio),
+            margin_deg=float(self.cfg.spawn_fov_margin_deg),
+        ):
+            return False
+        return self._has_line_of_sight(candidate, camera_position)
+
+    @staticmethod
+    def _is_in_camera_frustum(
+        point: np.ndarray,
+        camera_position: np.ndarray,
+        camera_quaternion: np.ndarray,
+        *,
+        hfov_deg: float,
+        aspect_ratio: float,
+        margin_deg: float = 0.0,
+    ) -> bool:
+        """Whether a world point is inside a Habitat pinhole-camera frustum.
+
+        Habitat cameras look along local ``-Z`` and their quaternions use
+        Hamilton ``[w, x, y, z]`` ordering.  Vertical FOV is derived from the
+        horizontal FOV and image aspect ratio, matching a pinhole projection.
+        """
+        delta = np.asarray(point, dtype=np.float64) - np.asarray(
+            camera_position, dtype=np.float64
+        )
+        q = np.asarray(camera_quaternion, dtype=np.float64)
+        q_norm = float(np.linalg.norm(q))
+        if q.size != 4 or q_norm < 1e-12 or aspect_ratio <= 0.0:
+            return False
+        w, x, y, z = q / q_norm
+        # Camera-local -> world rotation; transpose maps world -> camera.
+        rotation = np.array(
+            [
+                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+            ],
+            dtype=np.float64,
+        )
+        local = rotation.T @ delta
+        depth = -float(local[2])
+        if depth <= 1e-9:
+            return False
+
+        half_h = np.deg2rad(float(hfov_deg)) * 0.5
+        half_v = np.arctan(np.tan(half_h) / float(aspect_ratio))
+        margin = np.deg2rad(max(float(margin_deg), 0.0))
+        half_h -= margin
+        half_v -= margin
+        if half_h <= 0.0 or half_v <= 0.0:
+            return False
+        horizontal_angle = abs(float(np.arctan2(local[0], depth)))
+        vertical_angle = abs(float(np.arctan2(local[1], depth)))
+        return horizontal_angle <= half_h and vertical_angle <= half_v
 
     def _reaim(
         self,
