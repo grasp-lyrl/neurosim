@@ -231,6 +231,38 @@ Continue both jobs to 2M for the registered comparison, but treat explicit
 action-rate projection/limiting in the learned-policy path as required before
 promoting either checkpoint for deployment.
 
+#### Low-acceleration pipeline — active 2026-09-01
+
+The user rejected 5 m/s^2 as too aggressive and also rejected the oracle's
+small visual margins. A separate inherited configuration now lives at
+`velocity_dodge_teacher_v5_accel2.yaml`; the active v4 PPO jobs and config
+remain untouched.
+
+The new limit is shared rather than oracle-only. The complete world-frame
+velocity command is slew-limited in `ReactiveDodgeEnv`, and
+`RotorpyVelocityVehicle` separately caps RotorPy's desired acceleration from
+velocity error. The MPC rollout models the same vehicle acceleration bound.
+This applies to oracle, BC, and PPO execution. The internal caps are derated
+to 1.9 m/s^2 command slew and 1.7 m/s^2 desired vehicle acceleration so the
+measured rigid-body gate can enforce <= 2.0 m/s^2.
+
+The original 10 m/s templates at 7--9 m were not physically compatible with
+both 2 m/s^2 motion and larger clearance; moving them to 10--12 m produced no
+valid encounter in the castle. v5 therefore retains the validated 7--9 m
+spawn region and uses 5 m/s templates (still >8x the 0.6 m/s nominal drone),
+a 2.0 s MPC horizon, 0.40 m planned safety margin, and 1.2/1.2/0.8 m/s
+residual-velocity authority. A reproducible seed-9101 smoke scored success,
+0.278 m surface clearance, and 1.898 m/s^2 peak measured acceleration.
+
+An earlier 15/15-success partial sweep must not be used: it exposed a 2.89
+m/s^2 rigid-body spike under command-slew limiting alone and was stopped.
+The final registered 40-seed gate is active in four shards on GPUs 2,3,6,7,
+writing `outputs/rl/mpc_accel2_gate2_{a,b,c,d}.{json,log}`. Its pre-registered
+acceptance criteria are >=80% success, zero obstacle collisions, <=2.0 m/s^2
+worst measured acceleration, finite-clearance median >=0.25 m, and p10 >=0.15
+m. Do not collect demonstrations or start BC/PPO unless every criterion
+passes.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted
