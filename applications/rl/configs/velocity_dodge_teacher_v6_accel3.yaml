@@ -1,0 +1,25 @@
+# Three-m/s^2 successor to the rejected v5 low-acceleration gate. Inherit the
+# controller-aware MPC, 5 m/s single obstacle, 0.40 m safety margin, longer
+# horizon, and larger residual-velocity envelope unchanged. Only relax the
+# acceleration constraints.
+#
+# Registered 40-episode oracle gate before demonstration collection:
+#   * >= 80% episode success and zero obstacle collisions
+#   * <= 3.0 m/s^2 worst measured vehicle acceleration
+#   * finite-clearance median >= 0.25 m and p10 >= 0.15 m
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v5_accel2.yaml
+
+overrides:
+  env:
+    dynamics:
+      # Leave ~10% headroom between RotorPy's desired-acceleration cap and
+      # the measured rigid-body ceiling for attitude/tracking transients.
+      max_acceleration_mps2: 2.7
+    task:
+      config:
+        trajectory:
+          sampling_mpc:
+            max_residual_command_acceleration_mps2: 2.9
+            max_vehicle_acceleration_mps2: 2.7
+        residual_control:
+          velocity_command_accel_limit_mps2: 2.9

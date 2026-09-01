@@ -277,6 +277,16 @@ velocity controller is brittle on some randomized nominal trajectories, not
 merely that the evasive MPC chose an unsafe direction. No demonstrations,
 BC, or PPO were launched from this rejected oracle.
 
+The user approved a 3.0 m/s^2 measured ceiling as the next attempt. The
+separate `velocity_dodge_teacher_v6_accel3.yaml` inherits v5 and relaxes only
+the internal acceleration caps: 2.9 m/s^2 command slew and 2.7 m/s^2 modeled
+and controller desired acceleration. Seed 9101 smoked at 0.409 m clearance,
+2.519 m/s^2 peak measured acceleration, and zero MPC safety slack. Its matched
+40-seed gate is active in four shards, writing
+`outputs/rl/mpc_accel3_gate_{a,b,c,d}.{json,log}`. Acceptance is unchanged
+except for the requested <=3.0 m/s^2 measured ceiling. Demonstrations remain
+blocked until the gate passes every criterion.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted
