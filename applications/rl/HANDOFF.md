@@ -231,7 +231,14 @@ Continue both jobs to 2M for the registered comparison, but treat explicit
 action-rate projection/limiting in the learned-policy path as required before
 promoting either checkpoint for deployment.
 
-#### Low-acceleration pipeline — active 2026-09-01
+The BC-warm PPO was stopped at the user's request after its 753,664-step
+checkpoint (latest eval 40.0% success / -46.3 return) because its inspection
+videos showed excessive acceleration. The synchronized recoverable files are
+`policy_753664_steps.zip` and `policy_vecnormalize_753664_steps.pkl` under
+`outputs/rl/privileged_teacher_v4_fast_bc/checkpoints/`. Scratch v4 PPO was
+left running.
+
+#### Low-acceleration pipeline — rejected gate 2026-09-01
 
 The user rejected 5 m/s^2 as too aggressive and also rejected the oracle's
 small visual margins. A separate inherited configuration now lives at
@@ -256,12 +263,19 @@ residual-velocity authority. A reproducible seed-9101 smoke scored success,
 
 An earlier 15/15-success partial sweep must not be used: it exposed a 2.89
 m/s^2 rigid-body spike under command-slew limiting alone and was stopped.
-The final registered 40-seed gate is active in four shards on GPUs 2,3,6,7,
-writing `outputs/rl/mpc_accel2_gate2_{a,b,c,d}.{json,log}`. Its pre-registered
-acceptance criteria are >=80% success, zero obstacle collisions, <=2.0 m/s^2
+The final registered 40-seed gate completed in four shards, writing
+`outputs/rl/mpc_accel2_gate2_{a,b,c,d}.{json,log}`. Its pre-registered
+acceptance criteria were >=80% success, zero obstacle collisions, <=2.0 m/s^2
 worst measured acceleration, finite-clearance median >=0.25 m, and p10 >=0.15
-m. Do not collect demonstrations or start BC/PPO unless every criterion
-passes.
+m. It is **rejected**: 29/40 = 72.5% success, -36.8 return, one obstacle
+collision, 1.910 m/s^2 worst acceleration, 0.406 m median clearance, and 0.099
+m clearance p10. Shards a/b/c scored 9/10, 10/10, and 10/10, but shard d
+scored 0/10 with six tracking failures, three out-of-bounds exits, and one
+collision. Several tracking/bounds failures had ample obstacle clearance,
+which indicates that applying the low acceleration cap to the complete
+velocity controller is brittle on some randomized nominal trajectories, not
+merely that the evasive MPC chose an unsafe direction. No demonstrations,
+BC, or PPO were launched from this rejected oracle.
 
 ---
 
