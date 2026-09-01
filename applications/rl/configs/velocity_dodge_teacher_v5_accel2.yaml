@@ -1,6 +1,13 @@
 # Low-acceleration successor to the high-speed single-obstacle v4 task.
 # Keep the complete task, reward, observation, and PPO setup inherited from
 # v4 so the only behavioral differences are explicit here.
+#
+# Pre-registered 40-episode oracle gate before demonstration collection:
+#   * >= 80% episode success and zero obstacle collisions
+#   * <= 2.0 m/s^2 worst measured vehicle acceleration
+#   * finite-clearance median >= 0.25 m and p10 >= 0.15 m
+# These margin criteria prevent a high success percentage made of visually
+# unacceptable grazing passes. Do not launch BC/PPO if any criterion fails.
 experiment_config: applications/rl/configs/velocity_dodge_teacher_v4_fast.yaml
 
 overrides:
