@@ -42,8 +42,9 @@ EPISODES = int(sys.argv[2]) if len(sys.argv) > 2 else 20
 #   python return_baseline.py <cfg> 40 oracle
 #   ... run concurrently, then concatenate the logs.
 #
-# Names: control, const+0.40, const+0.80, weave0.4@0.5Hz, weave0.8@0.5Hz,
-# random0.8@0.25s, random0.8@0.50s, oracle. Omit to run all arms in one
+# Names: control, const-0.80, const-0.40, const+0.40, const+0.80,
+# weave0.4@0.5Hz, weave0.8@0.5Hz, random0.8@0.25s,
+# random0.8@0.50s, oracle. Omit to run all arms in one
 # process, as before. Held random actions are seeded per episode and therefore
 # exactly reproducible across task candidates. An optional fourth
 # argument applies an experimental peak advance to the oracle only:
@@ -64,7 +65,7 @@ ORACLE_CANDIDATES = (
     else None
 )
 WEAVES = [(0.4, 0.5), (0.8, 0.5)]
-CONSTS = [0.4, 0.8]
+CONSTS = [-0.8, -0.4, 0.4, 0.8]
 RANDOMS = [(0.8, 0.25), (0.8, 0.50)]
 
 cfg = load_experiment_config(CFG)
@@ -75,13 +76,14 @@ dim = int(np.prod(env.action_space.shape))
 
 print("config: %s" % CFG)
 print("return is what PPO maximises; success is not\n")
-print("%16s %12s %10s %9s %10s  %s"
-      % ("arm", "return", "return/step", "success", "act_energy", "terminations"),
+print("%16s %12s %10s %9s %10s %10s  %s"
+      % ("arm", "return", "return/step", "success", "act_energy", "enc_clear", "terminations"),
       flush=True)
 
 
 def run(mode, amp=0.0, freq=0.0, const=0.0, hold=0.0, label=None):
     rets, steps_all, energies, wins = [], [], [], 0
+    encounters_total, encounters_cleared = 0, 0
     term = collections.Counter()
     for i in range(EPISODES):
         env.reset(seed=SEED0 + i)
@@ -131,6 +133,8 @@ def run(mode, amp=0.0, freq=0.0, const=0.0, hold=0.0, label=None):
             energy += float(terms.get("correction_energy", 0.0))
             n += 1
             if terminated or truncated:
+                encounters_total += int(terms.get("encounters_total", 0.0))
+                encounters_cleared += int(terms.get("encounters_cleared", 0.0))
                 term[info.get("termination_reason") or "timeout"] += 1
                 wins += bool(info.get("is_success", False))
                 break
@@ -138,10 +142,12 @@ def run(mode, amp=0.0, freq=0.0, const=0.0, hold=0.0, label=None):
         steps_all.append(n)
         energies.append(energy / max(n, 1))
     name = label or mode
-    print("%16s %12.1f %10.3f %8.1f%% %10.4f  %s"
+    encounter_rate = encounters_cleared / max(encounters_total, 1)
+    print("%16s %12.1f %10.3f %8.1f%% %10.4f %8.1f%%  %s"
           % (name, float(np.mean(rets)),
              float(np.sum(rets)) / max(float(np.sum(steps_all)), 1.0),
              100 * wins / EPISODES, float(np.mean(energies)),
+             100 * encounter_rate,
              dict(term.most_common(3))), flush=True)
 
 

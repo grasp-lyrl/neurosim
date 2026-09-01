@@ -343,6 +343,63 @@ trajectory rather than objective shaping alone. Demonstration collection
 remains blocked on that motion-quality requirement despite v6 passing its
 registered numerical gate.
 
+#### Shorter-reaction / blind-motion gate — 2026-09-01
+
+Do not promote a faster candidate yet. Projectile speed was swept with the
+camera-visible spawn range fixed at 7--9 m and the vehicle ceiling fixed at
+3 m/s^2. This isolates launch-to-intercept time: v8/v9/v10/v11 use 7/8/10/12
+m/s, or approximately 1.00--1.29 / 0.88--1.13 / 0.70--0.90 / 0.58--0.75 s.
+Seeded blind controls now include held-random actions and both signs of held
+offset; the report also separates episode success from per-encounter clear
+rate.
+
+Ten-episode blind smokes and five-episode sampling-MPC smokes establish that
+there is no speed-only operating point:
+
+| speed | weave success | held-random success | oracle success | oracle clearance median / p10 / min |
+|---:|---:|---:|---:|---:|
+| 7 m/s | 50% | 60% | 5/5 | 0.392 / 0.309 / 0.256 m |
+| 8 m/s | not completed | 40% | 5/5 | 0.335 / 0.251 / 0.218 m |
+| 10 m/s | 40% | 30% | 5/5 | 0.206 / 0.160 / 0.140 m |
+| 12 m/s | 20% | 30% | 3/5 | 0.193 / 0.012 / -0.024 m |
+
+Worst measured oracle acceleration remained 2.897--2.911 m/s^2 throughout.
+At 10 m/s the oracle still survives the small smoke but fails the registered
+0.25 m median margin; at 12 m/s it also fails success and p10. Faster throws
+therefore make the task infeasible before blind random motion falls below the
+20% target.
+
+v12/v13 tested repeated but never concurrent throws by shortening TTL to 1.5
+s (`max_concurrent` remains exactly one). This exposed and fixed a real metric
+bug: Habitat recycles its simulator object ID after despawn, so sequential
+throws had been collapsed into one historical encounter and cached oracle
+plans could mistake a new throw for the old one. `ActiveObstacle` now carries
+a monotonic per-episode `encounter_id`; observations/planners use it while
+live-object lookup retains `simulator_object_id`. Targeted regression suite:
+74/74 passing.
+
+Corrected dense results show why episode success alone is insufficient:
+
+| candidate | control episode / encounter | weave episode / encounter | random episode / encounter |
+|---|---:|---:|---:|
+| v12, 8 m/s | 10% / 31.8% | 30% / 68.6% | 20% / 54.5% |
+| v13, 7 m/s | 10% / 27.3% | 30% / 75.7% | 20% / 68.4% |
+
+v12's corrected oracle smoke is 5/5, 2.894 m/s^2 worst acceleration, 0.301 m
+median and 0.170 m p10, but includes a 0.126 m grazing pass. More sequential
+throws lower the conjunctive episode score while blind motion still clears
+most individual encounters; that is not the requested non-degeneracy and v12
+and v13 are rejected as teacher tasks.
+
+Conclusion: a lone sphere in open 3-D space always has a broad escape set.
+Continuous blind motion starts before launch and a ballistic throw can only
+extrapolate that motion; shortening the window penalises the deliberate oracle
+at least as quickly. The next task change must make *direction* perceptual
+(for example, a randomized gap formed by coordinated obstacles) or explicitly
+neutralise pre-launch motion with a telegraphed, retarget-at-launch protocol.
+That is a task-design change, not another speed value. Do not launch BC/PPO
+from v8--v13.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted

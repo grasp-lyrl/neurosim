@@ -1,0 +1,40 @@
+# Repeated single-obstacle candidate. Keep v9's 8 m/s speed (0.875--1.125 s
+# reaction window), camera-visible spawn rule, 3 m/s^2 vehicle limit and
+# max_concurrent: 1. Shorten only obstacle lifetime after launch so a passed
+# throw does not occupy the sole slot for another 1.5--2.4 seconds. This tests
+# several independent reactions per episode without ever requiring the quad
+# to solve a multi-obstacle geometry.
+#
+# Promotion gate remains per behavior, not just conjunctive episode success:
+# report both episode success and encounter-clear rate for every blind arm and
+# the oracle. Blind failure obtained only by multiplying many irrelevant or
+# impossible encounters is not acceptable.
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v9_speed8.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        templates:
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 1.5
+            collision_radius: 0.15
+            kinematic_speed_mps: 8.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_parabola
+            mass: 0.2
+            ttl_s: 1.5
+            collision_radius: 0.15
+            kinematic_speed_mps: 8.0
+            parabola_gravity_mps2: 3.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 1.5
+            collision_radius: 0.15
+            kinematic_speed_mps: 8.0

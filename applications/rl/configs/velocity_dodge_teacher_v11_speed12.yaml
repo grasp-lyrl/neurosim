@@ -1,0 +1,33 @@
+# Feasibility boundary for the 3 m/s^2 vehicle. Inherits v10 and changes only
+# projectile speed from 10 to 12 m/s, reducing the launch-to-intercept window
+# to 0.58--0.75 s. Promote only if the oracle retains the registered clearance
+# margins and blind controls remain at or below 20% success.
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v10_speed10.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        templates:
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 3.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 12.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_parabola
+            mass: 0.2
+            ttl_s: 3.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 12.0
+            parabola_gravity_mps2: 3.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 3.5
+            collision_radius: 0.15
+            kinematic_speed_mps: 12.0

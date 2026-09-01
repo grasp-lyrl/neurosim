@@ -1,0 +1,33 @@
+# Margin-preserving repeated single-obstacle bracket. This is v12 with only
+# projectile speed reduced from 8 to 7 m/s, restoring the 1.00--1.29 s
+# reaction window that passed the initial oracle margin smoke while retaining
+# the corrected sequence of independent, non-overlapping throws.
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v12_speed8_dense.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        templates:
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 1.5
+            collision_radius: 0.15
+            kinematic_speed_mps: 7.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_parabola
+            mass: 0.2
+            ttl_s: 1.5
+            collision_radius: 0.15
+            kinematic_speed_mps: 7.0
+            parabola_gravity_mps2: 3.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 1.5
+            collision_radius: 0.15
+            kinematic_speed_mps: 7.0
