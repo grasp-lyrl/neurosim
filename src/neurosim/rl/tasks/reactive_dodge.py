@@ -192,6 +192,13 @@ class ReactiveDodgeTask(RLTask):
         # far too weak to rotate the thrust axis toward horizontal.
         self.return_gain_hz = float(rc.pop("return_gain_hz", 1.0))
         self.max_return_speed_mps = float(rc.pop("max_return_speed_mps", 1.0))
+        # Hard slew limit on the *complete* world-frame velocity command.
+        # Unlike the sampling-MPC-only action projection, this sits in the
+        # common execution path and therefore constrains oracle, BC, and PPO
+        # equally. Zero preserves the historical unlimited behavior.
+        self.velocity_command_accel_limit_mps2 = float(
+            rc.pop("velocity_command_accel_limit_mps2", 0.0) or 0.0
+        )
         # cascaded_velocity: an explicit position outer loop produces a
         # restoring velocity, then the policy adds a body-frame avoidance
         # velocity.  The SE3 position reference is set to the measured
@@ -225,6 +232,11 @@ class ReactiveDodgeTask(RLTask):
         if np.any(self.max_outer_return_velocity_mps <= 0.0):
             raise ValueError(
                 "residual_control.max_outer_return_velocity_mps must be positive"
+            )
+        if self.velocity_command_accel_limit_mps2 < 0.0:
+            raise ValueError(
+                "residual_control.velocity_command_accel_limit_mps2 must be "
+                "non-negative"
             )
 
         if rc:

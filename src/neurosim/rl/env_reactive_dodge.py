@@ -83,6 +83,25 @@ def constant_velocity_closest_approach(
     return float(np.linalg.norm(closest)), tca
 
 
+def acceleration_limited_command(
+    command: np.ndarray,
+    previous: np.ndarray,
+    max_acceleration_mps2: float,
+    dt_s: float,
+) -> np.ndarray:
+    """Project a vector command onto an isotropic acceleration ball."""
+    command = np.asarray(command, dtype=np.float64)
+    previous = np.asarray(previous, dtype=np.float64)
+    maximum_step = float(max_acceleration_mps2) * float(dt_s)
+    if maximum_step <= 0.0:
+        return command.copy()
+    change = command - previous
+    norm = float(np.linalg.norm(change))
+    if norm <= maximum_step:
+        return command.copy()
+    return previous + change * (maximum_step / max(norm, 1e-12))
+
+
 _KINEMATIC_MODES = {"kinematic_line", "kinematic_parabola"}
 
 
@@ -162,6 +181,7 @@ class ReactiveDodgeEnv(BaseNeurosimRLEnv):
         self._offset_vel = np.zeros(3, dtype=np.float64)
         self._last_delta_velocity = np.zeros(3, dtype=np.float64)
         self._filtered_action = np.zeros(3, dtype=np.float64)
+        self._last_velocity_command: np.ndarray | None = None
         self._intercept_config = dict(
             (env_config.get("visual_backend", {}) or {})
             .get("dynamic_obstacles", {})
@@ -345,6 +365,7 @@ class ReactiveDodgeEnv(BaseNeurosimRLEnv):
         self._offset_vel = np.zeros(3, dtype=np.float64)
         self._last_delta_velocity = np.zeros(3, dtype=np.float64)
         self._filtered_action = np.zeros(3, dtype=np.float64)
+        self._last_velocity_command = None
 
         # Solved against the trajectory that was just built, so it must come
         # after _build_nominal_trajectory and after the manager's own reset.
@@ -442,7 +463,25 @@ class ReactiveDodgeEnv(BaseNeurosimRLEnv):
             ret = ret * (task.max_return_speed_mps / speed)
 
         v_cmd = np.asarray(flat["x_dot"], dtype=np.float64) + delta_world + ret
+        acceleration_limit = float(task.velocity_command_accel_limit_mps2)
+        if acceleration_limit > 0.0:
+            previous_command = (
+                np.asarray(state["v"], dtype=np.float64)
+                if self._last_velocity_command is None
+                else self._last_velocity_command
+            )
+            v_cmd = acceleration_limited_command(
+                v_cmd,
+                previous_command,
+                acceleration_limit,
+                dt,
+            )
         control = self._vehicle.clip_control({"cmd_v": v_cmd})
+        # Continue from what the vehicle actually received if its independent
+        # speed bound clipped the slew-limited request.
+        self._last_velocity_command = np.asarray(
+            control["cmd_v"], dtype=np.float64
+        ).copy()
 
         # Deviation from the path is now an outcome, not a commanded state;
         # report it as the offset so observations and metrics still work.

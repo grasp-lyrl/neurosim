@@ -1,0 +1,68 @@
+# Low-acceleration successor to the high-speed single-obstacle v4 task.
+# Keep the complete task, reward, observation, and PPO setup inherited from
+# v4 so the only behavioral differences are explicit here.
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v4_fast.yaml
+
+overrides:
+  env:
+    task:
+      config:
+        trajectory:
+          sampling_mpc:
+            # Bound the oracle's residual-command rollout and action. The
+            # shared execution-path limit below independently applies to every
+            # controller, including BC and PPO.
+            # Derate the internal command cap by 5%: the full RotorPy smoke
+            # rollout reached 2.056 m/s^2 under a nominal 2.0 limit because
+            # command slew is not identical to measured rigid-body response.
+            max_residual_command_acceleration_mps2: 1.9
+            # v4's 0.22 m planning target produced several 0.05--0.10 m
+            # realized clearances. Ask for a materially larger miss distance.
+            safety_margin_m: 0.40
+            # See threats earlier and retain comparable temporal resolution
+            # over the longer plan. Extra CEM effort is acceptable for an
+            # offline teacher and helps under the tighter acceleration bound.
+            horizon_s: 2.0
+            control_segments: 8
+            samples_per_mode: 48
+            iterations: 4
+            static_shortlist: 32
+        residual_control:
+          # Acceleration and velocity are separate physical constraints. The
+          # inherited 0.6 m/s lateral residual ceiling can only accumulate
+          # about 0.39 m during a 0.8 s, 10 m/s encounter even at the new
+          # acceleration bound, which cannot yield a generous miss around a
+          # 0.30 m combined collision radius. Permit a longer, smooth dodge;
+          # the shared slew limit still prevents impulses.
+          delta_velocity_limits_mps: [1.2, 1.2, 0.8]
+          velocity_command_accel_limit_mps2: 1.9
+    visual_backend:
+      dynamic_obstacles:
+        # The castle cannot reliably place 10--12 m throws (the smoke seed
+        # produced no encounter). Keep the validated 7--9 m placement region
+        # and reduce projectile speed instead. At 6 m/s this supplies
+        # 1.17--1.50 s for a smooth, larger-margin avoidance manoeuvre.
+        radial_distance_range_m: [7.0, 9.0]
+        templates:
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 3.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 6.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_parabola
+            mass: 0.2
+            ttl_s: 3.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 6.0
+            parabola_gravity_mps2: 3.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 3.5
+            collision_radius: 0.15
+            kinematic_speed_mps: 6.0

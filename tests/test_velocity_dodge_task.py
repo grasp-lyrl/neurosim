@@ -9,7 +9,10 @@ import numpy as np
 import pytest
 
 from neurosim.core.coord_trans import rotate_vector_by_quat
-from neurosim.rl.env_reactive_dodge import obstacle_threat_priority
+from neurosim.rl.env_reactive_dodge import (
+    acceleration_limited_command,
+    obstacle_threat_priority,
+)
 from neurosim.rl.tasks import build_task
 from neurosim.rl.tasks.base import TaskStep
 
@@ -192,6 +195,38 @@ def test_accepts_cascaded_velocity_mode():
     np.testing.assert_allclose(
         task.max_outer_return_velocity_mps, [0.8, 0.8, 0.5]
     )
+
+
+def test_velocity_command_acceleration_limit_is_isotropic():
+    previous = np.array([0.2, -0.1, 0.0])
+    command = np.array([1.2, 1.9, 0.0])
+    limited = acceleration_limited_command(command, previous, 2.0, 0.05)
+
+    assert np.linalg.norm(limited - previous) == pytest.approx(0.1)
+    np.testing.assert_allclose(
+        (limited - previous) / np.linalg.norm(limited - previous),
+        (command - previous) / np.linalg.norm(command - previous),
+    )
+
+
+def test_velocity_command_accepts_shared_acceleration_limit():
+    task = make_task(
+        residual_control={
+            "mode": "velocity_command",
+            "velocity_command_accel_limit_mps2": 2.0,
+        }
+    )
+    assert task.velocity_command_accel_limit_mps2 == pytest.approx(2.0)
+
+
+def test_velocity_command_rejects_negative_acceleration_limit():
+    with pytest.raises(ValueError, match="velocity_command_accel_limit_mps2"):
+        make_task(
+            residual_control={
+                "mode": "velocity_command",
+                "velocity_command_accel_limit_mps2": -0.1,
+            }
+        )
 
 
 def test_accepts_gated_cascaded_velocity_mode():
