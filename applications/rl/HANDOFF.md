@@ -317,10 +317,31 @@ rejects the spawn instead of creating an unobservable threat.
 Targeted tests pass (5/5), including real-Habitat LOS and existing aim/lead
 behavior. Exact-spawn instrumentation on seeds 9301--9308 validated 8/8
 accepted obstacles inside the inset frustum with line of sight; all 8 also
-remained inside the raw camera FOV at the first policy observation. The
-numerical gate must be rerun under this corrected spawn contract before any
-demonstration collection. Keep jerk smoothing as a separate registered change
-so visibility and control-quality effects remain identifiable.
+remained inside the raw camera FOV at the first policy observation.
+
+The corrected matched gate is `mpc_accel3_fov_gate_{a,b,c,d}`. It passed at
+40/40 success, +26.3 return, zero collisions, 2.906 m/s^2 worst measured
+acceleration, 0.414 m median clearance and 0.386 m p10. All terminations were
+ordinary timeouts. The near-identical pre/post-FOV aggregate is desirable: the
+fix removes impossible hidden threats without materially easing the task.
+Post-fix inspection videos are under
+`outputs/rl/videos/sampling_mpc_accel3_fov/`; seeds 9301 and 9303 succeed at
+0.392/0.404 m clearance, while 9302 is a useful non-collision 0.074 m margin
+miss. All three stay below 2.52 m/s^2 measured acceleration.
+
+The first separate smoothness candidate is v7
+(`velocity_dodge_teacher_v7_smooth.yaml`, commit 69b6d7b). It adds opt-in
+costs for a new plan's first-command discontinuity and deviation from the
+shifted previous plan, plus a 0.15 s replan interval. It is safe but rejected
+as the jerk solution. On matched seeds 9101--9103, v6 and v7 both scored 3/3;
+v7 improved mean clearance 0.407 -> 0.415 m and command jerk 76.1 -> 68.5
+m/s^3, but worsened measured vehicle jerk 26.4 -> 30.6 m/s^3 and peak
+acceleration 2.28 -> 2.62 m/s^2. Do not launch a large v7 gate. Visual
+comparison clips are in `outputs/rl/videos/sampling_mpc_accel3_fov_smooth/`.
+The next jerk experiment needs an explicitly modeled jerk-limited command
+trajectory rather than objective shaping alone. Demonstration collection
+remains blocked on that motion-quality requirement despite v6 passing its
+registered numerical gate.
 
 ---
 
