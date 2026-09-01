@@ -67,6 +67,13 @@ class RecedingHorizonConfig:
     relative_velocity_cost: float = 0.05
     control_cost: float = 0.025
     control_smoothness_cost: float = 0.04
+    # Optional temporal-continuity terms.  The historical smoothness term
+    # only compares segments *within* a candidate.  It does not price a new
+    # plan's first command jumping away from the command currently in flight,
+    # or a replan abandoning the previously selected dodge mode.  Both default
+    # to zero so historical oracle configs remain reproducible.
+    initial_control_smoothness_cost: float = 0.0
+    plan_change_cost: float = 0.0
     terminal_offset_cost: float = 3.0
     terminal_velocity_cost: float = 0.5
     seed: int = 20260831
@@ -301,6 +308,7 @@ class RecedingHorizonDodgeExpert:
         nominal_velocity: np.ndarray,
         obstacles: tuple[MovingSpherePrediction, ...],
         rollout_kwargs: dict,
+        previous_controls: np.ndarray | None = None,
     ) -> tuple[np.ndarray, dict[str, np.ndarray], tuple[np.ndarray, ...]]:
         cfg = self.config
         actions, offsets, velocities = self._rollout(controls, **rollout_kwargs)
@@ -362,6 +370,21 @@ class RecedingHorizonDodgeExpert:
         smooth = cfg.control_smoothness_cost * np.sum(
             np.diff(controls, axis=1) ** 2, axis=(1, 2)
         )
+        initial_control = np.asarray(
+            rollout_kwargs["initial_filtered_action"], dtype=np.float64
+        )
+        initial_smooth = cfg.initial_control_smoothness_cost * np.sum(
+            (controls[:, 0] - initial_control[None, :]) ** 2,
+            axis=1,
+        )
+        if previous_controls is None:
+            plan_change = np.zeros(count, dtype=np.float64)
+        else:
+            previous = np.asarray(previous_controls, dtype=np.float64)
+            plan_change = cfg.plan_change_cost * np.sum(
+                (controls - previous[None, :, :]) ** 2,
+                axis=(1, 2),
+            )
         terminal = (
             cfg.terminal_offset_cost * np.sum(offsets[:, -1] ** 2, axis=1)
             + cfg.terminal_velocity_cost * np.sum(velocities[:, -1] ** 2, axis=1)
@@ -373,6 +396,8 @@ class RecedingHorizonDodgeExpert:
             + tracking_cost
             + effort
             + smooth
+            + initial_smooth
+            + plan_change
             + terminal
         )
         details = {
@@ -445,6 +470,7 @@ class RecedingHorizonDodgeExpert:
             "return_gain_hz": float(return_gain_hz),
             "max_return_speed_mps": float(max_return_speed_mps),
         }
+        previous_controls = self._warm_segments(now)
 
         for _ in range(cfg.iterations):
             noise = self._rng.normal(
@@ -461,6 +487,7 @@ class RecedingHorizonDodgeExpert:
                 nominal_velocity=nominal_velocity,
                 obstacles=obstacles,
                 rollout_kwargs=rollout_kwargs,
+                previous_controls=previous_controls,
             )
             objective = objective.reshape(len(means), cfg.samples_per_mode)
             elite_count = max(2, int(round(cfg.samples_per_mode * cfg.elite_fraction)))
@@ -501,6 +528,7 @@ class RecedingHorizonDodgeExpert:
             nominal_velocity=nominal_velocity,
             obstacles=obstacles,
             rollout_kwargs=rollout_kwargs,
+            previous_controls=previous_controls,
         )
         order = np.argsort(objective)
         chosen = int(order[0])

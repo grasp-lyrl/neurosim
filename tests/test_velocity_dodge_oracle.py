@@ -139,6 +139,54 @@ def test_mpc_execution_projects_velocity_target_onto_acceleration_ball():
     assert np.linalg.norm(physical_target_gap) == pytest.approx(0.25)
 
 
+def test_mpc_temporal_costs_prefer_continuing_the_current_plan():
+    """Opt-in continuity costs must rank a committed maneuver first."""
+    cfg = RecedingHorizonConfig(
+        horizon_s=0.2,
+        step_dt_s=0.05,
+        control_segments=2,
+        max_slack_cost=0.0,
+        integrated_slack_cost=0.0,
+        clearance_risk_cost=0.0,
+        offset_cost=0.0,
+        along_track_cost=0.0,
+        vertical_cost=0.0,
+        relative_velocity_cost=0.0,
+        control_cost=0.0,
+        control_smoothness_cost=0.0,
+        terminal_offset_cost=0.0,
+        terminal_velocity_cost=0.0,
+        initial_control_smoothness_cost=1.0,
+        plan_change_cost=1.0,
+    )
+    expert = RecedingHorizonDodgeExpert(cfg)
+    continuing = np.array([[0.5, 0.0, 0.0], [0.5, 0.0, 0.0]])
+    switching = -continuing
+    controls = np.stack([continuing, switching])
+    rollout_kwargs = {
+        "initial_offset": np.zeros(3),
+        "initial_relative_velocity": np.zeros(3),
+        "initial_filtered_action": np.array([0.5, 0.0, 0.0]),
+        "body_to_world": np.eye(3),
+        "delta_velocity_limits": np.ones(3),
+        "action_filter_alpha": 1.0,
+        "max_target_delta_velocity_mps": np.inf,
+        "return_gain_hz": 0.0,
+        "max_return_speed_mps": 1.0,
+    }
+    objective, _, _ = expert._score(
+        controls,
+        nominal_positions=np.zeros((4, 3)),
+        nominal_velocity=np.zeros(3),
+        obstacles=(),
+        rollout_kwargs=rollout_kwargs,
+        previous_controls=continuing,
+    )
+
+    assert objective[0] == pytest.approx(0.0)
+    assert objective[1] > objective[0]
+
+
 def test_hdf5_writer_streams_episode_metadata_and_half_precision_events(tmp_path):
     import h5py
 

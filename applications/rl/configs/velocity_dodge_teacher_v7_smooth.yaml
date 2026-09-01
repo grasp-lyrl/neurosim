@@ -1,0 +1,26 @@
+# Temporally deliberate successor to the acceleration-3, camera-visible v6
+# oracle.  This changes planner scoring/replan cadence only; obstacle geometry,
+# 3 m/s^2 measured ceiling, 0.40 m safety margin, controller limits and camera
+# spawn contract are inherited unchanged.
+#
+# Register against v6 on matched seeds before collecting demonstrations:
+#   * preserve >= 80% success, zero collisions and <= 3.0 m/s^2 acceleration
+#   * preserve clearance median >= 0.25 m and p10 >= 0.15 m
+#   * reduce both peak vehicle jerk and residual-command jerk materially
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v6_accel3.yaml
+
+overrides:
+  env:
+    task:
+      config:
+        trajectory:
+          sampling_mpc:
+            # Hold each receding-horizon decision for three policy ticks rather
+            # than two.  The 2 s horizon still leaves ample feedback updates.
+            replan_interval_s: 0.15
+            # Price three distinct discontinuities: within-plan segment
+            # changes, the new plan's first command versus the live filtered
+            # command, and the new plan versus the shifted previous plan.
+            control_smoothness_cost: 0.12
+            initial_control_smoothness_cost: 0.25
+            plan_change_cost: 0.15
