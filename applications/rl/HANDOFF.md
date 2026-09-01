@@ -72,6 +72,70 @@ minimum for interpretation is 2M. If privileged PPO fails, the next teacher
 experiment is privileged BC on successful oracle episodes followed by PPO
 fine-tuning—not event BC from this 62.5% oracle and not event PPO from scratch.
 
+#### Receding-horizon oracle replacement — 2026-09-01
+
+The conclusion immediately above is superseded for teacher selection. The
+quintic oracle remains unchanged as a reproducible baseline, but a new
+sampling-MPC privileged oracle now decisively beats it.
+
+Implementation:
+
+- `src/neurosim/rl/receding_horizon_dodge_expert.py` is a vectorised,
+  multimodal cross-entropy shooting MPC. It replans every 0.10 s over a 1.50 s
+  horizon, warm-starts the previous solution, and optimises continuous
+  normalised velocity commands rather than selecting a fixed bump.
+- Its rollout model includes actual offset/relative velocity, the task's
+  command filter, `delta_velocity_limits_mps`, bounded return-to-path term,
+  predicted obstacle acceleration, and the nominal MinSnap path.
+- Collision constraints use finite, extremely expensive slack. There is
+  therefore always a least-dangerous action; an infeasible encounter no
+  longer becomes the old oracle's zero-action / failed-plan label.
+- Dynamic scoring is vectorised. The best 24 trajectories are checked against
+  Habitat's 26-ray static mesh clearance test and world bounds. This makes the
+  implementation suitable for offline teacher generation, but not yet a
+  hard-real-time flight planner.
+- `evaluate_velocity_dodge_oracle.py --planner sampling_mpc` selects it. The
+  default is still `quintic`, so every historical command remains unchanged.
+
+Registered same-seed gate, v4 seeds 9001--9040:
+
+| planner | return | success | obstacle collisions | failed plans |
+|---|---:|---:|---:|---:|
+| old quintic | +10.1 | 62.5% (25/40) | 3 | 306/414 calls |
+| **sampling MPC** | **+26.1** | **92.5% (37/40)** | **2** | **0** |
+
+The MPC had 38 ordinary timeouts, no tracking failures, and no bounds exits.
+The three misses were two obstacle collisions (seeds 9008 and 9016) and one
+timeout below the 0.10 m required clearance (9022, 0.043 m). Both collisions
+were explicitly predicted infeasible in the final replans: their planned
+clearance fell to +0.019 and -0.011 m with 0.131 and 0.161 m safety slack.
+This is the intended fallback semantics, not a falsely certified safe plan.
+
+Disjoint confirmation, seeds 9101--9120: **+35.0 return, 95.0% success
+(19/20), zero collisions, zero failed plans**. The one miss was another
+ordinary timeout with 0.038 m clearance. Combined: 56/60 = 93.3% success,
++29.1 return, two collisions, and zero failed plans. Artifacts are
+`outputs/rl/mpc_oracle_gate_{a,b,c,d}.{json,log}` and
+`outputs/rl/mpc_oracle_holdout_{a,b}.{json,log}`.
+
+One control-path mismatch matters for interpreting why this worked. v4 uses
+`residual_control.mode: velocity_command`. That path does **not** consume
+`offset_accel_limit_mps2` or `offset_rate_limits_mps`; because v4 does not set
+`delta_velocity_limits_mps`, the effective residual limits are still the task
+defaults, 0.6/0.6/0.4 m/s. The old expert nevertheless derived a 2.5/1.5 m/s
+planning envelope from `offset_rate_limits_mps`, then its action was clipped
+against 0.6/0.6/0.4 at execution. That planner/controller mismatch is a
+direct mechanism for the measured late commits. Sampling MPC models the live
+velocity-command path instead. The task and active PPO run were not changed,
+so the oracle comparison remains fair.
+
+Decision: the sampling MPC is now the privileged teacher and the quintic
+planner is only a historical baseline. It clears the proposed >80% acceptance
+target on both the registered and held-out seeds, so successful MPC episodes
+are suitable for privileged BC followed by PPO fine-tuning. Continue the
+already-running privileged PPO v4 experiment unchanged as the independent RL
+comparison; its 2M-step interpretation rule still applies.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted

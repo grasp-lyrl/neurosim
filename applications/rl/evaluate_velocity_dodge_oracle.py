@@ -17,6 +17,11 @@ from neurosim.rl.trajectory_dodge_expert import (
     LocalTrajectoryExpert,
     TrajectoryExpertConfig,
 )
+from neurosim.rl.receding_horizon_dodge_expert import (
+    MovingSpherePrediction,
+    RecedingHorizonConfig,
+    RecedingHorizonDodgeExpert,
+)
 
 from train_sb3 import load_experiment_config
 
@@ -453,6 +458,194 @@ def nominal_position_for_plan(env):
     return _at
 
 
+def mpc_expert_for_env(env) -> RecedingHorizonDodgeExpert:
+    """Build sampling MPC at the environment's actual policy period."""
+    policy_dt = float(
+        env.policy_decimation * env.steps_per_action / env.sim.config.world_rate
+    )
+    # Keep the 1.5 s registered threat horizon while making every shooting
+    # node coincide with an action the environment can actually change.
+    horizon = max(1.5, policy_dt * 8.0)
+    steps = max(8, int(round(horizon / policy_dt)))
+    horizon = steps * policy_dt
+    config = replace(
+        RecedingHorizonConfig(),
+        horizon_s=horizon,
+        step_dt_s=policy_dt,
+        replan_interval_s=max(2.0 * policy_dt, 0.10),
+    )
+    return RecedingHorizonDodgeExpert(config)
+
+
+def _mpc_static_checker(env, active_object_ids):
+    """Return the same mesh/bounds validator used by the quintic oracle."""
+    trajectory_cfg = dict(getattr(env._task, "trajectory_config", {}) or {})
+    static_clearance = float(trajectory_cfg.get("static_clearance_m", 0.20))
+    bounds_margin = float(
+        getattr(env._task, "boundary_margin_threshold_m", 0.0) or 0.0
+    ) * float(getattr(env._task, "expert_bounds_margin_scale", 1.75))
+
+    def static_path_is_clear(dynamics_points):
+        habitat_points = env.sim.coord_trans.transform_batch(dynamics_points)
+        try:
+            validate_static_points_clearance(
+                env.sim.visual_backend._sim,
+                habitat_points,
+                static_clearance,
+                ignored_object_ids=set(active_object_ids),
+            )
+        except ValueError:
+            return False
+        for point in habitat_points:
+            if not env.sim.safety.is_in_bounds(point):
+                return False
+            if bounds_margin > 0.0 and env.sim.safety.bounds_margin(point) < bounds_margin:
+                return False
+        return True
+
+    return static_path_is_clear
+
+
+def mpc_oracle_action(env) -> np.ndarray:
+    """Replan a privileged velocity-command trajectory in closed loop."""
+    action = np.zeros(env.action_space.shape, dtype=np.float32)
+    env._trajectory_expert_frame_unlabelled = False
+    if env._task.residual_control_mode != "velocity_command":
+        raise ValueError(
+            "sampling MPC currently models residual_control.mode=velocity_command; "
+            f"got {env._task.residual_control_mode!r}"
+        )
+
+    expert = getattr(env, "_receding_horizon_dodge_expert", None)
+    if expert is None:
+        expert = mpc_expert_for_env(env)
+        env._receding_horizon_dodge_expert = expert
+
+    state = env.sim.dynamics.state
+    now = float(env.sim.time)
+    flat = env._nominal_flat()
+    nominal_now = np.asarray(flat["x"], dtype=np.float64)
+    nominal_velocity = np.asarray(flat["x_dot"], dtype=np.float64)
+    offset = np.asarray(state["x"], dtype=np.float64) - nominal_now
+    relative_velocity = np.asarray(state["v"], dtype=np.float64) - nominal_velocity
+
+    cfg = expert.config
+    times = cfg.step_dt_s * (np.arange(int(round(cfg.horizon_s / cfg.step_dt_s))) + 1)
+    nominal_positions = np.asarray(
+        [
+            env._nominal_trajectory.update(now + float(delta))["x"]
+            for delta in times
+        ],
+        dtype=np.float64,
+    )
+    active = env.active_obstacles()
+    manager = env.sim.visual_backend._dynamic_obstacles
+    to_dynamics = env.sim.coord_trans.pos_transform_inv
+    predictions = []
+    exact_tcas = []
+    for object_id, item in active.items():
+        position = to_dynamics @ np.asarray(item.obj.translation, dtype=np.float64)
+        velocity = to_dynamics @ env.obstacle_velocity(item, now)
+        acceleration = to_dynamics @ env.obstacle_acceleration(item)
+        swept = (
+            position[None, :]
+            + times[:, None] * velocity[None, :]
+            + 0.5 * times[:, None] ** 2 * acceleration[None, :]
+        )
+        combined_radius = float(manager._agent_radius) + float(item.collision_radius)
+        clearance = np.linalg.norm(nominal_positions - swept, axis=1) - combined_radius
+        closest_index = int(np.argmin(clearance))
+        # Exclude harmless bystanders, but use the correct acceleration model
+        # rather than the task's historical constant-velocity threat sort.
+        if float(clearance[closest_index]) > float(env._task.threat_distance_m):
+            continue
+        predictions.append(
+            MovingSpherePrediction(
+                object_id=int(object_id),
+                position=position,
+                velocity=velocity,
+                acceleration=acceleration,
+                combined_radius=combined_radius,
+            )
+        )
+        exact_tcas.append(float(times[closest_index]))
+
+    if not predictions:
+        # velocity_command already includes a bounded return-to-path term.
+        # Continuing stochastic optimisation after the obstacle has passed
+        # only fights that deterministic recovery and can preserve a small
+        # standing offset. A zero policy command is the exact nominal-recovery
+        # action for this mode.
+        expert.plan = None
+        return action
+
+    if expert.should_replan(now):
+        quaternion = np.asarray(state["q"], dtype=np.float64)
+        body_to_world = np.column_stack(
+            [
+                rotate_vector_by_quat(axis, quaternion)
+                for axis in np.eye(3, dtype=np.float64)
+            ]
+        )
+        mask = np.ones(3, dtype=np.float64)
+        if getattr(env._task, "lateral_axis_only", False):
+            mask[[0, 2]] = 0.0
+        elif getattr(env._task, "lateral_only", False):
+            mask[0] = 0.0
+
+        control_dt = float(env.steps_per_action / env.sim.config.world_rate)
+        per_control_alpha = min(control_dt / env._task.action_filter_tau_s, 1.0)
+        action_filter_alpha = 1.0 - (1.0 - per_control_alpha) ** int(
+            env.policy_decimation
+        )
+        plan = expert.make_plan(
+            now=now,
+            time_to_closest_approach=(min(exact_tcas) if exact_tcas else None),
+            initial_offset=offset,
+            initial_relative_velocity=relative_velocity,
+            initial_filtered_action=np.asarray(
+                getattr(env, "_filtered_action", np.zeros(3)), dtype=np.float64
+            ),
+            body_to_world=body_to_world,
+            delta_velocity_limits=np.asarray(
+                env._task.delta_velocity_limits_mps, dtype=np.float64
+            ),
+            action_filter_alpha=action_filter_alpha,
+            return_gain_hz=float(env._task.return_gain_hz),
+            max_return_speed_mps=float(env._task.max_return_speed_mps),
+            nominal_positions=nominal_positions,
+            nominal_velocity=nominal_velocity,
+            obstacles=predictions,
+            action_mask=mask,
+            static_path_is_clear=_mpc_static_checker(env, active),
+        )
+        env._trajectory_expert_plans = getattr(env, "_trajectory_expert_plans", 0) + 1
+        if plan.safety_slack > 1e-6:
+            env._mpc_slack_replans = getattr(env, "_mpc_slack_replans", 0) + 1
+        diagnostics = getattr(env, "_trajectory_expert_plan_diagnostics", [])
+        diagnostics.append(
+            {
+                "planner": "sampling_mpc",
+                "object_ids": list(plan.object_ids),
+                "predicted_min_clearance_m": plan.predicted_min_clearance,
+                "safety_slack_m": plan.safety_slack,
+                "peak_offset_m": float(np.max(np.linalg.norm(plan.offsets, axis=1))),
+                "objective": plan.objective,
+                "static_clear": plan.static_clear,
+            }
+        )
+        env._trajectory_expert_plan_diagnostics = diagnostics
+
+    if expert.plan is None:
+        # Defensive only: make_plan always returns a finite-slack trajectory.
+        env._trajectory_expert_failed_plans = (
+            getattr(env, "_trajectory_expert_failed_plans", 0) + 1
+        )
+        return action
+    action[:3] = np.clip(expert.plan.action_at(now), -1.0, 1.0).astype(np.float32)
+    return action
+
+
 def oracle_action(env) -> np.ndarray:
     """Track a cached, collision-checked local avoidance trajectory."""
     action = np.zeros(env.action_space.shape, dtype=np.float32)
@@ -715,6 +908,15 @@ def main() -> None:
     )
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument(
+        "--planner",
+        choices=("quintic", "sampling_mpc"),
+        default="quintic",
+        help=(
+            "Privileged planner to execute. The default preserves historical "
+            "oracle results; sampling_mpc continuously replans velocity commands."
+        ),
+    )
+    parser.add_argument(
         "--rollout-policy",
         default=None,
         help=(
@@ -785,12 +987,19 @@ def main() -> None:
             env._trajectory_expert_plans = 0
             env._trajectory_expert_failed_plans = 0
             env._trajectory_expert_plan_diagnostics = []
+            env._mpc_slack_replans = 0
+            if args.planner == "sampling_mpc":
+                env._receding_horizon_dodge_expert = mpc_expert_for_env(env)
             episode_observations = []
             episode_actions = []
             total_reward = 0.0
             peak_cross = 0.0
             while True:
-                action = oracle_action(env)
+                action = (
+                    mpc_oracle_action(env)
+                    if args.planner == "sampling_mpc"
+                    else oracle_action(env)
+                )
                 # DAgger: label with the expert, but let the clone drive.
                 # Plain BC only ever sees states the expert visits, so the
                 # learner has no example of recovering from its own errors
@@ -855,6 +1064,7 @@ def main() -> None:
                         "peak_cross_track": peak_cross,
                         "expert_plans": env._trajectory_expert_plans,
                         "expert_failed_plans": env._trajectory_expert_failed_plans,
+                        "mpc_slack_replans": env._mpc_slack_replans,
                         "expert_plan_diagnostics": env._trajectory_expert_plan_diagnostics,
                     }
                     results.append(row)
@@ -897,6 +1107,7 @@ def main() -> None:
 
     payload = {
         "experiment_config": args.experiment_config,
+        "planner": args.planner,
         "episodes": len(results),
         "success_rate": float(np.mean([r["success"] for r in results])),
         "results": results,

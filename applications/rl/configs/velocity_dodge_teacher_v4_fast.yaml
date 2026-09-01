@@ -939,6 +939,17 @@ env:
         # (initial speed = min(target/tau, rate_limit)), so the policy
         # cannot ask to arrive slowly. Full 0.56 m arrives in ~0.5 s
         # against a 1.5 s threat window, so that authority is not needed.
+        # IMPORTANT (measured 2026-09-01): velocity_command does not consume
+        # offset_accel_limit_mps2 or offset_rate_limits_mps below. Its live
+        # residual authority is delta_velocity_limits_mps, unset here and
+        # therefore still the task default 0.6/0.6/0.4 m/s. The old quintic
+        # oracle planned against the advertised 2.5/1.5 rate envelope and was
+        # clipped to 0.6/0.4 at execution -- a direct cause of its late
+        # commits. The new sampling MPC models the live limits and filter.
+        # Same-seed v4 gate (9001--9040): +26.1 return / 92.5% success / 2
+        # collisions, versus quintic +10.1 / 62.5% / 3. Held-out 9101--9120:
+        # +35.0 / 95.0% / 0. Select with evaluate_velocity_dodge_oracle.py
+        # --planner sampling_mpc. No task value was changed for this result.
         mode: velocity_command
         # Raised from 0.56/0.56/0.36. The expert's planner offers candidate
         # displacements up to 1.00 m, so the old cap was clipping its choices
