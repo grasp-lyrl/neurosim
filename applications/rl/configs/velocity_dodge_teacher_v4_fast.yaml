@@ -910,6 +910,18 @@ env:
         # altitude. This includes the Crazyflie body plus a safety margin.
         static_clearance_m: 0.20
         collision_sample_spacing_m: 0.05
+        # The sampling MPC operates on velocity commands, so the offset
+        # acceleration setting below does not constrain it. The video audit
+        # exposed 11.6 m/s^2 residual-command and 6.9 m/s^2 vehicle spikes in
+        # the original MPC. This planner-local constraint is included in the
+        # shooting dynamics and projected again at execution, including the
+        # return-to-zero command after an obstacle passes.
+        sampling_mpc:
+          max_residual_command_acceleration_mps2: 5.0
+          # The constrained first-order rollout is optimistic by roughly
+          # 0.1 m on the full RotorPy vehicle. Plan above the task's 0.10 m
+          # success clearance rather than certifying a marginal near miss.
+          safety_margin_m: 0.22
       # gated_cascaded_velocity was tried here and reverted. The appeal was
       # structural: a closed gate actively restores the nominal path, so
       # "stop deviating" would not have to be bought with reward, and it is

@@ -99,3 +99,42 @@ def test_no_obstacle_plan_recovers_toward_the_nominal_path():
     _, plan = _problem(offset=np.array([0.0, 0.4, 0.0]))
 
     assert abs(plan.offsets[-1, 1]) < 0.4
+
+
+def test_rollout_projects_each_command_onto_acceleration_ball():
+    config = RecedingHorizonConfig(
+        samples_per_mode=16,
+        iterations=1,
+        seed=23,
+    )
+    expert = RecedingHorizonDodgeExpert(config)
+    times = config.step_dt_s * (
+        np.arange(int(round(config.horizon_s / config.step_dt_s))) + 1
+    )
+    limits = np.array([0.6, 0.6, 0.4])
+    filter_alpha = 0.67232
+    maximum_gap = 0.15
+    plan = expert.make_plan(
+        now=0.0,
+        time_to_closest_approach=0.70,
+        initial_offset=np.zeros(3),
+        initial_relative_velocity=np.zeros(3),
+        initial_filtered_action=np.zeros(3),
+        body_to_world=np.eye(3),
+        delta_velocity_limits=limits,
+        action_filter_alpha=filter_alpha,
+        max_target_delta_velocity_mps=maximum_gap,
+        return_gain_hz=1.0,
+        max_return_speed_mps=1.0,
+        nominal_positions=np.column_stack(
+            [0.6 * times, np.zeros_like(times), np.zeros_like(times)]
+        ),
+        nominal_velocity=np.array([0.6, 0.0, 0.0]),
+        obstacles=(_head_on(),),
+    )
+
+    filtered = np.zeros(3)
+    for action in plan.actions:
+        target_gap = (action - filtered) * limits
+        assert np.linalg.norm(target_gap) <= maximum_gap + 1e-9
+        filtered += filter_alpha * (action - filtered)

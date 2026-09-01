@@ -5,7 +5,11 @@ import numpy as np
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "applications" / "rl"))
-from train_velocity_dodge_bc import HDF5ObservationDataset, gated_imitation_loss
+from train_velocity_dodge_bc import (
+    HDF5ObservationDataset,
+    balanced_sample_weights,
+    gated_imitation_loss,
+)
 
 
 def test_gated_loss_ignores_quiet_direction_and_trains_gate():
@@ -59,4 +63,36 @@ def test_lazy_hdf5_dataset_applies_virtual_onset_and_counterfactuals(tmp_path):
     np.testing.assert_array_equal(counter_obs["events"], 0.0)
     np.testing.assert_array_equal(counter_obs["state"][-4:], 0.0)
     np.testing.assert_array_equal(counter_action, 0.0)
+    dataset.close()
+
+
+def test_flat_privileged_dataset_stays_flat_and_has_no_false_counterfactuals(tmp_path):
+    """Blank-event augmentation is invalid when the observation is all state."""
+    import h5py
+
+    path = tmp_path / "flat.h5"
+    observations = np.arange(120, dtype=np.float32).reshape(4, 30)
+    actions = np.zeros((4, 3), dtype=np.float32)
+    actions[1:3, 1] = 0.8
+    with h5py.File(path, "w") as data:
+        data.create_dataset("observations", data=observations)
+        data.create_dataset("actions", data=actions)
+        data.create_dataset("threat", data=np.array([0, 1, 1, 0], dtype=bool))
+        data.create_dataset("episode_index", data=np.zeros(4, dtype=np.int32))
+
+    dataset = HDF5ObservationDataset(
+        [str(path)], gated_onset_window=2, zero_event_counterfactuals=True
+    )
+    assert len(dataset) == 6  # 4 base + 2 onset copies; no counterfactuals
+    obs, action = dataset[1]
+    np.testing.assert_array_equal(obs, observations[1])
+    np.testing.assert_array_equal(action, actions[1])
+    threat, counterfactual = dataset.sample_kinds
+    assert not counterfactual.any()
+    weights = balanced_sample_weights(threat, counterfactual)
+    assert weights[threat].sum() == pytest.approx(0.5)
+    assert weights[~threat].sum() == pytest.approx(0.5)
+    onset_obs, onset_action = dataset[4]
+    np.testing.assert_array_equal(onset_obs[15:18], 0.0)
+    np.testing.assert_array_equal(onset_action, actions[1])
     dataset.close()

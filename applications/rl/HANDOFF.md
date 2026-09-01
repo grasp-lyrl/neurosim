@@ -136,6 +136,50 @@ are suitable for privileged BC followed by PPO fine-tuning. Continue the
 already-running privileged PPO v4 experiment unchanged as the independent RL
 comparison; its 2M-step interpretation rule still applies.
 
+#### Sampling-MPC acceleration audit — 2026-09-01
+
+The first videos exposed a real defect in the replacement teacher: v4's
+`offset_accel_limit_mps2: 5.0` is inactive under `velocity_command`, and the
+MPC could jump between raw velocity targets. An instrumented seed-9001 rollout
+measured an 11.6 m/s^2 residual-command spike, 6.9 m/s^2 vehicle acceleration,
+and 83.4 m/s^3 vehicle jerk. Do not use the partial
+`outputs/rl/bc/mpc_v4_demo_{a,b,c,d}.h5` files collected before this audit.
+
+The accepted MPC now projects every shooting action and every executed action
+onto a residual-velocity acceleration ball. This also limits the return to
+zero after an obstacle disappears, which was otherwise another step command.
+The limit and safety margin are registered under
+`trajectory.sampling_mpc` in the v4 YAML:
+
+- `max_residual_command_acceleration_mps2: 5.0`
+- `safety_margin_m: 0.22`
+
+A 3.0 m/s^2 candidate was rejected: it reduced seed 9001 to 3.2 m/s^2 peak
+vehicle acceleration but only cleared by 0.059 m, below the task's 0.10 m
+success requirement. The accepted 5.0 m/s^2 candidate retained teacher
+quality on the complete matched gate:
+
+| oracle | return | success | collisions | max vehicle accel |
+|---|---:|---:|---:|---:|
+| unconstrained sampling MPC | +26.1 | 92.5% (37/40) | 2 | not recorded |
+| **acceleration-constrained MPC** | **+29.9** | **92.5% (37/40)** | **0** | **4.91 m/s^2** |
+
+All 40 constrained episodes were ordinary timeouts: no obstacle collision,
+tracking failure, or bounds exit. The three misses (9001, 9008, 9021) were
+non-collision clearance misses at 0.085, 0.056, and 0.095 m. Mean per-episode
+peak acceleration was 3.17 m/s^2; mean p95 was 1.99 m/s^2. Artifacts are
+`outputs/rl/mpc_accel5_gate_{a,b,c,d}.{json,log}`. The videos include live
+acceleration telemetry:
+
+- `outputs/rl/videos/sampling_mpc_accel5/episode_00_seed9001.mp4` (near miss)
+- `outputs/rl/videos/sampling_mpc_accel5/episode_01_seed9101.mp4` (success)
+
+Active at handoff time: disjoint confirmation seeds 9101--9120 are running as
+`mpc_accel5_holdout_{a,b}`, while four parallel, fresh demonstration shards
+cover seeds 10001--10080 and write
+`outputs/rl/bc/mpc_v4_accel5_demo_{a,b,c,d}.h5`. The old unconstrained partial
+HDF5 files are quarantined by name and must not be mixed into BC.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted

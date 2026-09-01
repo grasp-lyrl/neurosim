@@ -67,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run the collision-checked local trajectory expert; no checkpoint needed",
     )
+    p.add_argument(
+        "--expert-planner",
+        choices=("quintic", "sampling_mpc"),
+        default="quintic",
+        help="Planner used with --expert; default preserves historical videos",
+    )
     p.add_argument("--clone", type=str, default=None,
                    help="Behaviour-cloned .pt to fly; no checkpoint needed")
     p.add_argument("--clone-downsample", type=int, default=4)
@@ -75,8 +81,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--seed0",
         type=int,
-        required=True,
+        default=None,
         help="First episode seed; episode i uses seed0 + i. Vary between runs.",
+    )
+    p.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Explicit episode seeds; overrides --seed0/--episodes",
     )
     p.add_argument("--out-dir", type=str, required=True)
     p.add_argument(
@@ -170,12 +183,15 @@ class _ClonePolicy:
     def predict(self, obs, deterministic: bool = True):
         from train_velocity_dodge_bc import pool_events  # noqa: PLC0415
 
-        batch = {}
-        for key, value in obs.items():
-            array = np.asarray(value)
-            if key == "events":
-                array = pool_events(array, self._downsample)
-            batch[key] = self._torch.from_numpy(array[None]).to(self._device)
+        if isinstance(obs, dict):
+            batch = {}
+            for key, value in obs.items():
+                array = np.asarray(value)
+                if key == "events":
+                    array = pool_events(array, self._downsample)
+                batch[key] = self._torch.from_numpy(array[None]).to(self._device)
+        else:
+            batch = self._torch.from_numpy(np.asarray(obs)[None]).to(self._device)
         with self._torch.no_grad():
             return self._model(batch).cpu().numpy()[0], None
 
@@ -330,10 +346,16 @@ def episode_overlay_lines(
     reward: float,
     total_reward: float,
     terms: dict[str, float],
+    acceleration_mps2: float,
+    residual_command_acceleration_mps2: float,
 ) -> list[str]:
     lines = [
         f"ep {episode} seed {seed} step {step} t={sim_time:5.2f}s",
         f"action {_fmt_vec(action)}",
+        (
+            f"accel {acceleration_mps2:.2f}m/s^2  "
+            f"residual_cmd {residual_command_acceleration_mps2:.2f}m/s^2"
+        ),
         f"reward {reward:+.3f} total {total_reward:+.1f}",
     ]
     if "pos_error" in terms:
@@ -365,6 +387,17 @@ def record_episode(
     total_reward = 0.0
     step = 0
     min_obstacle_distance = np.inf
+    policy_dt = float(
+        env.policy_decimation * env.steps_per_action / env.sim.config.world_rate
+    )
+    previous_velocity = np.asarray(
+        env.sim.dynamics.state["v"], dtype=np.float64
+    ).copy()
+    previous_delta_velocity = np.asarray(
+        getattr(env, "_last_delta_velocity", np.zeros(3)), dtype=np.float64
+    ).copy()
+    acceleration_norms = []
+    command_acceleration_norms = []
     writer = imageio.get_writer(out_path, fps=fps, macro_block_size=1)
 
     try:
@@ -380,6 +413,24 @@ def record_episode(
             obs, reward, terminated, truncated, info = env.step(action)
             step += 1
             total_reward += float(reward)
+
+            velocity = np.asarray(
+                env.sim.dynamics.state["v"], dtype=np.float64
+            ).copy()
+            acceleration_norm = float(
+                np.linalg.norm(velocity - previous_velocity) / policy_dt
+            )
+            previous_velocity = velocity
+            acceleration_norms.append(acceleration_norm)
+            delta_velocity = np.asarray(
+                getattr(env, "_last_delta_velocity", np.zeros(3)),
+                dtype=np.float64,
+            ).copy()
+            command_acceleration_norm = float(
+                np.linalg.norm(delta_velocity - previous_delta_velocity) / policy_dt
+            )
+            previous_delta_velocity = delta_velocity
+            command_acceleration_norms.append(command_acceleration_norm)
 
             terms = info.get("reward_terms", {}) or {}
             dist = terms.get("min_obstacle_distance", np.inf)
@@ -427,6 +478,10 @@ def record_episode(
                         reward=float(reward),
                         total_reward=total_reward,
                         terms=terms,
+                        acceleration_mps2=acceleration_norm,
+                        residual_command_acceleration_mps2=(
+                            command_acceleration_norm
+                        ),
                     ),
                     delta_body=delta_body,
                     obstacle_body=obstacle_body,
@@ -448,6 +503,13 @@ def record_episode(
                         None
                         if not np.isfinite(min_obstacle_distance)
                         else min_obstacle_distance
+                    ),
+                    "peak_acceleration_mps2": float(max(acceleration_norms)),
+                    "p95_acceleration_mps2": float(
+                        np.percentile(acceleration_norms, 95)
+                    ),
+                    "peak_residual_command_acceleration_mps2": float(
+                        max(command_acceleration_norms)
                     ),
                     "video": str(out_path),
                 }
@@ -499,8 +561,9 @@ class _NormalizedPolicy:
 class _TrajectoryExpertPolicy:
     """Adapter exposing the privileged trajectory expert as a video policy."""
 
-    def __init__(self, env):
+    def __init__(self, env, planner: str = "quintic"):
         self._env = env
+        self._planner = str(planner)
 
     def reset(self):
         # expert_for_task, not a bare LocalTrajectoryExpert: the default
@@ -509,17 +572,26 @@ class _TrajectoryExpertPolicy:
         # the default here would record an expert planning dodges the
         # configured vehicle cannot fly, so the video would not show the
         # oracle that the metrics describe.
-        from evaluate_velocity_dodge_oracle import expert_for_task
+        from evaluate_velocity_dodge_oracle import expert_for_task, mpc_expert_for_env
 
-        self._env._trajectory_dodge_expert = expert_for_task(self._env._task)
+        if self._planner == "sampling_mpc":
+            self._env._receding_horizon_dodge_expert = mpc_expert_for_env(self._env)
+        else:
+            self._env._trajectory_dodge_expert = expert_for_task(self._env._task)
         self._env._trajectory_expert_plans = 0
         self._env._trajectory_expert_failed_plans = 0
+        self._env._mpc_slack_replans = 0
         self._env._trajectory_expert_plan_diagnostics = []
 
     def predict(self, obs, deterministic: bool = True):
-        from evaluate_velocity_dodge_oracle import oracle_action
+        from evaluate_velocity_dodge_oracle import mpc_oracle_action, oracle_action
 
-        return oracle_action(self._env), None
+        action = (
+            mpc_oracle_action(self._env)
+            if self._planner == "sampling_mpc"
+            else oracle_action(self._env)
+        )
+        return action, None
 
 
 def main() -> None:
@@ -527,6 +599,8 @@ def main() -> None:
     if sum((bool(args.nominal), bool(args.expert), bool(args.checkpoint),
             bool(args.clone))) != 1:
         raise SystemExit("pass exactly one of --checkpoint, --nominal, or --expert")
+    if args.seeds is None and args.seed0 is None:
+        raise SystemExit("pass --seed0 or an explicit --seeds list")
 
     cfg = load_rollout_config(args.rollout_config)
     env_config = inject_rgb_sensor(cfg["env"])
@@ -555,15 +629,19 @@ def main() -> None:
     if args.clone:
         model = _ClonePolicy(args.clone, cfg, env, args.clone_downsample)
     elif args.expert:
-        model = _TrajectoryExpertPolicy(env)
+        model = _TrajectoryExpertPolicy(env, args.expert_planner)
     elif not args.nominal:
         loaded, obs_norm = load_model(args, cfg, env)
         model = _NormalizedPolicy(loaded, obs_norm)
 
     results = []
     try:
-        for i in range(args.episodes):
-            seed = int(args.seed0) + i
+        seeds = (
+            [int(seed) for seed in args.seeds]
+            if args.seeds is not None
+            else [int(args.seed0) + i for i in range(args.episodes)]
+        )
+        for i, seed in enumerate(seeds):
             out_path = out_dir / f"episode_{i:02d}_seed{seed}.mp4"
             summary = record_episode(
                 env,
@@ -589,13 +667,14 @@ def main() -> None:
     payload = {
         "mode": (
             "nominal" if args.nominal
-            else "expert" if args.expert
+            else f"expert_{args.expert_planner}" if args.expert
             else "clone" if args.clone
             else "policy"
         ),
         "checkpoint": args.checkpoint,
         "rollout_config": args.rollout_config,
         "seed0": args.seed0,
+        "seeds": [int(seed) for seed in (args.seeds or [])],
         "episodes": len(results),
         "success_rate": (float(np.mean(successes)) if successes else 0.0),
         "results": results,

@@ -39,6 +39,12 @@ from torch import nn
 # at a pre-tanh mean well inside the region where the gradient survives.
 SQUASH_TARGET_LIMIT = 0.99
 
+# VelocityDodgeTask's flat state is
+# [v_body, v_ref_body, pos_err_body, offset_body, omega_body, prev_action,
+#  obstacle slots...]. Unlike the event/dict layout, prev_action is therefore
+# not at the end once privileged obstacle features are appended.
+FLAT_PREVIOUS_ACTION_START = 15
+
 
 DISCRETE_DEADBAND = 0.15
 
@@ -209,7 +215,16 @@ def balanced_sample_weights(
         raise ValueError("dataset must contain both threat and non-threat samples")
 
     weights = np.empty(len(threat), dtype=np.float64)
-    for mask, share in ((real_threat, 0.5), (quiet, 0.25), (counterfactual, 0.25)):
+    # State-only privileged datasets have no event image to blank, so a
+    # "zero-event" counterfactual would pair unchanged obstacle geometry with
+    # an incorrect zero label. In that case balance genuine threat and quiet
+    # states equally. Event datasets retain the historical 50/25/25 split.
+    groups = (
+        ((real_threat, 0.5), (quiet, 0.25), (counterfactual, 0.25))
+        if counterfactual.any()
+        else ((real_threat, 0.5), (quiet, 0.5))
+    )
+    for mask, share in groups:
         n = int(mask.sum())
         weights[mask] = (share / n) if n else 0.0
     return weights
@@ -322,13 +337,18 @@ class HDF5ObservationDataset(torch.utils.data.Dataset):
             if "observations_privileged" in self._files[0]
             else None
         )
+        self._flat_key = "observations" if "observations" in self._files[0] else None
+        if not any(
+            (self._event_key, self._state_key, self._privileged_key, self._flat_key)
+        ):
+            raise ValueError("dataset contains no supported observation array")
 
         # Augmentations, addressed by base index rather than copied.
         self._onset: list[int] = []
         if gated_onset_window > 0:
             self._onset = self._find_onsets(gated_onset_window)
         self._counterfactual: list[int] = []
-        if zero_event_counterfactuals:
+        if zero_event_counterfactuals and self._event_key:
             self._counterfactual = list(np.flatnonzero(self._threat))
 
     def _find_onsets(self, window: int) -> list[int]:
@@ -377,6 +397,20 @@ class HDF5ObservationDataset(torch.utils.data.Dataset):
     def _read(self, flat_index: int):
         fi, row = self._index[flat_index]
         f = self._files[fi]
+        if self._flat_key:
+            observation = np.asarray(
+                f[self._flat_key][row], dtype=np.float32
+            ).copy()
+            if self._blank_previous_action and self._action_dim:
+                start = FLAT_PREVIOUS_ACTION_START
+                observation[start : start + self._action_dim] = 0.0
+            action = np.asarray(f["actions"][row], dtype=np.float32)
+            if self._discrete_actions:
+                action = np.asarray(discretize_lateral(action), dtype=np.int64)
+            return (
+                observation,
+                action,
+            )
         obs: dict[str, np.ndarray] = {}
         if self._event_key:
             obs["events"] = np.asarray(f[self._event_key][row], dtype=np.float32)
@@ -456,19 +490,23 @@ class HDF5ObservationDataset(torch.utils.data.Dataset):
             # Virtual onset: same frame and label, but the previous-action
             # channel blanked so the reaction cannot be copied from it.
             obs, action = self._read(self._onset[index - n_base])
-            if "state" in obs and self._action_dim:
-                obs["state"][-self._action_dim :] = 0.0
+            if self._action_dim:
+                if isinstance(obs, dict) and "state" in obs:
+                    obs["state"][-self._action_dim :] = 0.0
+                elif not isinstance(obs, dict):
+                    start = FLAT_PREVIOUS_ACTION_START
+                    obs[start : start + self._action_dim] = 0.0
             return obs, action
 
         # Zero-event counterfactual: nothing visible, so do nothing.
         obs, _ = self._read(self._counterfactual[index - n_base - n_onset])
-        if "events" in obs:
+        if isinstance(obs, dict) and "events" in obs:
             obs["events"] = np.zeros_like(obs["events"])
-        if "distance_target" in obs:
+        if isinstance(obs, dict) and "distance_target" in obs:
             # Blank events must not be paired with a target saying an obstacle
             # is present -- that trains the encoder to hallucinate.
             obs["distance_target"] = np.ones_like(obs["distance_target"])
-        if "state" in obs and self._action_dim:
+        if isinstance(obs, dict) and "state" in obs and self._action_dim:
             obs["state"][-self._action_dim :] = 0.0
         if self._discrete_actions:
             return obs, np.asarray(1, dtype=np.int64)  # "none"
@@ -481,13 +519,24 @@ class HDF5ObservationDataset(torch.utils.data.Dataset):
 
 
 def _collate(batch):
-    """Stack dict observations into batched tensors."""
+    """Stack dict or flat observations into batched tensors."""
     observations, actions = zip(*batch)
+    if not isinstance(observations[0], dict):
+        return (
+            torch.from_numpy(np.stack(observations)),
+            torch.from_numpy(np.stack(actions)),
+        )
     keys = observations[0].keys()
     obs = {
         k: torch.from_numpy(np.stack([o[k] for o in observations])) for k in keys
     }
     return obs, torch.from_numpy(np.stack(actions))
+
+
+def _observation_to_device(obs, device):
+    if isinstance(obs, dict):
+        return {k: v.to(device) for k, v in obs.items()}
+    return obs.to(device)
 
 
 def evaluate(model, env, episodes: int, seed0: int, downsample_events: int = 1, discrete_actions: bool = False) -> dict[str, float]:
@@ -499,20 +548,38 @@ def evaluate(model, env, episodes: int, seed0: int, downsample_events: int = 1, 
     success and survival separate them.
     """
     successes, lengths, terminations = 0, [], {}
+    peak_accelerations = []
+    peak_command_accelerations = []
     device = next(model.parameters()).device
     for i in range(episodes):
         obs, _ = env.reset(seed=seed0 + i)
         steps = 0
+        policy_dt = float(
+            env.policy_decimation
+            * env.steps_per_action
+            / env.sim.config.world_rate
+        )
+        previous_velocity = np.asarray(
+            env.sim.dynamics.state["v"], dtype=np.float64
+        ).copy()
+        previous_delta_velocity = np.asarray(
+            getattr(env, "_last_delta_velocity", np.zeros(3)), dtype=np.float64
+        ).copy()
+        peak_acceleration = 0.0
+        peak_command_acceleration = 0.0
         while True:
             with torch.no_grad():
                 # Keep every key: forward() blinds the privileged channel
                 # itself, exactly as the SB3 actor does.
-                batch = {}
-                for k, v in obs.items():
-                    arr = np.asarray(v)
-                    if k == "events":
-                        arr = pool_events(arr, downsample_events)
-                    batch[k] = torch.from_numpy(arr[None]).to(device)
+                if isinstance(obs, dict):
+                    batch = {}
+                    for k, v in obs.items():
+                        arr = np.asarray(v)
+                        if k == "events":
+                            arr = pool_events(arr, downsample_events)
+                        batch[k] = torch.from_numpy(arr[None]).to(device)
+                else:
+                    batch = torch.from_numpy(np.asarray(obs)[None]).to(device)
                 out = model(batch).cpu().numpy()[0]
                 if discrete_actions:
                     # argmax -> full-authority lateral command. With
@@ -523,17 +590,47 @@ def evaluate(model, env, episodes: int, seed0: int, downsample_events: int = 1, 
                 else:
                     action = out
             obs, _, terminated, truncated, info = env.step(action)
+            velocity = np.asarray(
+                env.sim.dynamics.state["v"], dtype=np.float64
+            ).copy()
+            peak_acceleration = max(
+                peak_acceleration,
+                float(np.linalg.norm(velocity - previous_velocity) / policy_dt),
+            )
+            previous_velocity = velocity
+            delta_velocity = np.asarray(
+                getattr(env, "_last_delta_velocity", np.zeros(3)),
+                dtype=np.float64,
+            ).copy()
+            peak_command_acceleration = max(
+                peak_command_acceleration,
+                float(
+                    np.linalg.norm(delta_velocity - previous_delta_velocity)
+                    / policy_dt
+                ),
+            )
+            previous_delta_velocity = delta_velocity
             steps += 1
             if terminated or truncated:
                 reason = info.get("termination_reason", "truncated")
                 terminations[reason] = terminations.get(reason, 0) + 1
                 successes += int(bool(info.get("is_success", False)))
                 lengths.append(steps)
+                peak_accelerations.append(peak_acceleration)
+                peak_command_accelerations.append(peak_command_acceleration)
                 break
     return {
         "success_rate": successes / max(episodes, 1),
         "mean_steps": float(np.mean(lengths)) if lengths else 0.0,
         "terminations": terminations,
+        "mean_peak_acceleration_mps2": float(np.mean(peak_accelerations)),
+        "max_peak_acceleration_mps2": float(max(peak_accelerations, default=0.0)),
+        "mean_peak_residual_command_acceleration_mps2": float(
+            np.mean(peak_command_accelerations)
+        ),
+        "max_peak_residual_command_acceleration_mps2": float(
+            max(peak_command_accelerations, default=0.0)
+        ),
     }
 
 
@@ -576,9 +673,9 @@ def train_and_evaluate_dataset(args, cfg, dataset, weights, test_dataset=None) -
         totals = np.zeros(3)
         batches = 0
         for obs, target in loader:
-            obs = {k: v.to(device) for k, v in obs.items()}
+            obs = _observation_to_device(obs, device)
             target = target.to(device)
-            target_map = obs.pop("distance_target", None)
+            target_map = obs.pop("distance_target", None) if isinstance(obs, dict) else None
             aux = torch.zeros((), device=device)
             if args.distance_aux_weight > 0.0 and target_map is not None:
                 predicted_map = model.predict_distance(obs)
@@ -686,8 +783,8 @@ def holdout_losses(model, dataset, device, batch_size: int = 64, discrete: bool 
         se = n = 0.0
         base_se = 0.0
         for obs, _ in loader:
-            obs = {k: v.to(device) for k, v in obs.items()}
-            target = obs.pop("distance_target", None)
+            obs = _observation_to_device(obs, device)
+            target = obs.pop("distance_target", None) if isinstance(obs, dict) else None
             if target is None:
                 return {}
             predicted = model.predict_distance(obs)
@@ -707,7 +804,7 @@ def holdout_losses(model, dataset, device, batch_size: int = 64, discrete: bool 
     if discrete:
         correct_dodge = total_dodge = correct_all = total_all = 0
         for obs, target in loader:
-            obs = {k: v.to(device) for k, v in obs.items()}
+            obs = _observation_to_device(obs, device)
             target = target.to(device)
             pred = model(obs).argmax(dim=1)
             actionable = target != 1
@@ -728,7 +825,7 @@ def holdout_losses(model, dataset, device, batch_size: int = 64, discrete: bool 
     sq_threat, n_threat, sq_quiet, n_quiet = 0.0, 0, 0.0, 0
     targets = []
     for obs, target in loader:
-        obs = {k: v.to(device) for k, v in obs.items()}
+        obs = _observation_to_device(obs, device)
         target = target.to(device)
         predicted = model(obs)
         per = ((predicted - target) ** 2).mean(dim=1)
@@ -762,6 +859,7 @@ def build_clone_net(cfg, env, downsample_events: int = 1, discrete_actions: bool
     """
     from neurosim.rl.sb3_features import PRIVILEGED_KEY  # noqa: PLC0415
     from train_sb3 import build_policy_config  # noqa: PLC0415
+    from stable_baselines3.common.torch_layers import FlattenExtractor  # noqa: PLC0415
 
     action_dim = int(np.prod(env.action_space.shape))
     _, policy_kwargs = build_policy_config(
@@ -771,11 +869,15 @@ def build_clone_net(cfg, env, downsample_events: int = 1, discrete_actions: bool
         event_presence_features=bool(cfg["ppo"].get("event_presence_features", False)),
         event_high_resolution=bool(cfg["ppo"].get("event_high_resolution", False)),
     )
-    extractor_cls = policy_kwargs["features_extractor_class"]
+    extractor_cls = policy_kwargs.get("features_extractor_class", FlattenExtractor)
     extractor_kwargs = dict(policy_kwargs.get("features_extractor_kwargs", {}))
     squash = bool(policy_kwargs.get("squash_output", False))
     actor_observation_space = env.observation_space
-    if downsample_events > 1 and "events" in actor_observation_space.spaces:
+    if (
+        downsample_events > 1
+        and hasattr(actor_observation_space, "spaces")
+        and "events" in actor_observation_space.spaces
+    ):
         import gymnasium as gym  # noqa: PLC0415
 
         old = actor_observation_space.spaces["events"]
@@ -832,13 +934,16 @@ def build_clone_net(cfg, env, downsample_events: int = 1, discrete_actions: bool
 
         def pre_tanh(self, obs):
             # Blind the actor exactly as AsymmetricActorCriticPolicy does.
-            obs = dict(obs)
-            if PRIVILEGED_KEY in obs:
-                obs[PRIVILEGED_KEY] = torch.zeros_like(obs[PRIVILEGED_KEY])
+            if isinstance(obs, dict):
+                obs = dict(obs)
+                if PRIVILEGED_KEY in obs:
+                    obs[PRIVILEGED_KEY] = torch.zeros_like(obs[PRIVILEGED_KEY])
             return self.action_net(self.policy_net(self.features_extractor(obs)))
 
         def predict_distance(self, obs):
             """Predicted 1-D distance map from events alone, or None."""
+            if not isinstance(obs, dict):
+                return None
             blinded = dict(obs)
             if PRIVILEGED_KEY in blinded:
                 blinded[PRIVILEGED_KEY] = torch.zeros_like(blinded[PRIVILEGED_KEY])

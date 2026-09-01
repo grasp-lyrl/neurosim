@@ -38,7 +38,15 @@ class RecedingHorizonConfig:
     initial_std: float = 0.42
     minimum_std: float = 0.08
     replan_interval_s: float = 0.10
-    safety_margin_m: float = 0.15
+    # Hard bound on the rate of the residual velocity command. The task's
+    # ``offset_accel_limit_mps2`` does not apply in velocity-command mode, so
+    # without this constraint a replan may step the target by the full action
+    # range and ask the inner velocity controller for an implausible impulse.
+    max_residual_command_acceleration_mps2: float = 5.0
+    # The first-order rollout is slightly optimistic once command acceleration
+    # is bounded. Request 0.12 m of headroom above the task's 0.10 m success
+    # clearance to reduce marginal full-vehicle misses.
+    safety_margin_m: float = 0.22
     velocity_response_tau_s: float = 0.10
     static_shortlist: int = 24
     # The first two terms make collision slack lexicographically more
@@ -216,12 +224,15 @@ class RecedingHorizonDodgeExpert:
         body_to_world: np.ndarray,
         delta_velocity_limits: np.ndarray,
         action_filter_alpha: float,
+        max_target_delta_velocity_mps: float,
         return_gain_hz: float,
         max_return_speed_mps: float,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         cfg = self.config
-        actions = self._expand_controls(np.asarray(controls, dtype=np.float64))
-        count, steps, _ = actions.shape
+        desired_actions = self._expand_controls(
+            np.asarray(controls, dtype=np.float64)
+        )
+        count, steps, _ = desired_actions.shape
         offset = np.broadcast_to(np.asarray(initial_offset), (count, 3)).copy()
         velocity = np.broadcast_to(
             np.asarray(initial_relative_velocity), (count, 3)
@@ -229,6 +240,7 @@ class RecedingHorizonDodgeExpert:
         filtered = np.broadcast_to(
             np.asarray(initial_filtered_action), (count, 3)
         ).copy()
+        actions = np.empty_like(desired_actions)
         offsets = np.empty((count, steps, 3), dtype=np.float64)
         velocities = np.empty_like(offsets)
         response_alpha = 1.0 - np.exp(
@@ -236,9 +248,20 @@ class RecedingHorizonDodgeExpert:
         )
         limits = np.asarray(delta_velocity_limits, dtype=np.float64)
         rotation = np.asarray(body_to_world, dtype=np.float64)
+        max_target_gap = float(max_target_delta_velocity_mps)
 
         for step in range(steps):
-            filtered += float(action_filter_alpha) * (actions[:, step] - filtered)
+            command = desired_actions[:, step].copy()
+            if np.isfinite(max_target_gap):
+                physical_gap = (command - filtered) * limits
+                gap_norm = np.linalg.norm(physical_gap, axis=1)
+                scale = np.minimum(
+                    1.0,
+                    max_target_gap / np.maximum(gap_norm, 1e-12),
+                )
+                command = filtered + (command - filtered) * scale[:, None]
+            actions[:, step] = command
+            filtered += float(action_filter_alpha) * (command - filtered)
             body_delta = filtered * limits
             world_delta = body_delta @ rotation.T
             return_velocity = -float(return_gain_hz) * offset
@@ -357,6 +380,7 @@ class RecedingHorizonDodgeExpert:
         body_to_world: np.ndarray,
         delta_velocity_limits: np.ndarray,
         action_filter_alpha: float,
+        max_target_delta_velocity_mps: float = np.inf,
         return_gain_hz: float,
         max_return_speed_mps: float,
         nominal_positions: np.ndarray,
@@ -400,6 +424,9 @@ class RecedingHorizonDodgeExpert:
                 delta_velocity_limits, dtype=np.float64
             ),
             "action_filter_alpha": float(action_filter_alpha),
+            "max_target_delta_velocity_mps": float(
+                max_target_delta_velocity_mps
+            ),
             "return_gain_hz": float(return_gain_hz),
             "max_return_speed_mps": float(max_return_speed_mps),
         }

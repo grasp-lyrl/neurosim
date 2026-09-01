@@ -8,8 +8,13 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "applications" / "rl"))
 
 from evaluate_velocity_dodge_oracle import (
     HDF5ImitationWriter,
+    _limit_mpc_action_acceleration,
     oracle_action,
     should_include_episode,
+)
+from neurosim.rl.receding_horizon_dodge_expert import (
+    RecedingHorizonConfig,
+    RecedingHorizonDodgeExpert,
 )
 from neurosim.rl.trajectory_dodge_expert import LocalTrajectoryExpert, QuinticAvoidancePlan
 
@@ -98,6 +103,40 @@ def test_include_all_keeps_timeouts_but_rejects_invalid_rollouts():
     assert should_include_episode(
         {"success": True, "termination_reason": "timeout"}, False
     )
+
+
+def test_mpc_execution_projects_velocity_target_onto_acceleration_ball():
+    task = type(
+        "Task",
+        (),
+        {
+            "action_filter_tau_s": 0.05,
+            "delta_velocity_limits_mps": np.array([0.6, 0.6, 0.4]),
+        },
+    )()
+    sim = type("Sim", (), {"config": type("Config", (), {"world_rate": 1000})()})()
+    env = type(
+        "Env",
+        (),
+        {
+            "steps_per_action": 10,
+            "sim": sim,
+            "_task": task,
+            "_filtered_action": np.zeros(3),
+        },
+    )()
+    expert = RecedingHorizonDodgeExpert(
+        RecedingHorizonConfig(max_residual_command_acceleration_mps2=5.0)
+    )
+
+    limited = _limit_mpc_action_acceleration(
+        env, expert, np.ones(3, dtype=np.float32)
+    )
+    physical_target_gap = limited * task.delta_velocity_limits_mps
+
+    # alpha=control_dt/tau=0.2, so a 5 m/s^2 first inner-control update
+    # permits a raw target gap of 5 * 0.01 / 0.2 = 0.25 m/s.
+    assert np.linalg.norm(physical_target_gap) == pytest.approx(0.25)
 
 
 def test_hdf5_writer_streams_episode_metadata_and_half_precision_events(tmp_path):

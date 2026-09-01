@@ -148,10 +148,14 @@ def clone_action(model, obs, device):
     import torch  # noqa: PLC0415
 
     with torch.no_grad():
-        batch = {
-            k: torch.from_numpy(np.asarray(v)[None]).to(device)
-            for k, v in obs.items()
-        }
+        batch = (
+            {
+                k: torch.from_numpy(np.asarray(v)[None]).to(device)
+                for k, v in obs.items()
+            }
+            if isinstance(obs, dict)
+            else torch.from_numpy(np.asarray(obs)[None]).to(device)
+        )
         return model(batch).cpu().numpy()[0].astype(np.float32)
 
 
@@ -463,18 +467,58 @@ def mpc_expert_for_env(env) -> RecedingHorizonDodgeExpert:
     policy_dt = float(
         env.policy_decimation * env.steps_per_action / env.sim.config.world_rate
     )
-    # Keep the 1.5 s registered threat horizon while making every shooting
+    planner_overrides = dict(
+        (getattr(env._task, "trajectory_config", {}) or {}).get(
+            "sampling_mpc", {}
+        )
+    )
+    configured_horizon = float(planner_overrides.pop("horizon_s", 1.5))
+    configured_replan_interval = float(
+        planner_overrides.pop("replan_interval_s", 0.10)
+    )
+    # Keep the configured threat horizon while making every shooting
     # node coincide with an action the environment can actually change.
-    horizon = max(1.5, policy_dt * 8.0)
+    horizon = max(configured_horizon, policy_dt * 8.0)
     steps = max(8, int(round(horizon / policy_dt)))
     horizon = steps * policy_dt
     config = replace(
         RecedingHorizonConfig(),
         horizon_s=horizon,
         step_dt_s=policy_dt,
-        replan_interval_s=max(2.0 * policy_dt, 0.10),
+        replan_interval_s=max(2.0 * policy_dt, configured_replan_interval),
+        **planner_overrides,
     )
     return RecedingHorizonDodgeExpert(config)
+
+
+def _mpc_max_target_velocity_gap(env, expert) -> float:
+    """Largest raw target gap consistent with the MPC acceleration limit."""
+    acceleration_limit = float(
+        expert.config.max_residual_command_acceleration_mps2
+    )
+    if acceleration_limit <= 0.0:
+        return np.inf
+    control_dt = float(env.steps_per_action / env.sim.config.world_rate)
+    tau = float(env._task.action_filter_tau_s)
+    filter_alpha = 1.0 if tau <= control_dt else control_dt / tau
+    return acceleration_limit * control_dt / filter_alpha
+
+
+def _limit_mpc_action_acceleration(env, expert, action: np.ndarray) -> np.ndarray:
+    """Project an oracle target onto the physical residual-acceleration ball."""
+    limited = np.asarray(action, dtype=np.float32).copy()
+    filtered = np.asarray(
+        getattr(env, "_filtered_action", np.zeros(3)), dtype=np.float64
+    )
+    limits = np.asarray(env._task.delta_velocity_limits_mps, dtype=np.float64)
+    gap = (np.asarray(limited[:3], dtype=np.float64) - filtered) * limits
+    norm = float(np.linalg.norm(gap))
+    maximum = _mpc_max_target_velocity_gap(env, expert)
+    if norm > maximum:
+        limited[:3] = (
+            filtered + (np.asarray(limited[:3]) - filtered) * (maximum / norm)
+        ).astype(np.float32)
+    return limited
 
 
 def _mpc_static_checker(env, active_object_ids):
@@ -577,7 +621,7 @@ def mpc_oracle_action(env) -> np.ndarray:
         # standing offset. A zero policy command is the exact nominal-recovery
         # action for this mode.
         expert.plan = None
-        return action
+        return _limit_mpc_action_acceleration(env, expert, action)
 
     if expert.should_replan(now):
         quaternion = np.asarray(state["q"], dtype=np.float64)
@@ -611,6 +655,9 @@ def mpc_oracle_action(env) -> np.ndarray:
                 env._task.delta_velocity_limits_mps, dtype=np.float64
             ),
             action_filter_alpha=action_filter_alpha,
+            max_target_delta_velocity_mps=_mpc_max_target_velocity_gap(
+                env, expert
+            ),
             return_gain_hz=float(env._task.return_gain_hz),
             max_return_speed_mps=float(env._task.max_return_speed_mps),
             nominal_positions=nominal_positions,
@@ -641,9 +688,9 @@ def mpc_oracle_action(env) -> np.ndarray:
         env._trajectory_expert_failed_plans = (
             getattr(env, "_trajectory_expert_failed_plans", 0) + 1
         )
-        return action
+        return _limit_mpc_action_acceleration(env, expert, action)
     action[:3] = np.clip(expert.plan.action_at(now), -1.0, 1.0).astype(np.float32)
-    return action
+    return _limit_mpc_action_acceleration(env, expert, action)
 
 
 def oracle_action(env) -> np.ndarray:
@@ -994,6 +1041,23 @@ def main() -> None:
             episode_actions = []
             total_reward = 0.0
             peak_cross = 0.0
+            policy_dt = float(
+                env.policy_decimation
+                * env.steps_per_action
+                / env.sim.config.world_rate
+            )
+            previous_velocity = np.asarray(
+                env.sim.dynamics.state["v"], dtype=np.float64
+            ).copy()
+            previous_delta_velocity = np.asarray(
+                getattr(env, "_last_delta_velocity", np.zeros(3)), dtype=np.float64
+            ).copy()
+            previous_acceleration = None
+            previous_command_acceleration = None
+            acceleration_norms = []
+            jerk_norms = []
+            command_acceleration_norms = []
+            command_jerk_norms = []
             while True:
                 action = (
                     mpc_oracle_action(env)
@@ -1048,6 +1112,40 @@ def main() -> None:
                     # dimensions the action space cannot express.
                     episode_actions.append(effective_expert_action(env, action))
                 obs, reward, terminated, truncated, info = env.step(executed)
+                velocity = np.asarray(
+                    env.sim.dynamics.state["v"], dtype=np.float64
+                ).copy()
+                acceleration = (velocity - previous_velocity) / policy_dt
+                acceleration_norms.append(float(np.linalg.norm(acceleration)))
+                if previous_acceleration is not None:
+                    jerk_norms.append(
+                        float(np.linalg.norm(acceleration - previous_acceleration))
+                        / policy_dt
+                    )
+                previous_velocity = velocity
+                previous_acceleration = acceleration
+
+                delta_velocity = np.asarray(
+                    getattr(env, "_last_delta_velocity", np.zeros(3)),
+                    dtype=np.float64,
+                ).copy()
+                command_acceleration = (
+                    delta_velocity - previous_delta_velocity
+                ) / policy_dt
+                command_acceleration_norms.append(
+                    float(np.linalg.norm(command_acceleration))
+                )
+                if previous_command_acceleration is not None:
+                    command_jerk_norms.append(
+                        float(
+                            np.linalg.norm(
+                                command_acceleration - previous_command_acceleration
+                            )
+                        )
+                        / policy_dt
+                    )
+                previous_delta_velocity = delta_velocity
+                previous_command_acceleration = command_acceleration
                 total_reward += float(reward)
                 terms = info.get("reward_terms", {}) or {}
                 peak_cross = max(peak_cross, float(terms.get("offset_cross_track", 0.0)))
@@ -1062,6 +1160,23 @@ def main() -> None:
                             terms.get("episode_min_clearance", np.inf)
                         ),
                         "peak_cross_track": peak_cross,
+                        "peak_acceleration_mps2": float(max(acceleration_norms)),
+                        "p95_acceleration_mps2": float(
+                            np.percentile(acceleration_norms, 95)
+                        ),
+                        "rms_acceleration_mps2": float(
+                            np.sqrt(np.mean(np.square(acceleration_norms)))
+                        ),
+                        "peak_jerk_mps3": float(max(jerk_norms, default=0.0)),
+                        "peak_residual_command_acceleration_mps2": float(
+                            max(command_acceleration_norms)
+                        ),
+                        "p95_residual_command_acceleration_mps2": float(
+                            np.percentile(command_acceleration_norms, 95)
+                        ),
+                        "peak_residual_command_jerk_mps3": float(
+                            max(command_jerk_norms, default=0.0)
+                        ),
                         "expert_plans": env._trajectory_expert_plans,
                         "expert_failed_plans": env._trajectory_expert_failed_plans,
                         "mpc_slack_replans": env._mpc_slack_replans,
