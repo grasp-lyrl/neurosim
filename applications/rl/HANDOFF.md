@@ -7,6 +7,42 @@ HISTORICAL. It describes a `gated_cascaded_velocity` workflow that has since
 been reverted (see v20 config comments) and a control path that was found to
 be defective (commit 5225691). Read this section only.
 
+### Continuation — 2026-08-31
+
+The privileged-teacher v2 run finished its full 4M-step budget. It failed the
+pre-registered gate: mean success was 20.3% over 122 evaluations, the final
+ten averaged 19.0%, and the final eval was 20.0%. Its single 40.0% eval at
+2.326M did not persist. Final return was -46.9. It beat neither v2 blind gate
+(-28.2 return and 32.5% success), confirming the original three-concurrent
+task remains unlearnable even from its lossless privileged observation.
+
+The active continuation is the higher-speed single-obstacle task:
+`velocity_dodge_teacher_v4_fast.yaml`. It uses one concurrent obstacle,
+10 m/s linear obstacles (8 m/s parabola), 5.0 m/s^2 offset acceleration, and
+2.5/2.5/1.5 m/s rate limits. Its 40-episode-per-arm gate completed:
+
+| arm | return | success |
+|---|---:|---:|
+| control | -78.1 | 15.0% |
+| const+0.40 | -103.9 | 15.0% |
+| const+0.80 | -131.8 | 17.5% |
+| weave0.4@0.5Hz | -76.9 | 20.0% |
+| **weave0.8@0.5Hz** | **-73.1** | **30.0%** |
+| **oracle** | **+10.1** | **62.5%** |
+
+No arm had a tracking-failure or out-of-bounds termination, so the raised
+authority is stable. The learned-policy gate is **beat -73.1 return AND 30.0%
+success**. The oracle margin (+83.2 return, +32.5 success points) authorises a
+privileged-policy training run on v4.
+
+That run is now active: run name `privileged_teacher_v4_fast`, Python PID
+`171097` in `neurosim-noros`, started 2026-09-01 00:43 container time. The
+4M-step budget writes to `outputs/rl/privileged_teacher_v4_fast/` and
+`outputs/rl/train_privileged_teacher_v4_fast.log`. Startup and the first PPO
+update completed normally (4,096 steps, 57 fps); all 16 training workers are
+on GPU 1 and the learner is on GPU 0. Do not launch a duplicate copy. As with
+v2, do not interpret the curve before 2M steps, and require both gate metrics.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted

@@ -306,6 +306,22 @@
 # if the vehicle cannot hold the path under these limits, the numbers are
 # meaningless no matter how good the success rate looks.
 #
+# GATE RESULT (2026-08-30, 40 episodes per arm, one arm per process):
+#
+#   arm                 return   success   terminations
+#   control              -78.1     15.0%   26 obstacle / 14 timeout
+#   const+0.40          -103.9     15.0%   26 obstacle / 14 timeout
+#   const+0.80          -131.8     17.5%   23 obstacle / 17 timeout
+#   weave0.4@0.5Hz       -76.9     20.0%   24 obstacle / 16 timeout
+#   weave0.8@0.5Hz       -73.1     30.0%   21 obstacle / 19 timeout
+#   oracle               +10.1     62.5%    3 obstacle / 37 timeout
+#
+# There were ZERO tracking_failure and out_of_bounds terminations in every
+# arm: the vehicle passes the authority-risk check. The gate for a learned
+# policy is therefore beat -73.1 return AND 30.0% success, each blind arm on
+# its strongest metric. The oracle clears both by +83.2 return and +32.5
+# success points, so privileged-policy training is justified.
+#
 # SINGLE-OBSTACLE VARIANT (v3) -- v2's discount/reward fixes plus a task
 # change: one obstacle at a time, faster, thrown from further out.
 #

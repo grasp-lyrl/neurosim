@@ -372,6 +372,14 @@
 # over the last 1M steps is under +2 points, and never off a single eval:
 # eval is 40 episodes, so a one-eval swing of +/-0.07 is one standard error.
 #
+# FINAL RESULT (2026-08-31, 4M steps): FAIL. Mean success over all 122 evals
+# was 20.3%, the final ten evals averaged 19.0%, and the last 20 remained in
+# the same 12.5-27.5% noise band (final 20.0%). One isolated eval reached
+# 40.0% at 2.326M, but it did not persist. The policy never beat the 32.5%
+# blind-success gate and its final return (-46.9) did not beat the -28.2
+# blind-return gate. Perfect obstacle state therefore did not make the
+# original three-concurrent-obstacle task learnable by this PPO setup.
+#
 #   reaches ~1.0  -> the task is sound, and this becomes the BC teacher in
 #                    place of the geometric planner. The planner's specific
 #                    failure (see below) is then irrelevant rather than
