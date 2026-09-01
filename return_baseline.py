@@ -18,6 +18,7 @@ can be compared directly.
 import collections
 import copy
 import sys
+from dataclasses import replace
 
 sys.path.insert(0, "/home/odexter/neurosim/applications/rl")
 import numpy as np
@@ -42,10 +43,24 @@ EPISODES = int(sys.argv[2]) if len(sys.argv) > 2 else 20
 #   ... run concurrently, then concatenate the logs.
 #
 # Names: control, const+0.40, const+0.80, weave0.4@0.5Hz, weave0.8@0.5Hz,
-# oracle. Omit to run all six in one process, as before.
+# oracle. Omit to run all six in one process, as before. An optional fourth
+# argument applies an experimental peak advance to the oracle only:
+#
+#   python return_baseline.py <cfg> 40 oracle 0.25
+#
+# An optional fifth argument replaces the oracle displacement menu, allowing
+# same-seed feasibility sweeps without changing the task or global expert:
+#
+#   python return_baseline.py <cfg> 40 oracle 0.0 0.25,0.30,0.35,0.50,0.65,0.80,1.00
 ONLY = None
 if len(sys.argv) > 3 and sys.argv[3].strip():
     ONLY = {a.strip() for a in sys.argv[3].split(",") if a.strip()}
+ORACLE_PEAK_ADVANCE_S = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
+ORACLE_CANDIDATES = (
+    tuple(float(value) for value in sys.argv[5].split(",") if value.strip())
+    if len(sys.argv) > 5
+    else None
+)
 WEAVES = [(0.4, 0.5), (0.8, 0.5)]
 CONSTS = [0.4, 0.8]
 
@@ -68,7 +83,17 @@ def run(mode, amp=0.0, freq=0.0, const=0.0, label=None):
     for i in range(EPISODES):
         env.reset(seed=SEED0 + i)
         if mode == "oracle":
-            env._trajectory_dodge_expert = expert_for_task(env._task)
+            expert = expert_for_task(env._task)
+            expert.config = replace(
+                expert.config,
+                peak_advance_s=ORACLE_PEAK_ADVANCE_S,
+                candidate_offsets_m=(
+                    ORACLE_CANDIDATES
+                    if ORACLE_CANDIDATES is not None
+                    else expert.config.candidate_offsets_m
+                ),
+            )
+            env._trajectory_dodge_expert = expert
             env._trajectory_expert_plans = 0
             env._trajectory_expert_failed_plans = 0
             env._trajectory_expert_plan_diagnostics = []

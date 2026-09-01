@@ -322,6 +322,33 @@
 # its strongest metric. The oracle clears both by +83.2 return and +32.5
 # success points, so privileged-policy training is justified.
 #
+# ORACLE FOLLOW-UP (2026-09-01, same gate seeds): no tested planner edit
+# improved both objectives, so the original oracle remains the baseline.
+#
+# Diagnostics:
+#   plan attempts                 108 made / 306 failed = 73.9% failure
+#   collisions                    1 with a plan, 2 with no plan
+#   predicted / achieved clear    +0.284 / +0.142 m median
+#   prediction-achievement gap    +0.127 m median
+#   failed-attempt rejects        47.9% speed, 31.3% static, 20.8% moving
+#   commit lead                   0.37 s median vs 0.53 s required; 81% late
+#   direction flips               0% of 26 encounters
+#   worst controller tracking     0.362 m command / 0.361 m achieved,
+#                                 0.009 m error, 18.9 deg tilt
+#
+# The vehicle/controller is not the limit. Timing is late, but advancing the
+# peak did not improve the full objective:
+#
+#   peak advance       return   success   obstacle collisions
+#   0.00 s (original)   +10.1     62.5%          3
+#   0.15 s               +8.5     70.0%          4
+#   0.25 s               +8.6     65.0%          4
+#   0.35 s               +8.2     60.0%          4
+#
+# Adding lower 0.25/0.30 m candidates also failed: +9.0 return, 62.5%
+# success, 4 collisions, and 23 minutes for 40 episodes versus ~16 minutes
+# for the original menu. Do not select either change for BC collection.
+#
 # SINGLE-OBSTACLE VARIANT (v3) -- v2's discount/reward fixes plus a task
 # change: one obstacle at a time, faster, thrown from further out.
 #

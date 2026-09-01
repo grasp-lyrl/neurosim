@@ -59,6 +59,8 @@ peak_offsets, predicted, achieved, gaps = [], [], [], []
 rise_times = []
 term = collections.Counter()
 collided_with_plan, collided_no_plan, collisions = 0, 0, 0
+rejects_all = collections.Counter()
+rejects_failed = collections.Counter()
 
 for i in range(EPISODES):
     env.reset(seed=SEED0 + i)
@@ -67,7 +69,18 @@ for i in range(EPISODES):
     env._trajectory_expert_failed_plans = 0
     env._trajectory_expert_plan_diagnostics = []
     while True:
+        made_before = int(env._trajectory_expert_plans)
+        failed_before = int(env._trajectory_expert_failed_plans)
         action = oracle_action(env)
+        made_after = int(env._trajectory_expert_plans)
+        failed_after = int(env._trajectory_expert_failed_plans)
+        if made_after != made_before or failed_after != failed_before:
+            attempt_rejects = dict(
+                getattr(env._trajectory_dodge_expert, "last_rejects", {}) or {}
+            )
+            rejects_all.update(attempt_rejects)
+            if failed_after != failed_before:
+                rejects_failed.update(attempt_rejects)
         _, _, terminated, truncated, info = env.step(action)
         if terminated or truncated:
             reason = info.get("termination_reason") or "timeout"
@@ -116,6 +129,25 @@ print("\nplanning:")
 attempts = plans_total + plans_failed
 print("   plans made %d, failed %d  -> failure rate %.1f%%"
       % (plans_total, plans_failed, 100.0 * plans_failed / max(attempts, 1)))
+if rejects_all:
+    considered = max(int(rejects_all["considered"]), 1)
+    accepted = considered - sum(int(rejects_all[k]) for k in ("speed", "moving", "static"))
+    print("   candidate outcomes across ALL attempts:")
+    print("      speed %d (%.1f%%), moving %d (%.1f%%), static %d (%.1f%%), accepted %d (%.1f%%)"
+          % (
+              rejects_all["speed"], 100.0 * rejects_all["speed"] / considered,
+              rejects_all["moving"], 100.0 * rejects_all["moving"] / considered,
+              rejects_all["static"], 100.0 * rejects_all["static"] / considered,
+              accepted, 100.0 * accepted / considered,
+          ))
+    failed_considered = max(int(rejects_failed["considered"]), 1)
+    print("   candidate outcomes on FAILED attempts:")
+    print("      speed %d (%.1f%%), moving %d (%.1f%%), static %d (%.1f%%)"
+          % (
+              rejects_failed["speed"], 100.0 * rejects_failed["speed"] / failed_considered,
+              rejects_failed["moving"], 100.0 * rejects_failed["moving"] / failed_considered,
+              rejects_failed["static"], 100.0 * rejects_failed["static"] / failed_considered,
+          ))
 if pk.size:
     at_cap = int((pk >= ORACLE_MAX_CANDIDATE_M - 1e-6).sum())
     print("   peak_offset_m: median %.2f  p90 %.2f  max %.2f"
@@ -144,8 +176,10 @@ print("\nVERDICT:")
 fail_rate = 100.0 * plans_failed / max(attempts, 1)
 if collided_no_plan > collided_with_plan:
     print("   Feasibility-limited: most collisions are on obstacles the planner")
-    print("   never found a dodge for (failure rate %.1f%%). Widening" % fail_rate)
-    print("   candidate_offsets_m / relaxing safety_margin_m is the lever.")
+    print("   never found a dodge for (failure rate %.1f%%). Read the candidate" % fail_rate)
+    print("   rejection breakdown before selecting a lever: speed, moving-obstacle")
+    print("   geometry, and static clearance require different fixes, and a high")
+    print("   speed-rejection count can merely reflect oversized late menu entries.")
 elif pr.size and float(np.median(gp)) > dodge_clear_m:
     print("   Prediction/tracking-limited: the planner predicts clearances it")
     print("   does not achieve (median gap %+.3f m). A bigger dodge menu will"

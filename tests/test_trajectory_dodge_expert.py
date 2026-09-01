@@ -35,6 +35,29 @@ def test_planner_selects_collision_free_side_and_returns_to_nominal():
     np.testing.assert_allclose(plan.evaluate(plan.end_time)[0], 0.0)
 
 
+def test_peak_advance_moves_apex_earlier_than_tca():
+    expert = LocalTrajectoryExpert(
+        TrajectoryExpertConfig(
+            candidate_offsets_m=(0.4,),
+            safety_margin_m=-1.0,
+            minimum_rise_time_s=0.2,
+            peak_advance_s=0.3,
+        )
+    )
+    plan = expert.make_plan(
+        object_id=3,
+        now=1.0,
+        time_to_closest_approach=1.2,
+        obstacle_position=np.array([10.0, 0.0, 0.0]),
+        obstacle_velocity=np.zeros(3),
+        combined_radius=0.1,
+        nominal_position=lambda t: np.zeros(3),
+        nominal_velocity=np.array([1.0, 0.0, 0.0]),
+    )
+    assert plan is not None
+    assert plan.peak_time == 1.0 + 1.2 - 0.3
+
+
 def test_static_validator_can_reject_one_side():
     expert = LocalTrajectoryExpert(
         TrajectoryExpertConfig(

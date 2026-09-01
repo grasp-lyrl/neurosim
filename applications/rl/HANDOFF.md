@@ -43,6 +43,35 @@ update completed normally (4,096 steps, 57 fps); all 16 training workers are
 on GPU 1 and the learner is on GPU 0. Do not launch a duplicate copy. As with
 v2, do not interpret the curve before 2M steps, and require both gate metrics.
 
+#### Oracle follow-up — 2026-09-01
+
+BC remains on hold. Three same-seed diagnostics and two 40-episode oracle
+sweeps found no oracle edit that improves both return and success.
+
+- Tracking is effectively exact: in the worst of 20 episodes, command was
+  0.362 m, achieved deviation 0.361 m, maximum tracking error 0.009 m, and
+  maximum tilt 18.9 degrees. The raised v4 authority is not the bottleneck.
+- Timing is late: median effective commit lead is 0.37 s against 0.53 s
+  required, 81% of 26 encounters commit late, zero direction flips, and only
+  0.28 m median is achieved by closest approach against a 0.35 m first
+  candidate. But peak advances of 0.15/0.25/0.35 s scored respectively
+  `+8.5/70.0%`, `+8.6/65.0%`, and `+8.2/60.0%`, each with four collisions.
+  The original remains better on return (`+10.1`) and collisions (three).
+- Feasibility is also real: 108 plans made / 306 failed (73.9%). Two of three
+  collision obstacles had no plan. On failed attempts candidate rejections
+  were 47.9% speed, 31.3% static clearance, and 20.8% moving-obstacle
+  clearance. This is a mixed constraint set, not one missing magnitude cap.
+- Adding 0.25/0.30/0.40 m candidates to the original menu produced +9.0
+  return / 62.5% success with four collisions and increased runtime from about
+  16 to 23 minutes. It also failed the both-metrics rule.
+
+Therefore keep the original oracle unchanged and continue the active
+privileged PPO v4 run. Its early evaluations through ~200k steps remain in
+the expected noisy band and are not evidence either way; the pre-registered
+minimum for interpretation is 2M. If privileged PPO fails, the next teacher
+experiment is privileged BC on successful oracle episodes followed by PPO
+fine-tuning—not event BC from this 62.5% oracle and not event PPO from scratch.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted

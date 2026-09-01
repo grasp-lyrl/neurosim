@@ -166,6 +166,15 @@ class TrajectoryExpertConfig:
     # displacement. A closed-loop policy trained on the actual dynamics has
     # neither problem by construction. See HANDOFF section 7a.
     minimum_rise_time_s: float = 0.55
+    # Reach the peak this much before the constant-velocity TCA, then begin
+    # the smooth return. Zero preserves the historical schedule. This is an
+    # experimental lever for fast obstacles: on v4 the command crossed 5 cm
+    # only 0.37 s before closest approach although a 0.35 m dodge needs
+    # 0.53 s, and 81% of encounters committed too late. Candidate collision
+    # checking still evaluates the shifted curve against the full predicted
+    # obstacle trajectory, so an advance is accepted only when it remains
+    # geometrically safe.
+    peak_advance_s: float = 0.0
     return_time_s: float = 1.0
     sample_dt_s: float = 0.04
     # Matched to offset_rate_limits_mps (1.5 / 1.0), which is what the
@@ -319,7 +328,10 @@ class LocalTrajectoryExpert:
         active moving sphere, not merely the threat that triggered replanning.
         """
         cfg = self.config
-        rise = max(float(time_to_closest_approach), cfg.minimum_rise_time_s)
+        rise = max(
+            float(time_to_closest_approach) - float(cfg.peak_advance_s),
+            cfg.minimum_rise_time_s,
+        )
         peak_time = float(now) + rise
         obstacle_position = np.asarray(obstacle_position, dtype=np.float64)
         obstacle_velocity = np.asarray(obstacle_velocity, dtype=np.float64)
