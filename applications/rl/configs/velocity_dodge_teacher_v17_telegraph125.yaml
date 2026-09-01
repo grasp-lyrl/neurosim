@@ -1,0 +1,11 @@
+# Visual-margin bracket. Inherits v16 and changes only the fixed post-launch
+# interval from 1.15 to 1.25 s after v16 passed its numerical smoke but still
+# contained one 0.152 m pass. This remains below v6's 1.4 s minimum and gives
+# approximately 5.6--7.2 m/s launch speeds at the camera-visible 7--9 m range.
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v16_telegraph115.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        ballistic_reaction_time_s: 1.25

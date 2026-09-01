@@ -400,6 +400,64 @@ neutralise pre-launch motion with a telegraphed, retarget-at-launch protocol.
 That is a task-design change, not another speed value. Do not launch BC/PPO
 from v8--v13.
 
+#### Telegraphed retarget-at-launch experiment — 2026-09-01
+
+The proposed single-obstacle protocol is implemented and tested. Organic line
+and parabola obstacles can now appear at a camera/FOV-validated position, hold
+for a configurable warning interval, then solve a one-time fixed-flight-time
+ballistic intercept using the drone's live position and velocity. In-flight
+steering remains disabled. Motion already established during the warning is
+therefore targeted rather than providing a free dodge; evasion requires a new
+post-launch change. A small vertical warning dither makes the otherwise static,
+textureless sphere observable to the event camera. It is opt-in, so historical
+configs are unchanged.
+
+The reaction-time bracket is registered as v14--v17: 0.90, 1.00, 1.15 and
+1.25 s after a 0.60 s telegraph. v14 and v15 were rejected immediately for
+small oracle margins (first observed clearances 0.094 and 0.148 m). v17 was
+also rejected: its first two oracle seeds cleared by 0.394 and only 0.110 m,
+so a longer interval did not monotonically improve sequential-encounter
+geometry. The best candidate is v16, at 1.15 s, with 0.12 m / 2 Hz warning
+dither.
+
+Final matched v16+dither smoke:
+
+| arm | episode success | encounter clear rate |
+|---|---:|---:|
+| zero control | 10% | 13.3% |
+| held +0.8 offset | 10% | 23.5% |
+| blind weave | 10% | 61.5% |
+| held-random 0.25 | 10% | 44.0% |
+| held-random 0.50 | 20% | 66.7% |
+| **sampling-MPC oracle** | **5/5 (100%)** | **100%** |
+
+The oracle had zero collisions, +95.3 mean return, 0.350 m median clearance,
+0.214 m p10, 0.151 m minimum, and 2.886 m/s^2 worst measured acceleration.
+Mean per-episode peak vehicle jerk was 28.8 m/s^3 (worst 39.4). Artifacts are
+`outputs/rl/telegraph_v16_dither_{control,const_pos,weave,random025,random05}`
+and `outputs/rl/telegraph_v16_dither_oracle.{json,log}`.
+
+The warning is physically and sensor-visible. Same-seed paired event rollouts
+with dither disabled/enabled changed 2,148 event-tensor elements over the first
+eight policy frames, rising to 376 changed elements per frame. Final videos:
+
+- `outputs/rl/videos/telegraph_v16_dither_oracle/episode_00_seed9001.mp4`
+- `outputs/rl/videos/telegraph_v16_dither_oracle/episode_01_seed9002.mp4`
+- `outputs/rl/videos/telegraph_v16_dither_control/episode_00_seed9001.mp4`
+
+Targeted regression coverage, including pure intercept math, lifecycle,
+configuration opt-in, dither, and a real-Habitat hold/release test, is 80/80.
+
+Decision: v16 achieves strong *episode-level* separation (oracle 100%, zero /
+offset / weave 10%, held-random at most 20%), but it fails the stricter
+pre-registered per-encounter non-degeneracy gate: blind weave/random still
+guess a valid escape direction for 44--67% of individual spheres, more than
+15 points above zero. Do not launch a large oracle sweep, demonstrations, BC,
+or PPO unless the user explicitly accepts episode-level non-degeneracy as the
+criterion. Preserving the original strict requirement means moving next to
+direction-constraining geometry, such as a randomized coordinated gap; no
+single ballistic sphere can remove its broad open-space escape set.
+
 ---
 
 ## 0. READ FIRST: `outputs/` was deleted

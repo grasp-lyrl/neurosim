@@ -1,0 +1,12 @@
+# Feasibility bracket for the telegraphed launcher. Inherits v14 and changes
+# only the immutable post-launch reaction interval from 0.9 to 1.0 s after
+# v14's first oracle episode grazed at 0.094 m. Pre-launch retargeting,
+# camera visibility, scatter, obstacle count and the 3 m/s^2 vehicle ceiling
+# are unchanged.
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v14_telegraph09.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        ballistic_reaction_time_s: 1.0

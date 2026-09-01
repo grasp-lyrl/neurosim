@@ -1,0 +1,12 @@
+# Margin-bearing telegraph bracket. Inherits v15 and changes only the fixed
+# post-launch interval from 1.0 to 1.15 s after the first v15 oracle pass
+# reached just 0.148 m clearance. This is still materially shorter than the
+# accepted v6 task's 1.4--1.8 s window and yields roughly 6--8 m/s launches
+# from the same camera-visible 7--9 m spawn range.
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v15_telegraph10.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        ballistic_reaction_time_s: 1.15

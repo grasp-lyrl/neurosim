@@ -1,0 +1,62 @@
+# Telegraphed, retarget-at-launch single-obstacle task. The obstacle appears
+# inside the event-camera frustum and holds for 0.6 s. At launch it predicts
+# the quad's constant-velocity position exactly 0.9 s ahead, then commits to a
+# ballistic line/parabola. Motion established before the obstacle appeared is
+# therefore not a free dodge; only a post-launch change can evade it.
+#
+# At the inherited 7--9 m range, the geometry-derived launch speed is roughly
+# 8--10 m/s. Vehicle/controller and MPC acceleration limits remain inherited
+# unchanged from v6 (<= 3 m/s^2 measured gate).
+#
+# Registered smoke gate before any large oracle/BC/PPO run:
+#   * zero and either held offset <= 20% episode success
+#   * blind weave and held-random motion must not gain >15 encounter-clear
+#     points over zero action
+#   * sampling-MPC oracle >=80% episode and encounter success
+#   * zero oracle collisions, <=3.0 m/s^2 acceleration
+#   * oracle clearance median >=0.25 m and p10 >=0.15 m
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v6_accel3.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        telegraph_time_s: 0.60
+        ballistic_reaction_time_s: 0.90
+        # A UV sphere held perfectly still generates no events. This small
+        # 2 Hz vertical warning motion is ~0.9 degrees at 8 m and remains well
+        # inside the 5-degree spawn inset; the launch solve uses its final
+        # position, so it does not alter the reaction-time contract.
+        telegraph_dither_amplitude_m: 0.12
+        telegraph_dither_frequency_hz: 2.0
+        # Explicitly disable in-flight steering. Retargeting happens once at
+        # launch; after that, the 0.9 s reaction contract is immutable.
+        reaim_commit_time_s: 0.0
+        # Scatter is diversity, not a built-in miss. The combined 0.07 m
+        # target perturbation remains well inside the 0.30 m contact radius.
+        aim_noise_std_m: 0.02
+        aim_scatter_m: 0.05
+        max_concurrent: 1
+        templates:
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 2.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 9.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_parabola
+            mass: 0.2
+            ttl_s: 2.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 9.0
+            parabola_gravity_mps2: 3.0
+          - handle: uvSphereSolid
+            scale: [0.15, 0.15, 0.15]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 2.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 9.0

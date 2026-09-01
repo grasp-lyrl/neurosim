@@ -33,6 +33,38 @@ def solve_spawn_retarget(
     return target + approach * lead + aim_offset, -approach * speed
 
 
+def solve_telegraphed_launch(
+    spawn_position: np.ndarray,
+    drone_position: np.ndarray,
+    drone_velocity: np.ndarray | None,
+    reaction_time_s: float,
+    *,
+    aim_offset: np.ndarray | None = None,
+    gravity_mps2: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Launch from a visible hold point to a fixed-time ballistic intercept.
+
+    The target is solved only at launch. Motion established during the
+    telegraph is therefore incorporated into the intercept instead of acting
+    as a free pre-dodge. After launch the velocity is immutable, leaving the
+    configured reaction interval for a genuinely new evasive action.
+    """
+    flight_time = float(reaction_time_s)
+    if flight_time <= 0.0:
+        raise ValueError("reaction_time_s must be positive")
+    position = np.asarray(spawn_position, dtype=np.float64)
+    target = np.asarray(drone_position, dtype=np.float64).copy()
+    if drone_velocity is not None:
+        target += np.asarray(drone_velocity, dtype=np.float64) * flight_time
+    if aim_offset is not None:
+        target += np.asarray(aim_offset, dtype=np.float64)
+    velocity = (target - position) / flight_time
+    # Habitat is Y-up and kinematic_parabola subtracts 0.5*g*t^2 during
+    # integration, so add the matching launch compensation here.
+    velocity[1] += 0.5 * float(gravity_mps2) * flight_time
+    return velocity, target
+
+
 @dataclass(slots=True)
 class DynamicObstacleTemplate:
     """Template configuration for one obstacle type."""
@@ -147,6 +179,17 @@ class DynamicObstaclesConfig:
     slalom_offset_m: float = 0.0
     reaim_commit_time_s: float = 0.0
     reaim_max_turn_rate_radps: float = 3.0
+    # Optional launch protocol for organic kinematic obstacles. The obstacle
+    # is instantiated visibly with zero velocity, held for telegraph_time_s,
+    # then aimed once against the live constant-velocity drone prediction and
+    # released ballistically for exactly ballistic_reaction_time_s.
+    telegraph_time_s: float = 0.0
+    ballistic_reaction_time_s: float = 0.0
+    # A stationary textureless sphere produces almost no event-camera signal.
+    # During the hold, dither it vertically by this amplitude/frequency so the
+    # warning is observable; launch still retargets from the final position.
+    telegraph_dither_amplitude_m: float = 0.0
+    telegraph_dither_frequency_hz: float = 0.0
     # The organic spawner has no scene-mesh awareness otherwise: a candidate
     # position is just a geometric offset from the drone, so it can land
     # behind a wall or in an adjacent room, and the obstacle then flies
@@ -222,6 +265,16 @@ class DynamicObstaclesConfig:
             reaim_max_turn_rate_radps=float(
                 data.get("reaim_max_turn_rate_radps", 3.0)
             ),
+            telegraph_time_s=float(data.get("telegraph_time_s", 0.0)),
+            ballistic_reaction_time_s=float(
+                data.get("ballistic_reaction_time_s", 0.0)
+            ),
+            telegraph_dither_amplitude_m=float(
+                data.get("telegraph_dither_amplitude_m", 0.0)
+            ),
+            telegraph_dither_frequency_hz=float(
+                data.get("telegraph_dither_frequency_hz", 0.0)
+            ),
             max_spawn_attempts=int(data.get("max_spawn_attempts", 12)),
             spawn_los_slack_m=float(data.get("spawn_los_slack_m", 0.1)),
             require_camera_fov=bool(data.get("require_camera_fov", False)),
@@ -253,6 +306,10 @@ class ActiveObstacle:
     # monotonic per-episode identity keeps sequential throws distinct in
     # historical metrics while object_id still addresses the live object.
     encounter_id: int = 0
+    # Pending telegraphed launch. None means the obstacle is already in its
+    # normal ballistic/static phase.
+    launch_time: float | None = None
+    reaction_time_s: float = 0.0
 
 
 class DynamicObstacleManager:
@@ -431,6 +488,9 @@ class DynamicObstacleManager:
             )
             self._last_spawn_time = sim_time
             self._next_spawn_wait = self._sample_spawn_wait()
+
+        self._update_telegraph_positions(sim_time)
+        self._launch_due_telegraphs(sim_time, drone_position, drone_velocity)
 
         # Order matters: _reaim re-bases spawn_position/born_time to *now*, so
         # running it first makes _update_kinematic compute t = 0 and pin every
@@ -724,6 +784,38 @@ class DynamicObstacleManager:
             )
             return
 
+        aim_offset = self._rng.normal(
+            0.0, self.cfg.aim_noise_std_m, size=3
+        ).astype(np.float32)
+        if self.cfg.aim_scatter_m > 0.0:
+            # Uniform inside a sphere, so the scatter is isotropic rather than
+            # concentrated on the shell a normalised direction would give.
+            direction = self._rng.normal(size=3)
+            direction /= max(float(np.linalg.norm(direction)), 1e-9)
+            radius = self.cfg.aim_scatter_m * float(self._rng.random()) ** (1.0 / 3.0)
+            aim_offset = aim_offset + (direction * radius).astype(np.float32)
+
+        telegraph_time = float(self.cfg.telegraph_time_s)
+        reaction_time = float(self.cfg.ballistic_reaction_time_s)
+        if (
+            telegraph_time > 0.0
+            and reaction_time > 0.0
+            and template.motion_mode in {"kinematic_line", "kinematic_parabola"}
+        ):
+            self._instantiate(
+                template=template,
+                spawn_position=spawn_position,
+                linear_velocity=np.zeros(3, dtype=np.float32),
+                sim_time=sim_time,
+                obj=obj,
+                aim_offset=np.asarray(aim_offset, dtype=np.float64),
+            )
+            item = self._active.get(obj.object_id)
+            if item is not None:
+                item.launch_time = float(sim_time) + telegraph_time
+                item.reaction_time_s = reaction_time
+            return
+
         target = np.asarray(drone_position, dtype=np.float32).copy()
         # Half (by config) of the throws lead the drone instead of aiming
         # where it currently is, so neither holding still nor simply
@@ -749,16 +841,7 @@ class DynamicObstacleManager:
                     np.asarray(drone_position, dtype=np.float64)
                     + np.asarray(drone_velocity, dtype=np.float64) * lead_t
                 ).astype(np.float32)
-        target += self._rng.normal(0.0, self.cfg.aim_noise_std_m, size=3).astype(
-            np.float32
-        )
-        if self.cfg.aim_scatter_m > 0.0:
-            # Uniform inside a sphere, so the scatter is isotropic rather than
-            # concentrated on the shell a normalised direction would give.
-            direction = self._rng.normal(size=3)
-            direction /= max(float(np.linalg.norm(direction)), 1e-9)
-            radius = self.cfg.aim_scatter_m * float(self._rng.random()) ** (1.0 / 3.0)
-            target = target + (direction * radius).astype(np.float32)
+        target = target + aim_offset
 
         gravity = float(template.parabola_gravity_mps2)
         if template.motion_mode == "dynamic_throw":
@@ -1319,9 +1402,56 @@ class DynamicObstacleManager:
             item.spawn_position = position
             item.born_time = float(sim_time)
 
+    def _launch_due_telegraphs(
+        self,
+        sim_time: float,
+        drone_position: np.ndarray,
+        drone_velocity: np.ndarray | None,
+    ) -> None:
+        """Release visible held obstacles using launch-time motion state."""
+        for item in self._active.values():
+            if item.launch_time is None or sim_time < item.launch_time:
+                continue
+            gravity = (
+                float(item.gravity_mps2)
+                if item.motion_mode == "kinematic_parabola"
+                else 0.0
+            )
+            position = np.asarray(item.obj.translation, dtype=np.float64)
+            velocity, _target = solve_telegraphed_launch(
+                position,
+                drone_position,
+                drone_velocity,
+                item.reaction_time_s,
+                aim_offset=item.aim_offset,
+                gravity_mps2=gravity,
+            )
+            item.velocity = velocity
+            item.spawn_position = position
+            # TTL measures the live projectile phase, not the warning hold.
+            item.born_time = float(sim_time)
+            item.launch_time = None
+
+    def _update_telegraph_positions(self, sim_time: float) -> None:
+        """Dither pending warnings so an event camera can observe the hold."""
+        amplitude = float(self.cfg.telegraph_dither_amplitude_m)
+        frequency = float(self.cfg.telegraph_dither_frequency_hz)
+        if amplitude <= 0.0 or frequency <= 0.0:
+            return
+        for item in self._active.values():
+            if item.launch_time is None:
+                continue
+            age = max(float(sim_time) - float(item.born_time), 0.0)
+            offset = amplitude * np.sin(2.0 * np.pi * frequency * age)
+            position = np.asarray(item.spawn_position, dtype=np.float64).copy()
+            position[1] += offset
+            item.obj.translation = position
+
     def _update_kinematic(self, sim_time: float) -> None:
         for item in self._active.values():
             if item.motion_mode not in {"kinematic_line", "kinematic_parabola"}:
+                continue
+            if item.launch_time is not None:
                 continue
 
             t = max(0.0, sim_time - item.born_time)

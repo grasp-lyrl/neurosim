@@ -13,6 +13,7 @@ import pytest
 from neurosim.core.visual_backend.dynamic_obstacles import (
     DynamicObstacleManager,
     DynamicObstaclesConfig,
+    solve_telegraphed_launch,
 )
 from neurosim.sims.synchronous_simulator.simulator import SynchronousSimulator
 
@@ -150,6 +151,48 @@ def test_dynamic_obstacles_spawn_in_real_habitat_runtime():
             counts.append(_active_obstacle_count(sim))
 
         assert max(counts) > 0, "No dynamic obstacle was spawned in runtime"
+    finally:
+        sim.close()
+
+
+def test_telegraphed_obstacle_holds_then_launches_in_real_runtime():
+    base = _base_settings()
+    sim = SynchronousSimulator(base, visualizer_disabled=True)
+    try:
+        handle = _pick_runtime_template_handle(sim)
+        settings = _enable_dynamic_obstacles(
+            base,
+            handle=handle,
+            motion_mode="kinematic_line",
+            ttl_s=1.0,
+            spawn_interval_s=10.0,
+            max_concurrent=1,
+        )
+        obstacle_cfg = settings["visual_backend"]["dynamic_obstacles"]
+        obstacle_cfg["telegraph_time_s"] = 0.20
+        obstacle_cfg["ballistic_reaction_time_s"] = 0.80
+        obstacle_cfg["aim_noise_std_m"] = 0.0
+        sim.reconfigure(settings)
+
+        manager = sim.visual_backend._dynamic_obstacles
+        sim.step(_default_control(sim))
+        assert manager._active
+        item = next(iter(manager._active.values()))
+        held_position = np.asarray(item.obj.translation, dtype=np.float64).copy()
+        assert item.launch_time is not None
+        np.testing.assert_allclose(item.velocity, 0.0)
+
+        while sim.time < 0.19:
+            sim.step(_default_control(sim))
+        np.testing.assert_allclose(item.obj.translation, held_position, atol=1e-6)
+        assert item.launch_time is not None
+
+        while item.launch_time is not None:
+            sim.step(_default_control(sim))
+        assert np.linalg.norm(item.velocity) > 0.0
+        launched_position = np.asarray(item.obj.translation, dtype=np.float64).copy()
+        sim.step(_default_control(sim))
+        assert np.linalg.norm(item.obj.translation - launched_position) > 0.0
     finally:
         sim.close()
 
@@ -814,3 +857,92 @@ def test_reaimed_throws_still_travel():
     assert positions[-1] < positions[0], "throw must make progress toward the drone"
     travelled = positions[0] - positions[-1]
     assert travelled > 0.5, f"expected real displacement, got {travelled:.3f} m"
+
+
+@pytest.mark.parametrize("gravity", [0.0, 3.0])
+def test_telegraphed_launch_hits_constant_velocity_prediction(gravity):
+    spawn = np.array([8.0, 2.0, -1.0])
+    drone = np.array([0.0, 1.0, 0.0])
+    drone_velocity = np.array([0.5, -0.1, 0.25])
+    offset = np.array([0.1, 0.0, -0.05])
+    reaction = 0.8
+
+    velocity, target = solve_telegraphed_launch(
+        spawn,
+        drone,
+        drone_velocity,
+        reaction,
+        aim_offset=offset,
+        gravity_mps2=gravity,
+    )
+    reached = spawn + velocity * reaction
+    reached[1] -= 0.5 * gravity * reaction**2
+
+    np.testing.assert_allclose(
+        target, drone + drone_velocity * reaction + offset, atol=1e-9
+    )
+    np.testing.assert_allclose(reached, target, atol=1e-9)
+
+
+def test_telegraphed_obstacle_holds_then_launches_once():
+    mgr = _manager_with(commit_s=0.0)
+    item = _throw([8.0, 0.0, 0.0], np.zeros(3))
+    item.launch_time = 0.5
+    item.reaction_time_s = 0.8
+    mgr._active = {1: item}
+
+    mgr._launch_due_telegraphs(
+        0.49, np.zeros(3), np.array([1.0, 0.0, 0.0])
+    )
+    np.testing.assert_allclose(item.velocity, 0.0)
+    assert item.launch_time == pytest.approx(0.5)
+
+    mgr._launch_due_telegraphs(
+        0.5, np.zeros(3), np.array([1.0, 0.0, 0.0])
+    )
+    assert item.launch_time is None
+    assert item.born_time == pytest.approx(0.5)
+    # At t=1.3 it reaches the launch-time prediction x=0.8 m.
+    mgr._update_kinematic(1.3)
+    np.testing.assert_allclose(item.obj.translation, [0.8, 0.0, 0.0], atol=1e-9)
+
+
+def test_telegraph_dither_moves_pending_warning_without_launching_it():
+    mgr = _manager_with(commit_s=0.0)
+    mgr.cfg.telegraph_dither_amplitude_m = 0.12
+    mgr.cfg.telegraph_dither_frequency_hz = 2.0
+    item = _throw([8.0, 1.0, 0.0], np.zeros(3))
+    item.launch_time = 0.6
+    item.reaction_time_s = 1.15
+    mgr._active = {1: item}
+
+    # One quarter-period reaches the positive amplitude peak.
+    mgr._update_telegraph_positions(0.125)
+    np.testing.assert_allclose(item.obj.translation, [8.0, 1.12, 0.0], atol=1e-9)
+    # The normal kinematic update must not erase the warning displacement.
+    mgr._update_kinematic(0.125)
+    np.testing.assert_allclose(item.obj.translation, [8.0, 1.12, 0.0], atol=1e-9)
+    np.testing.assert_allclose(item.velocity, 0.0)
+    assert item.launch_time == pytest.approx(0.6)
+
+
+def test_telegraph_config_is_opt_in():
+    default = DynamicObstaclesConfig(enabled=True)
+    assert default.telegraph_time_s == 0.0
+    assert default.ballistic_reaction_time_s == 0.0
+    assert default.telegraph_dither_amplitude_m == 0.0
+    assert default.telegraph_dither_frequency_hz == 0.0
+
+    parsed = DynamicObstaclesConfig.from_dict(
+        {
+            "enabled": True,
+            "telegraph_time_s": 0.6,
+            "ballistic_reaction_time_s": 0.9,
+            "telegraph_dither_amplitude_m": 0.12,
+            "telegraph_dither_frequency_hz": 2.0,
+        }
+    )
+    assert parsed.telegraph_time_s == pytest.approx(0.6)
+    assert parsed.ballistic_reaction_time_s == pytest.approx(0.9)
+    assert parsed.telegraph_dither_amplitude_m == pytest.approx(0.12)
+    assert parsed.telegraph_dither_frequency_hz == pytest.approx(2.0)
