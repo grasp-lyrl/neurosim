@@ -5,12 +5,14 @@ scripted measurement sequence. ``torch`` is required only to exercise the
 GPU→host conversion (skipped if unavailable).
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
 import numpy as np
 
 from neurosim.online_data import SampleSchema, SimulatorWorker
+from neurosim.online_data.sample import SampleMeta
 from neurosim.online_data.sim_worker import _to_host_array, _events_to_host
 
 torch = pytest.importorskip("torch")
@@ -169,3 +171,25 @@ def test_worker_close():
     w = _make_worker()
     w.close()
     assert w.rsim.closed
+
+
+def test_worker_episode_log_accounts_samples_per_scene(tmp_path):
+    path = tmp_path / "episode_003.jsonl"
+    sim = _FakeSim(SENSOR_CONFIGS, _episode_script())
+    w = SimulatorWorker(
+        _schema(),
+        rsim=_FakeRSim(sim),
+        worker_id=3,
+        episode_log=path,
+        emit_fn=lambda s: None,
+    )
+    w.run_episode(episode_idx=0)
+    w.run_episode(episode_idx=1)
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [r["n_samples"] for r in records] == [2, 2]
+    assert {r["scene"] for r in records} == {"apartment_1"}
+    assert [r["episode_id"] for r in records] == [
+        SampleMeta.make_episode_id(3, 0),
+        SampleMeta.make_episode_id(3, 1),
+    ]

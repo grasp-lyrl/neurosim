@@ -122,8 +122,10 @@ def _run_producer_process(
     """
     from neurosim.online_data.sim_worker import SimulatorWorker
 
+    episode_log = None
     if log_dir is not None:
         _configure_producer_logger(log_dir, worker_id, spec.gpu_id)
+        episode_log = Path(log_dir) / "producers" / f"episode_{worker_id:03d}.jsonl"
 
     def emit(sample):
         # Block until queued, but wake periodically to honor shutdown.
@@ -144,6 +146,7 @@ def _run_producer_process(
         gpu_id=spec.gpu_id,
         seed=spec.seed,
         ring_caps=spec.ring_caps,
+        episode_log=episode_log,
     )
 
     # Survive occasional bad episodes instead of dying.

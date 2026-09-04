@@ -6,13 +6,15 @@ and on every step converts the raw (GPU) measurements to **owned host memory**
 and feeds them to the assembler. Released samples are routed to ``emit_fn``..
 """
 
+import json
 import logging
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
 from neurosim.online_data.assembler import AnchorAssembler
-from neurosim.online_data.sample import TimeAlignedSample
+from neurosim.online_data.sample import SampleMeta, TimeAlignedSample
 from neurosim.online_data.schema import SampleSchema, SensorKind
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,8 @@ class SimulatorWorker:
         emit_fn: Sink for released samples (default: append to ``self.samples``).
         strict_owned: Forwarded to the assembler (ownership backstop).
         validate: Validate ``schema`` against the simulator's sensor configs.
+        episode_log: JSONL path; one ``{episode_id, scene, n_samples}`` line per
+            episode, joinable to ``batch.meta.episode_id``.
     """
 
     def __init__(
@@ -112,6 +116,7 @@ class SimulatorWorker:
         emit_fn: Callable[[TimeAlignedSample], None] | None = None,
         strict_owned: bool = True,
         validate: bool = True,
+        episode_log: str | Path | None = None,
     ):
         self.schema = schema
         self.worker_id = worker_id
@@ -120,6 +125,7 @@ class SimulatorWorker:
         self.seed = seed
         self._rng = np.random.default_rng(seed)
         self._episode_idx = 0
+        self._episode_log = Path(episode_log) if episode_log is not None else None
 
         self.samples: list[TimeAlignedSample] = []
         self._emit_fn = emit_fn if emit_fn is not None else self.samples.append
@@ -192,13 +198,20 @@ class SimulatorWorker:
             scene = sampled.get("visual_backend", {}).get("scene", "")
 
         before = self.assembler.stats["emitted"]
+        episode_id = SampleMeta.make_episode_id(self.worker_id, episode_idx)
         self.assembler.begin_episode(
             episode_idx=episode_idx, scene=scene, seed=self.seed
         )
         self.sim.run(callback_hook_=self._on_sim_step)
         for sample in self.assembler.end_episode():
             self._emit_fn(sample)
-        return self.assembler.stats["emitted"] - before
+
+        emitted = self.assembler.stats["emitted"] - before
+        if self._episode_log is not None:
+            record = {"episode_id": episode_id, "scene": scene, "n_samples": emitted}
+            with open(self._episode_log, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record) + "\n")
+        return emitted
 
     def close(self) -> None:
         if self.rsim is not None:
