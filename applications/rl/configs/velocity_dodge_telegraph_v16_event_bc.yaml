@@ -1,0 +1,29 @@
+# Event-only behavior-cloning diagnostic for the corrected-yaw v16
+# telegraphed single-obstacle task.  v16 failed the blind-motion
+# non-degeneracy gate, so this is not a candidate task configuration for a
+# long PPO run.  It is intentionally retained as a controlled perception
+# probe: can a clone infer the sampling-MPC teacher's dodge direction and
+# timing from event-camera history?
+#
+# train_velocity_dodge_bc.py must be invoked with --events-only-state and
+# --blank-previous-action.  Those switches remove the nominal-relative state
+# and autoregressive shortcuts that otherwise predict the teacher label
+# without looking at the camera.  Only yaw error remains from state, because
+# it contains no obstacle or dodge-offset information.
+experiment_config: applications/rl/configs/velocity_dodge_teacher_v16_telegraph115.yaml
+
+overrides:
+  env:
+    obs_mode: combined
+    event_representation:
+      # Store 160x120 rather than 320x240.  The inherited four-frame history
+      # still spans 200 ms, while this reduces demonstration storage by 4x.
+      # BC pools once more by 2x to present 80x60 tensors to the encoder.
+      downsample_factor: 2
+    task:
+      config:
+        # Neither actor nor dataset observation receives exact obstacle
+        # geometry.  The MPC collector can still inspect simulator state
+        # internally to generate expert labels.
+        privileged_actor: false
+        privileged_critic: false

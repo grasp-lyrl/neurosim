@@ -26,6 +26,105 @@ from neurosim.rl.receding_horizon_dodge_expert import (
 from train_sb3 import load_experiment_config
 
 
+def project_sphere_to_pinhole(
+    centre,
+    camera_position,
+    camera_quaternion_wxyz,
+    *,
+    width,
+    height,
+    hfov_deg,
+    radius_m,
+):
+    """Project a Habitat-world sphere into a Habitat pinhole camera.
+
+    Returns ``[visible, u_norm, v_norm, radius_norm, depth_norm]``. Coordinates
+    and radius are normalized by image dimensions; depth is normalized by the
+    camera far plane by the caller. Habitat cameras look along local ``-Z``
+    and expose quaternions in Hamilton ``[w, x, y, z]`` order.
+    """
+    centre = np.asarray(centre, dtype=np.float64)
+    camera_position = np.asarray(camera_position, dtype=np.float64)
+    q = np.asarray(camera_quaternion_wxyz, dtype=np.float64)
+    if q.shape != (4,) or float(np.linalg.norm(q)) < 1e-12:
+        return np.zeros(5, dtype=np.float32)
+    w, x, y, z = q / np.linalg.norm(q)
+    rotation = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+    local = rotation.T @ (centre - camera_position)
+    depth = -float(local[2])
+    if depth <= 1e-6:
+        return np.zeros(5, dtype=np.float32)
+    width = float(width)
+    height = float(height)
+    focal = width / (2.0 * np.tan(0.5 * np.deg2rad(float(hfov_deg))))
+    u = 0.5 * width + focal * float(local[0]) / depth
+    v = 0.5 * height - focal * float(local[1]) / depth
+    radius_px = focal * float(radius_m) / depth
+    # A heatmap cannot represent a centre outside its finite lattice. Treat
+    # partially clipped spheres as absent; camera-FOV spawning keeps the
+    # actionable approach inside the image, while departed obstacles should
+    # become clean negatives rather than impossible coordinate targets.
+    visible = 0.0 <= u < width and 0.0 <= v < height
+    return np.asarray(
+        [
+            float(visible),
+            u / width,
+            v / height,
+            radius_px / max(width, height),
+            depth,
+        ],
+        dtype=np.float32,
+    )
+
+
+def obstacle_image_label(env) -> np.ndarray:
+    """Ground-truth image label for the task's most imminent obstacle."""
+    backend = env.sim.visual_backend
+    manager = getattr(backend, "_dynamic_obstacles", None)
+    active = getattr(manager, "_active", {}) if manager is not None else {}
+    rows = getattr(env._task._context, "obstacle_relative_states", None) or []
+    if not active or not rows:
+        return np.zeros(5, dtype=np.float32)
+
+    row = rows[0]
+    simulator_id = int(row.get("simulator_object_id", row["object_id"]))
+    item = active.get(simulator_id)
+    if item is None:
+        return np.zeros(5, dtype=np.float32)
+
+    settings = backend.settings
+    sensors = settings.get("sensors", {})
+    camera_uuid = getattr(manager.cfg, "spawn_camera_uuid", None)
+    if camera_uuid is None:
+        camera_uuid = next(
+            (name for name, sensor in sensors.items() if sensor.get("type") == "event"),
+            None,
+        )
+    camera_cfg = sensors.get(camera_uuid, {})
+    camera_state = backend.agent.get_state().sensor_states.get(camera_uuid)
+    if camera_state is None:
+        return np.zeros(5, dtype=np.float32)
+    label = project_sphere_to_pinhole(
+        np.asarray(item.obj.translation, dtype=np.float64),
+        np.asarray(camera_state.position, dtype=np.float64),
+        np.asarray(camera_state.rotation.components, dtype=np.float64),
+        width=int(camera_cfg["width"]),
+        height=int(camera_cfg["height"]),
+        hfov_deg=float(camera_cfg["hfov"]),
+        radius_m=float(item.collision_radius),
+    )
+    if label[0] > 0.5:
+        label[4] /= max(float(camera_cfg.get("zfar", 20.0)), 1e-6)
+    return label
+
+
 def effective_expert_action(env, action: np.ndarray) -> np.ndarray:
     """Zero the axes the task suppresses, matching what the controller sees.
 
@@ -137,8 +236,48 @@ def load_rollout_policy(path, cfg, env, device):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from train_velocity_dodge_bc import build_clone_net  # noqa: PLC0415
 
-    model, _ = build_clone_net(cfg, env)
-    payload = torch.load(path, map_location=device)
+    payload = torch.load(path, map_location=device, weights_only=False)
+    preprocessing = payload.get("preprocessing", {})
+    recurrent_type = preprocessing.get("recurrent_type")
+    if recurrent_type == "event_tracker_action_gru":
+        from train_event_tracker_action_head import EventActionPolicy  # noqa: PLC0415
+
+        model = EventActionPolicy(path, device=device)
+        model._dagger_recurrent_type = recurrent_type
+        return model
+    if recurrent_type == "compact_gru":
+        from train_velocity_dodge_compact_gru import (  # noqa: PLC0415
+            CommitmentController,
+            build_compact_model,
+        )
+
+        downsample = int(preprocessing.get("downsample_events", 1))
+        model = build_compact_model(
+            cfg, env, downsample,
+            int(preprocessing.get("hidden_size", 128)),
+        )
+        model.load_state_dict(payload["model"])
+        model.downsample_events = downsample
+        model._dagger_hidden = None
+        model._dagger_controller = CommitmentController(
+            **preprocessing.get("controller", {})
+        )
+        model._dagger_recurrent_type = recurrent_type
+        return model.to(device).eval()
+
+    model, _ = build_clone_net(
+        cfg,
+        env,
+        int(preprocessing.get("downsample_events", 1)),
+        bool(preprocessing.get("discrete_actions", False)),
+        blank_previous_action=bool(
+            preprocessing.get("blank_previous_action", False)
+        ),
+        events_only_state=bool(preprocessing.get("events_only_state", False)),
+        blank_tracking_error=bool(
+            preprocessing.get("blank_tracking_error", False)
+        ),
+    )
     model.load_state_dict(payload["model"])
     return model.to(device).eval()
 
@@ -147,16 +286,36 @@ def clone_action(model, obs, device):
     """Deterministic clone action for one observation."""
     import torch  # noqa: PLC0415
 
+    from train_velocity_dodge_bc import pool_events  # noqa: PLC0415
+
     with torch.no_grad():
+        if getattr(model, "_dagger_recurrent_type", None) == "event_tracker_action_gru":
+            return model.predict(obs)[0]
         batch = (
             {
-                k: torch.from_numpy(np.asarray(v)[None]).to(device)
+                k: torch.from_numpy(
+                    (
+                        pool_events(np.asarray(v), model.downsample_events)
+                        if k == "events"
+                        else np.asarray(v)
+                    )[None]
+                ).to(device)
                 for k, v in obs.items()
             }
             if isinstance(obs, dict)
             else torch.from_numpy(np.asarray(obs)[None]).to(device)
         )
-        return model(batch).cpu().numpy()[0].astype(np.float32)
+        if getattr(model, "_dagger_recurrent_type", None) == "compact_gru":
+            output, model._dagger_hidden = model.recurrent_step(
+                batch, model._dagger_hidden
+            )
+            return model._dagger_controller.action(output)
+        output = model(batch).cpu().numpy()[0]
+        if getattr(model, "discrete_actions", False):
+            action = np.zeros(3, dtype=np.float32)
+            action[1] = float(int(np.argmax(output)) - 1)
+            return action
+        return output.astype(np.float32)
 
 
 def expert_for_task(task) -> LocalTrajectoryExpert:
@@ -550,6 +709,61 @@ def _mpc_static_checker(env, active_object_ids):
     return static_path_is_clear
 
 
+def _mpc_visibility_gate_open(env, expert, state, active, now: float) -> bool:
+    """Release MPC only once an active obstacle is within camera-scale range.
+
+    The gate is opt-in through ``trajectory.visibility_release_distance_m``.
+    It tracks immutable encounter IDs rather than simulator object IDs, which
+    Habitat may recycle after despawn. Clearing the cached plan while closed
+    guarantees that the first released action is replanned from the actually
+    undodged vehicle state instead of following a trajectory computed early.
+    """
+    trajectory = dict(getattr(env._task, "trajectory_config", {}) or {})
+    release_distance = float(
+        trajectory.get("visibility_release_distance_m", 0.0) or 0.0
+    )
+    if release_distance <= 0.0:
+        return True
+
+    released = set(getattr(env, "_mpc_visibility_released_ids", set()))
+    position = np.asarray(state["x"], dtype=np.float64)
+    to_dynamics = env.sim.coord_trans.pos_transform_inv
+    active_ids = set()
+    newly_released = []
+    for _simulator_object_id, item in active.items():
+        encounter_id = int(getattr(item, "encounter_id", item.object_id))
+        active_ids.add(encounter_id)
+        obstacle_position = (
+            to_dynamics @ np.asarray(item.obj.translation, dtype=np.float64)
+        )
+        distance = float(np.linalg.norm(obstacle_position - position))
+        if distance <= release_distance and encounter_id not in released:
+            released.add(encounter_id)
+            newly_released.append((encounter_id, distance))
+
+    env._mpc_visibility_released_ids = released
+    if newly_released:
+        # Force should_replan() on this same policy tick. In the usual
+        # single-obstacle case no plan exists yet, but this also handles a
+        # later encounter arriving while an earlier cached plan is present.
+        expert.plan = None
+        events = list(getattr(env, "_mpc_visibility_release_events", []))
+        events.extend(
+            {
+                "encounter_id": encounter_id,
+                "time_s": float(now),
+                "center_distance_m": distance,
+            }
+            for encounter_id, distance in newly_released
+        )
+        env._mpc_visibility_release_events = events
+
+    is_open = bool(active_ids & released)
+    if not is_open:
+        expert.plan = None
+    return is_open
+
+
 def mpc_oracle_action(env) -> np.ndarray:
     """Replan a privileged velocity-command trajectory in closed loop."""
     action = np.zeros(env.action_space.shape, dtype=np.float32)
@@ -583,6 +797,8 @@ def mpc_oracle_action(env) -> np.ndarray:
         dtype=np.float64,
     )
     active = env.active_obstacles()
+    if not _mpc_visibility_gate_open(env, expert, state, active, now):
+        return _limit_mpc_action_acceleration(env, expert, action)
     manager = env.sim.visual_backend._dynamic_obstacles
     to_dynamics = env.sim.coord_trans.pos_transform_inv
     predictions = []
@@ -984,6 +1200,15 @@ def main() -> None:
     )
     parser.add_argument("--seed0", type=int, default=130000)
     parser.add_argument(
+        "--visibility-release-distance-m",
+        type=float,
+        default=None,
+        help=(
+            "Optional center-distance gate for sampling MPC. The expert holds "
+            "zero and replans only once an obstacle reaches this range."
+        ),
+    )
+    parser.add_argument(
         "--output", default="outputs/rl/velocity_dodge_oracle_easy_summary.json"
     )
     parser.add_argument(
@@ -1001,10 +1226,32 @@ def main() -> None:
         action="store_true",
         help="Keep episodes containing frames where the expert found no feasible plan",
     )
+    parser.add_argument(
+        "--record-privileged",
+        action="store_true",
+        help=(
+            "Add the teacher's privileged geometry to each dict-observation "
+            "row. This is supervision only; the rollout policy never sees it."
+        ),
+    )
+    parser.add_argument(
+        "--record-obstacle-image-label",
+        action="store_true",
+        help=(
+            "Store presence, normalized image centre/radius, and normalized "
+            "depth for the most imminent obstacle. Labels are never exposed "
+            "to the rollout policy."
+        ),
+    )
     args = parser.parse_args()
 
     cfg = load_experiment_config(args.experiment_config)
     env_cfg = copy.deepcopy(cfg["env"])
+    if args.visibility_release_distance_m is not None:
+        trajectory = env_cfg["task"]["config"].setdefault("trajectory", {})
+        trajectory["visibility_release_distance_m"] = float(
+            args.visibility_release_distance_m
+        )
     env_cfg["enable_visualization"] = False
     env_cls = env_class_for_task(env_cfg["task"]["name"])
     env = env_cls(env_config=env_cfg, train=False)
@@ -1031,11 +1278,21 @@ def main() -> None:
         for episode in range(args.episodes):
             seed = args.seed0 + episode
             obs, _ = env.reset(seed=seed)
+            if rollout_model is not None:
+                if getattr(
+                    rollout_model, "_dagger_recurrent_type", None
+                ) == "compact_gru":
+                    rollout_model._dagger_hidden = None
+                    rollout_model._dagger_controller.reset()
+                elif hasattr(rollout_model, "reset"):
+                    rollout_model.reset()
             env._trajectory_dodge_expert = expert_for_task(env._task)
             env._trajectory_expert_plans = 0
             env._trajectory_expert_failed_plans = 0
             env._trajectory_expert_plan_diagnostics = []
             env._mpc_slack_replans = 0
+            env._mpc_visibility_released_ids = set()
+            env._mpc_visibility_release_events = []
             if args.planner == "sampling_mpc":
                 env._receding_horizon_dodge_expert = mpc_expert_for_env(env)
             episode_observations = []
@@ -1086,8 +1343,7 @@ def main() -> None:
                     getattr(env, "_trajectory_expert_frame_unlabelled", False)
                 )
                 if record_frame and isinstance(obs, dict):
-                    episode_observations.append(
-                        {
+                    recorded_observation = {
                             key: np.asarray(
                                 value,
                                 dtype=(
@@ -1098,7 +1354,18 @@ def main() -> None:
                             ).copy()
                             for key, value in obs.items()
                         }
-                    )
+                    if args.record_privileged:
+                        recorded_observation["privileged"] = np.asarray(
+                            env._task.make_privileged_observation(
+                                state=env.sim.dynamics.state
+                            ),
+                            dtype=np.float32,
+                        ).copy()
+                    if args.record_obstacle_image_label:
+                        recorded_observation["obstacle_image"] = (
+                            obstacle_image_label(env)
+                        )
+                    episode_observations.append(recorded_observation)
                 elif record_frame:
                     episode_observations.append(
                         np.asarray(obs, dtype=np.float32).copy()
@@ -1181,6 +1448,9 @@ def main() -> None:
                         "expert_plans": env._trajectory_expert_plans,
                         "expert_failed_plans": env._trajectory_expert_failed_plans,
                         "mpc_slack_replans": env._mpc_slack_replans,
+                        "visibility_release_events": list(
+                            env._mpc_visibility_release_events
+                        ),
                         "expert_plan_diagnostics": env._trajectory_expert_plan_diagnostics,
                     }
                     results.append(row)

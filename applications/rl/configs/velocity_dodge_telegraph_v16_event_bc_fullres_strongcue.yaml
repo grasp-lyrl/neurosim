@@ -1,0 +1,55 @@
+# REJECTED native-resolution v16 observability diagnostic. Do not use this
+# configuration for demonstrations, BC, PPO, or task evaluation. Doubling the
+# rendered obstacle radius while retaining a 0.15 m collision radius is an
+# unrealistic perception aid; its results are retained only as diagnostic
+# provenance.
+#
+# Projectile timing, aim,
+# speed, explicit 0.15 m collision radius, and the 3 m/s2 vehicle gate remain
+# unchanged. The warning sphere was rendered at twice the old radius and used
+# a larger/faster pre-launch vertical dither so it leaves a usable event-camera
+# signature at the physically necessary 6.5--7 m decision range.
+#
+# Rendering size was deliberately decoupled from collision geometry: proximity
+# and clearance use collision_radius below, not the visual mesh scale. This is
+# exactly why the configuration was rejected.
+#
+# Evaluated 2026-09-02. On matched native-resolution probes (seeds
+# 18001--18003), the warning changed 4.0x as many tensor elements and carried
+# 4.1x the median causal L1 event mass of v16's old 0.12 m / 2 Hz / 0.15 m
+# warning. Sampling MPC passed 10/10 with no collisions, 0.341 m median and
+# 0.243 m p10 clearance, and 2.769 m/s2 worst acceleration. The task still
+# fails non-degeneracy: zero/weave/random encounter-clear rates were
+# 23.5%/73.7%/64.9%. Even apart from the unrealistic cue, it fails the
+# blind-motion gate.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v16_event_bc_fullres.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        telegraph_dither_amplitude_m: 0.20
+        telegraph_dither_frequency_hz: 3.0
+        templates:
+          - handle: uvSphereSolid
+            scale: [0.30, 0.30, 0.30]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 2.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 9.0
+          - handle: uvSphereSolid
+            scale: [0.30, 0.30, 0.30]
+            motion_mode: kinematic_parabola
+            mass: 0.2
+            ttl_s: 2.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 9.0
+            parabola_gravity_mps2: 3.0
+          - handle: uvSphereSolid
+            scale: [0.30, 0.30, 0.30]
+            motion_mode: kinematic_line
+            mass: 0.2
+            ttl_s: 2.0
+            collision_radius: 0.15
+            kinematic_speed_mps: 9.0

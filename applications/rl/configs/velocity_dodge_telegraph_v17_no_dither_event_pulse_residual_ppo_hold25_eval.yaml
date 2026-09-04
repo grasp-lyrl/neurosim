@@ -1,0 +1,10 @@
+# Diagnostic only: evaluate the completed v17 no-dither PPO checkpoint with a
+# 1.25 s pulse instead of its trained 1.00 s pulse. This tests whether fixed
+# pulse expiry before closest approach is a material failure mode.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v17_no_dither_event_pulse_residual_ppo.yaml
+
+overrides:
+  env:
+    event_pulse_residual:
+      pulse_kwargs:
+        hold_steps: 25

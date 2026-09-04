@@ -1,0 +1,9 @@
+# Native-resolution counterpart of the strict v16 event-BC diagnostic.
+# Keep the 50 ms time-surface decay and four-frame (200 ms) history fixed;
+# only remove spatial downsampling so this experiment isolates resolution.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v16_event_bc.yaml
+
+overrides:
+  env:
+    event_representation:
+      downsample_factor: 1       # native 320x240 event camera

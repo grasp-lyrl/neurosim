@@ -69,9 +69,11 @@ from neurosim.core.utils.utils_gen import deep_update, load_yaml
 from neurosim.core.utils import sim_gpu_assignments
 from neurosim.rl import (
     AsymmetricActorCriticPolicy,
+    AsymmetricGruActorCriticPolicy,
     AsymmetricRecurrentActorCriticPolicy,
     CombinedEventStateExtractor,
     EventCnnExtractor,
+    PrivilegedFusionEventStateExtractor,
     env_class_for_task,
 )
 from neurosim.rl.sb3_features import PRIVILEGED_KEY
@@ -141,6 +143,10 @@ def make_env(
         import copy
 
         cfg = copy.deepcopy(env_config)
+        residual_cfg = cfg.pop("event_geometry_residual", None)
+        pulse_residual_cfg = cfg.pop("event_pulse_residual", None)
+        if residual_cfg is not None and pulse_residual_cfg is not None:
+            raise ValueError("configure only one event residual wrapper")
         cfg.setdefault("visual_backend", {})["gpu_id"] = gpu_id
         if worker_log_dir is not None:
             cfg["_neurosim_rl_worker_log_dir"] = str(worker_log_dir)
@@ -148,6 +154,28 @@ def make_env(
             cfg["_neurosim_rl_env_idx"] = env_idx
         env_cls = env_class_for_task(cfg["task"]["name"])
         env = env_cls(env_config=cfg, train=train)
+        if residual_cfg is not None:
+            from event_geometry_residual import EventGeometryResidualWrapper
+
+            residual_cfg = dict(residual_cfg)
+            if residual_cfg.pop("enabled", True):
+                device = str(residual_cfg.pop("device", "auto"))
+                if device == "auto":
+                    device = f"cuda:{gpu_id}"
+                env = EventGeometryResidualWrapper(
+                    env, device=device, **residual_cfg
+                )
+        if pulse_residual_cfg is not None:
+            from event_pulse_residual import EventPulseResidualWrapper
+
+            pulse_residual_cfg = dict(pulse_residual_cfg)
+            if pulse_residual_cfg.pop("enabled", True):
+                device = str(pulse_residual_cfg.pop("device", "auto"))
+                if device == "auto":
+                    device = f"cuda:{gpu_id}"
+                env = EventPulseResidualWrapper(
+                    env, device=device, **pulse_residual_cfg
+                )
         env = Monitor(env)
         if seed is not None:
             env.reset(seed=seed + env_idx)
@@ -260,9 +288,28 @@ class TaskMetricsCallback(BaseCallback):
         self._step_sums: dict[str, float] = {}
         self._step_count = 0
         self._episode_values: dict[str, list[float]] = {}
+        self._residual_sums: dict[str, float] = {}
+        self._residual_count = 0
 
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", []) or []:
+            residual = (
+                info.get("event_pulse_residual")
+                or info.get("event_geometry_residual")
+                or {}
+            )
+            if residual:
+                self._residual_count += 1
+                self._residual_sums["gate_fraction"] = (
+                    self._residual_sums.get("gate_fraction", 0.0)
+                    + float(residual["gate"])
+                )
+                for key in ("baseline_action", "residual_action", "executed_action"):
+                    norm = float(np.linalg.norm(residual[key]))
+                    metric = f"{key}_norm"
+                    self._residual_sums[metric] = (
+                        self._residual_sums.get(metric, 0.0) + norm
+                    )
             terms = info.get("reward_terms") or {}
             if not terms:
                 continue
@@ -293,9 +340,16 @@ class TaskMetricsCallback(BaseCallback):
         for key, values in self._episode_values.items():
             if values:
                 self.logger.record(f"task/{key}", float(np.mean(values)))
+        if self._residual_count:
+            for key, total in self._residual_sums.items():
+                self.logger.record(
+                    f"residual/{key}", total / self._residual_count
+                )
         self._step_sums.clear()
         self._step_count = 0
         self._episode_values.clear()
+        self._residual_sums.clear()
+        self._residual_count = 0
 
 
 class SaveVecNormalizeCallback(BaseCallback):
@@ -458,6 +512,10 @@ class ActorFreezeWarmupCallback(BaseCallback):
         policy = self.model.policy
         groups = [
             getattr(policy, "pi_features_extractor", None),
+            # RecurrentPPO keeps the actor memory outside mlp_extractor.
+            # Omitting it made "frozen" BC warm starts update the LSTM/GRU
+            # immediately and hit the KL stop on their first iteration.
+            getattr(policy, "lstm_actor", None),
             getattr(policy, "action_net", None),
         ]
         mlp = getattr(policy, "mlp_extractor", None)
@@ -894,6 +952,7 @@ def build_policy_config(
     event_high_resolution: bool = False,
     event_backbone: str = "small",
     recurrent: bool = False,
+    recurrent_cell: str = "lstm",
 ) -> tuple[Any, dict[str, Any]]:
     """Select the SB3 policy and kwargs for this observation layout.
 
@@ -927,12 +986,18 @@ def build_policy_config(
         # The asymmetric critic and recurrence are independent: the actor is
         # blinded to the privileged channel either way, the LSTM only adds
         # temporal context that a single time surface cannot carry.
-        return (
-            AsymmetricRecurrentActorCriticPolicy
-            if recurrent
-            else AsymmetricActorCriticPolicy
-        ), {
-            "features_extractor_class": CombinedEventStateExtractor,
+        if recurrent and recurrent_cell == "gru":
+            policy_class = AsymmetricGruActorCriticPolicy
+            extractor_class = PrivilegedFusionEventStateExtractor
+        else:
+            policy_class = (
+                AsymmetricRecurrentActorCriticPolicy
+                if recurrent
+                else AsymmetricActorCriticPolicy
+            )
+            extractor_class = CombinedEventStateExtractor
+        return policy_class, {
+            "features_extractor_class": extractor_class,
             "features_extractor_kwargs": event_extractor_kwargs,
             "normalize_images": False,
             **base_policy_kwargs,
@@ -1254,6 +1319,7 @@ def main():
         event_high_resolution=bool(exp["ppo"].get("event_high_resolution", False)),
         event_backbone=str(exp["ppo"].get("event_backbone", "small")),
         recurrent=recurrent,
+        recurrent_cell=str(exp["ppo"].get("recurrent_cell", "lstm")),
     )
     if privileged:
         print(
@@ -1322,6 +1388,12 @@ def main():
                 lstm_hidden_size=int(exp["ppo"].get("lstm_hidden_size", 128)),
                 n_lstm_layers=int(exp["ppo"].get("n_lstm_layers", 1)),
             )
+            if str(exp["ppo"].get("recurrent_cell", "lstm")) == "gru":
+                extra["policy_kwargs"].update(
+                    net_arch={"pi": [64], "vf": [64, 64]},
+                    actor_events_only_state=True,
+                    actor_blank_previous_action=True,
+                )
         model = ctor(
             policy,
             train_vec,
@@ -1418,10 +1490,23 @@ def main():
         )
 
     if args.bc_warm_start:
-        from bc_warm_start import load_clone_into_policy
+        from bc_warm_start import (
+            load_clone_into_policy,
+            load_gru_clone_into_policy,
+        )
 
         clone = th.load(args.bc_warm_start, map_location=str(exp["ppo"]["device"]))
-        report = load_clone_into_policy(model.policy, clone["model"])
+        if clone.get("preprocessing", {}).get("recurrent_type") == "gru":
+            if str(exp["ppo"].get("recurrent_cell", "lstm")) != "gru":
+                raise ValueError("a GRU BC checkpoint requires ppo.recurrent_cell=gru")
+            report = load_gru_clone_into_policy(model.policy, clone["model"])
+            bad_skips = [
+                key for key in report["skipped"] if not key.startswith("side_head.")
+            ]
+            if bad_skips:
+                raise ValueError(f"incomplete GRU actor transfer: {bad_skips}")
+        else:
+            report = load_clone_into_policy(model.policy, clone["model"])
         print(
             f"warm-started actor from {args.bc_warm_start}: "
             f"{len(report['updated'])} tensors loaded, "
@@ -1429,6 +1514,18 @@ def main():
         )
         for s_ in report["skipped"]:
             print("  skipped:", s_)
+
+    if bool(exp["ppo"].get("zero_action_head", False)):
+        if args.resume_checkpoint or args.bc_warm_start:
+            raise ValueError(
+                "ppo.zero_action_head is only valid for a fresh, non-BC model"
+            )
+        with th.no_grad():
+            model.policy.action_net.weight.zero_()
+            model.policy.action_net.bias.zero_()
+        if model.use_sde:
+            model.policy.reset_noise()
+        print("zero-initialized policy action head (deterministic residual = 0)")
 
     eval_callback = EvalCallback(
         eval_vec,

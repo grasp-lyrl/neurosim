@@ -1,0 +1,21 @@
+# Realistic native-resolution v16 teacher/student configuration with a
+# visibility-aligned oracle. The sampling-MPC expert must hold zero lateral
+# action until the nearest active projectile reaches 7.0 m, then discard any
+# cached plan and replan from the genuinely undodged state.
+#
+# Unlike the rejected strong-cue diagnostic, visual scale and collision radius
+# remain the original matched 0.15 m. Projectile timing, speed, aim, camera-FOV
+# spawning, and the 3 m/s2 vehicle acceleration gate are unchanged.
+#
+# Audit (seeds 21001--21040): 35/40 accepted after excluding two collisions
+# and three trajectories below the user-selected 0.10 m surface-clearance
+# floor. Retained median/p10/min clearance: 0.239/0.163/0.106 m; worst
+# physical acceleration across all attempts: 2.946 m/s2.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v16_event_bc_fullres.yaml
+
+overrides:
+  env:
+    task:
+      config:
+        trajectory:
+          visibility_release_distance_m: 7.0

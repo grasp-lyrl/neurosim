@@ -1,0 +1,51 @@
+# Fresh no-dither pulse-level PPO training run for the real-world transition.
+# The frozen native-resolution event tracker and BC GRU remain the causal
+# baseline. PPO can correct the trigger/direction only on an event-active,
+# confidence >= 0.7 track, and cannot alter an active non-reversing pulse.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v16_event_pulse_residual_ppo_no_dither_eval.yaml
+
+overrides:
+  seed: 50101
+  total_timesteps: 131072
+  num_envs: 4
+  n_gpus: 5
+  envs_on_gpu0: 0
+
+  eval:
+    freq: 16384
+    episodes: 8
+    num_envs: 2
+
+  env:
+    event_pulse_residual:
+      # The old +/-1 logit range cannot recover a no-dither BC proposal such
+      # as p=0.007 (logit=-4.95). +/-8 lets PPO learn a genuine trigger while
+      # the hard event/activity + tracker-confidence guard still prevents a
+      # blank observation from initiating motion.
+      gate_logit_scale: 8.0
+      direction_scale: 0.25
+      pulse_kwargs: {}
+
+  ppo:
+    recurrent: false
+    learning_rate: 0.0001
+    n_steps: 256
+    batch_size: 128
+    n_epochs: 4
+    clip_range: 0.10
+    target_kl: 0.02
+    # More guarded trigger exploration than the dither pilot. With std~0.30,
+    # an action of +0.62 can lift p=0.007 through the commit threshold.
+    log_std_init: -1.2
+    zero_action_head: true
+    use_sde: true
+    sde_sample_freq: 8
+    ent_coef: 0.002
+    ent_coef_final: 0.0
+    actor_freeze_updates: 4
+    actor_release_explained_variance: 0.02
+    actor_release_patience: 2
+    actor_freeze_max_updates: 8
+    freeze_extractor_for_ppo: false
+    distance_aux_weight: 0.0
+    pretanh_penalty: 0.001

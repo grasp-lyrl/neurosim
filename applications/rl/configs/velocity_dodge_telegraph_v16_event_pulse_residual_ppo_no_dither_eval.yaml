@@ -1,0 +1,12 @@
+# Rollout-only ablation of the selected pulse-level PPO policy. Keep the
+# trained camera, projectile, timing, and control stack unchanged, but remove
+# the obstacle's 0.12 m / 2 Hz pre-launch vertical dither. The obstacle is
+# therefore event-silent until launch except for ego/camera-induced edges.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v16_event_pulse_residual_ppo.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        telegraph_dither_amplitude_m: 0.0
+        telegraph_dither_frequency_hz: 0.0

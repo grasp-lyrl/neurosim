@@ -1,0 +1,9 @@
+# Real-event negative control: remove dynamic obstacles while retaining scene
+# and ego-motion events. A deployable policy should not manufacture dodges.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v17_no_dither_event_pulse_residual_ppo_renew5_eval.yaml
+
+overrides:
+  env:
+    visual_backend:
+      dynamic_obstacles:
+        enabled: false

@@ -230,6 +230,20 @@ def balanced_sample_weights(
     return weights
 
 
+def balanced_class_weights(labels: np.ndarray) -> np.ndarray:
+    """Give left, none and right equal sampling mass for categorical BC."""
+    labels = np.asarray(labels, dtype=np.int64)
+    weights = np.zeros(len(labels), dtype=np.float64)
+    present = [value for value in (0, 1, 2) if np.any(labels == value)]
+    if len(present) < 2:
+        raise ValueError("categorical dataset must contain at least two classes")
+    share = 1.0 / len(present)
+    for value in present:
+        mask = labels == value
+        weights[mask] = share / int(mask.sum())
+    return weights
+
+
 class ObservationDataset(torch.utils.data.Dataset):
     """In-memory dict-observation dataset, for small collections and tests."""
 
@@ -282,11 +296,18 @@ class HDF5ObservationDataset(torch.utils.data.Dataset):
         # Flatten (file, row) addressing across every collection file.
         self._index: list[tuple[int, int]] = []
         threat_all: list[np.ndarray] = []
+        action_classes_all: list[np.ndarray] = []
         for fi, f in enumerate(self._files):
             n = len(f["actions"])
             self._index.extend((fi, i) for i in range(n))
             threat_all.append(np.asarray(f["threat"][:], dtype=bool))
+            action_classes_all.append(discretize_lateral(f["actions"][:]))
         self._threat = np.concatenate(threat_all) if threat_all else np.zeros(0, bool)
+        self._action_classes = (
+            np.concatenate(action_classes_all)
+            if action_classes_all
+            else np.zeros(0, dtype=np.int64)
+        )
 
         # Split by *episode*, never by frame. Frames inside one episode are
         # a few milliseconds apart and near-identical, so a frame-level split
@@ -316,6 +337,7 @@ class HDF5ObservationDataset(torch.utils.data.Dataset):
             self._keep_map[np.flatnonzero(keep)] = np.arange(int(keep.sum()))
             self._index = [ix for ix, k in zip(self._index, keep) if k]
             self._threat = self._threat[keep]
+            self._action_classes = self._action_classes[keep]
             self._split_episodes = (len(unique) - n_test, n_test)
         else:
             self._keep_map = None
@@ -393,6 +415,18 @@ class HDF5ObservationDataset(torch.utils.data.Dataset):
             ]
         )
         return threat, counterfactual
+
+    @property
+    def action_classes(self) -> np.ndarray:
+        """Categorical labels aligned with base and virtual samples."""
+        onset = (
+            self._action_classes[np.asarray(self._onset, dtype=np.int64)]
+            if self._onset
+            else np.zeros(0, dtype=np.int64)
+        )
+        # A blank-event counterfactual is always the "none" class.
+        counterfactual = np.ones(len(self._counterfactual), dtype=np.int64)
+        return np.concatenate([self._action_classes, onset, counterfactual])
 
     def _read(self, flat_index: int):
         fi, row = self._index[flat_index]
@@ -539,7 +573,15 @@ def _observation_to_device(obs, device):
     return obs.to(device)
 
 
-def evaluate(model, env, episodes: int, seed0: int, downsample_events: int = 1, discrete_actions: bool = False) -> dict[str, float]:
+def evaluate(
+    model,
+    env,
+    episodes: int,
+    seed0: int,
+    downsample_events: int = 1,
+    discrete_actions: bool = False,
+    zero_events: bool = False,
+) -> dict[str, float]:
     """Roll the cloned policy out on the real env.
 
     Imitation loss is a poor proxy for competence here: the expert is quiet
@@ -578,6 +620,8 @@ def evaluate(model, env, episodes: int, seed0: int, downsample_events: int = 1, 
                         arr = np.asarray(v)
                         if k == "events":
                             arr = pool_events(arr, downsample_events)
+                            if zero_events:
+                                arr = np.zeros_like(arr)
                         batch[k] = torch.from_numpy(arr[None]).to(device)
                 else:
                     batch = torch.from_numpy(np.asarray(obs)[None]).to(device)
@@ -654,7 +698,15 @@ def train_and_evaluate_dataset(args, cfg, dataset, weights, test_dataset=None) -
     env_cfg = dict(cfg["env"])
     env_cfg["enable_visualization"] = False
     env = env_class_for_task(env_cfg["task"]["name"])(env_config=env_cfg, train=False)
-    model, action_dim = build_clone_net(cfg, env, args.downsample_events, args.discrete_actions)
+    model, action_dim = build_clone_net(
+        cfg,
+        env,
+        args.downsample_events,
+        args.discrete_actions,
+        blank_previous_action=args.blank_previous_action,
+        events_only_state=args.events_only_state,
+        blank_tracking_error=args.blank_tracking_error,
+    )
     if args.init_checkpoint:
         payload = torch.load(args.init_checkpoint, map_location="cpu")
         model.load_state_dict(payload["model"])
@@ -675,7 +727,27 @@ def train_and_evaluate_dataset(args, cfg, dataset, weights, test_dataset=None) -
         num_workers=args.num_workers,
     )
 
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    def checkpoint_payload(epoch: int, metric: float) -> dict[str, Any]:
+        return {
+            "model": model.state_dict(),
+            "action_dim": action_dim,
+            "epoch": int(epoch),
+            "validation_metric": float(metric),
+            "preprocessing": {
+                "downsample_events": int(args.downsample_events),
+                "blank_previous_action": bool(args.blank_previous_action),
+                "events_only_state": bool(args.events_only_state),
+                "blank_tracking_error": bool(args.blank_tracking_error),
+                "discrete_actions": bool(args.discrete_actions),
+            },
+        }
+
     history = []
+    best_epoch = -1
+    best_metric = -float("inf")
     for epoch in range(args.epochs):
         model.train()
         totals = np.zeros(3)
@@ -748,17 +820,83 @@ def train_and_evaluate_dataset(args, cfg, dataset, weights, test_dataset=None) -
         if args.eval_episodes and (epoch + 1) % args.eval_every == 0:
             model.eval()
             row.update(evaluate(model, env, args.eval_episodes, args.eval_seed0, args.downsample_events, args.discrete_actions))
+            if args.eval_zero_events:
+                ablation = evaluate(
+                    model,
+                    env,
+                    args.eval_episodes,
+                    args.eval_seed0,
+                    args.downsample_events,
+                    args.discrete_actions,
+                    zero_events=True,
+                )
+                row.update({f"zero_event_{key}": value for key, value in ablation.items()})
         if test_dataset is not None:
             row.update(holdout_losses(model, test_dataset, device, discrete=args.discrete_actions))
+        selection_metric = float(
+            row.get(
+                "holdout_balanced_accuracy"
+                if args.discrete_actions
+                else "holdout_threat_r2",
+                -row["loss"],
+            )
+        )
+        if np.isfinite(selection_metric) and selection_metric > best_metric:
+            best_metric = selection_metric
+            best_epoch = epoch
+            torch.save(
+                checkpoint_payload(epoch, selection_metric),
+                out.with_name(f"{out.stem}.best.pt"),
+            )
         history.append(row)
         print(json.dumps(row), flush=True)
 
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {"model": model.state_dict(), "action_dim": action_dim}, out.with_suffix(".pt")
+    final_metric = float(history[-1].get(
+        "holdout_balanced_accuracy"
+        if args.discrete_actions
+        else "holdout_threat_r2",
+        -history[-1]["loss"],
+    ))
+    torch.save(checkpoint_payload(args.epochs - 1, final_metric), out.with_suffix(".pt"))
+    best_evaluation = None
+    if args.eval_best_checkpoint and args.eval_episodes and best_epoch >= 0:
+        best_path = out.with_name(f"{out.stem}.best.pt")
+        best_payload = torch.load(best_path, map_location=device)
+        model.load_state_dict(best_payload["model"])
+        model.eval()
+        best_evaluation = evaluate(
+            model,
+            env,
+            args.eval_episodes,
+            args.eval_seed0,
+            args.downsample_events,
+            args.discrete_actions,
+        )
+        if args.eval_zero_events:
+            ablation = evaluate(
+                model,
+                env,
+                args.eval_episodes,
+                args.eval_seed0,
+                args.downsample_events,
+                args.discrete_actions,
+                zero_events=True,
+            )
+            best_evaluation.update(
+                {f"zero_event_{key}": value for key, value in ablation.items()}
+            )
+    out.write_text(
+        json.dumps(
+            {
+                "history": history,
+                "best_epoch": best_epoch,
+                "best_validation_metric": best_metric,
+                "best_checkpoint": str(out.with_name(f"{out.stem}.best.pt")),
+                "best_evaluation": best_evaluation,
+            },
+            indent=2,
+        )
     )
-    out.write_text(json.dumps({"history": history}, indent=2))
     env.close()
     return {"history": history}
 
@@ -811,6 +949,8 @@ def holdout_losses(model, dataset, device, batch_size: int = 64, discrete: bool 
 
     if discrete:
         correct_dodge = total_dodge = correct_all = total_all = 0
+        class_correct = np.zeros(3, dtype=np.int64)
+        class_total = np.zeros(3, dtype=np.int64)
         for obs, target in loader:
             obs = _observation_to_device(obs, device)
             target = target.to(device)
@@ -820,14 +960,36 @@ def holdout_losses(model, dataset, device, batch_size: int = 64, discrete: bool 
             total_dodge += int(actionable.sum())
             correct_all += int((pred == target).sum())
             total_all += int(target.numel())
+            for value in (0, 1, 2):
+                in_class = target == value
+                class_correct[value] += int((pred[in_class] == value).sum())
+                class_total[value] += int(in_class.sum())
         model.train()
         # Majority-class rate is the bar: always predicting "none" scores
         # this without looking at anything.
+        present = class_total > 0
+        class_accuracy = np.divide(
+            class_correct,
+            class_total,
+            out=np.zeros(3, dtype=np.float64),
+            where=present,
+        )
+        dodge_present = class_total[[0, 2]] > 0
+        dodge_majority = (
+            float(class_total[[0, 2]].max() / class_total[[0, 2]].sum())
+            if class_total[[0, 2]].sum()
+            else float("nan")
+        )
         return {
             "holdout_dodge_accuracy": correct_dodge / max(total_dodge, 1),
             "holdout_overall_accuracy": correct_all / max(total_all, 1),
+            "holdout_balanced_accuracy": float(class_accuracy[present].mean()),
+            "holdout_dodge_balanced_accuracy": float(
+                class_accuracy[[0, 2]][dodge_present].mean()
+            ),
             "holdout_dodge_n": total_dodge,
             "holdout_majority_rate": 1.0 - total_dodge / max(total_all, 1),
+            "holdout_dodge_majority_rate": dodge_majority,
             **distance_stats(),
         }
     sq_threat, n_threat, sq_quiet, n_quiet = 0.0, 0, 0.0, 0
@@ -859,7 +1021,16 @@ def holdout_losses(model, dataset, device, batch_size: int = 64, discrete: bool 
     }
 
 
-def build_clone_net(cfg, env, downsample_events: int = 1, discrete_actions: bool = False):
+def build_clone_net(
+    cfg,
+    env,
+    downsample_events: int = 1,
+    discrete_actions: bool = False,
+    *,
+    blank_previous_action: bool = False,
+    events_only_state: bool = False,
+    blank_tracking_error: bool = False,
+):
     """Build the clone actor for ``cfg``/``env``; used by training and DAgger.
 
     Lives at module scope so the DAgger collector can reconstruct the same
@@ -907,6 +1078,11 @@ def build_clone_net(cfg, env, downsample_events: int = 1, discrete_actions: bool
 
         def __init__(self):
             super().__init__()
+            self.downsample_events = int(downsample_events)
+            self.discrete_actions = bool(discrete_actions)
+            self.blank_previous_action = bool(blank_previous_action)
+            self.events_only_state = bool(events_only_state)
+            self.blank_tracking_error = bool(blank_tracking_error)
             # The env exposes a critic-only 'privileged' channel. Cloning the
             # *actor* means reproducing what it can actually perceive, so the
             # extractor is built over the actor's subspace only -- otherwise
@@ -940,12 +1116,30 @@ def build_clone_net(cfg, env, downsample_events: int = 1, discrete_actions: bool
             # a category error.
             self.squash = squash and not discrete_actions
 
+        def preprocess(self, obs):
+            """Apply the dataset's anti-shortcut masks during rollout too."""
+            if not isinstance(obs, dict) or "state" not in obs:
+                return obs
+            obs = dict(obs)
+            state = obs["state"].clone()
+            if self.blank_tracking_error:
+                state[..., 0:6] = 0.0
+            if self.events_only_state:
+                yaw_error = state[..., 6:7].clone()
+                state.zero_()
+                state[..., 6:7] = yaw_error
+            if self.blank_previous_action and action_dim:
+                state[..., -action_dim:] = 0.0
+            obs["state"] = state
+            return obs
+
         def pre_tanh(self, obs):
             # Blind the actor exactly as AsymmetricActorCriticPolicy does.
             if isinstance(obs, dict):
                 obs = dict(obs)
                 if PRIVILEGED_KEY in obs:
                     obs[PRIVILEGED_KEY] = torch.zeros_like(obs[PRIVILEGED_KEY])
+            obs = self.preprocess(obs)
             return self.action_net(self.policy_net(self.features_extractor(obs)))
 
         def predict_distance(self, obs):
@@ -982,6 +1176,7 @@ def main() -> None:
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--learning-rate", type=float, default=3e-4)
+    p.add_argument("--seed", type=int, default=2718)
     p.add_argument("--samples-per-epoch", type=int, default=20000)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--device", default="cuda:0")
@@ -991,6 +1186,20 @@ def main() -> None:
     p.add_argument("--eval-episodes", type=int, default=20)
     p.add_argument("--eval-every", type=int, default=5)
     p.add_argument("--eval-seed0", type=int, default=9001)
+    p.add_argument(
+        "--eval-zero-events",
+        action="store_true",
+        help=(
+            "Repeat each scheduled closed-loop evaluation with the event "
+            "tensor blanked, using identical seeds. A visual policy should "
+            "lose its dodge advantage under this intervention."
+        ),
+    )
+    p.add_argument(
+        "--eval-best-checkpoint",
+        action="store_true",
+        help="Evaluate the held-out-selected .best.pt after training finishes.",
+    )
     p.add_argument("--downsample-events", type=int, default=1)
     p.add_argument("--discrete-actions", action="store_true")
     p.add_argument("--distance-aux-weight", type=float, default=0.0)
@@ -1035,6 +1244,10 @@ def main() -> None:
     args = p.parse_args()
 
     cfg = load_experiment_config(args.experiment_config)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     dataset = HDF5ObservationDataset(
         args.dataset,
         gated_onset_window=args.gated_onset_window,
@@ -1050,13 +1263,26 @@ def main() -> None:
         holdout_seed=args.holdout_seed,
     )
     threat, counterfactual = dataset.sample_kinds
-    weights = balanced_sample_weights(threat, counterfactual)
+    weights = (
+        balanced_class_weights(dataset.action_classes)
+        if args.discrete_actions
+        else balanced_sample_weights(threat, counterfactual)
+    )
     print(
         json.dumps(
             {
                 "samples": len(dataset),
                 "threat": int(threat.sum()),
                 "counterfactual": int(counterfactual.sum()),
+                **(
+                    {
+                        "class_counts": np.bincount(
+                            dataset.action_classes, minlength=3
+                        ).tolist()
+                    }
+                    if args.discrete_actions
+                    else {}
+                ),
             }
         ),
         flush=True,

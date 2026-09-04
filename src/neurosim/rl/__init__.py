@@ -3,9 +3,11 @@ from .env_reactive_dodge import ReactiveDodgeEnv
 from .representations import EventRepresentationManager
 from .sb3_features import (
     AsymmetricActorCriticPolicy,
+    AsymmetricGruActorCriticPolicy,
     AsymmetricRecurrentActorCriticPolicy,
     CombinedEventStateExtractor,
     EventCnnExtractor,
+    PrivilegedFusionEventStateExtractor,
 )
 from .tasks import (
     HoverStopTask,
@@ -47,10 +49,12 @@ __all__ = [
     "HoverStopEnv",
     "ReactiveDodgeEnv",
     "AsymmetricActorCriticPolicy",
+    "AsymmetricGruActorCriticPolicy",
     "AsymmetricRecurrentActorCriticPolicy",
     "EventCnnExtractor",
     "EventRepresentationManager",
     "CombinedEventStateExtractor",
+    "PrivilegedFusionEventStateExtractor",
     "RLTask",
     "TaskStep",
     "RewardOutcome",

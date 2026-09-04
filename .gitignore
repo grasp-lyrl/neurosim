@@ -39,3 +39,6 @@ hover_sb3_combined_experiment/
 # not. Prefix long runs with `ulimit -c 0` to stop them being written at all.
 core
 core.*
+
+# Scratch review/diagnostic dirs kept out of commits
+.tmp_*

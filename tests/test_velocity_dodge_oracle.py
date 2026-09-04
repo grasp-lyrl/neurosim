@@ -9,7 +9,9 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "applications" / "rl"))
 from evaluate_velocity_dodge_oracle import (
     HDF5ImitationWriter,
     _limit_mpc_action_acceleration,
+    _mpc_visibility_gate_open,
     oracle_action,
+    project_sphere_to_pinhole,
     should_include_episode,
 )
 from neurosim.rl.receding_horizon_dodge_expert import (
@@ -97,6 +99,30 @@ def test_include_all_keeps_timeouts_but_rejects_invalid_rollouts():
     assert not should_include_episode(
         {"success": False, "termination_reason": "tracking_failure"}, True
     )
+
+
+def test_project_sphere_to_pinhole_uses_habitat_camera_convention():
+    identity_wxyz = np.array([1.0, 0.0, 0.0, 0.0])
+    centre = project_sphere_to_pinhole(
+        [0.0, 0.0, -5.0], [0.0, 0.0, 0.0], identity_wxyz,
+        width=320, height=240, hfov_deg=90, radius_m=0.5,
+    )
+    assert centre[0] == 1.0
+    assert centre[1] == pytest.approx(0.5)
+    assert centre[2] == pytest.approx(0.5)
+    assert centre[3] == pytest.approx(0.05)
+    assert centre[4] == pytest.approx(5.0)
+
+    right_and_up = project_sphere_to_pinhole(
+        [1.0, 1.0, -5.0], [0.0, 0.0, 0.0], identity_wxyz,
+        width=320, height=240, hfov_deg=90, radius_m=0.5,
+    )
+    assert right_and_up[1] > 0.5
+    assert right_and_up[2] < 0.5
+    assert project_sphere_to_pinhole(
+        [0.0, 0.0, 5.0], [0.0, 0.0, 0.0], identity_wxyz,
+        width=320, height=240, hfov_deg=90, radius_m=0.5,
+    )[0] == 0.0
     assert not should_include_episode(
         {"success": False, "termination_reason": "out_of_bounds"}, True
     )
@@ -137,6 +163,47 @@ def test_mpc_execution_projects_velocity_target_onto_acceleration_ball():
     # alpha=control_dt/tau=0.2, so a 5 m/s^2 first inner-control update
     # permits a raw target gap of 5 * 0.01 / 0.2 = 0.25 m/s.
     assert np.linalg.norm(physical_target_gap) == pytest.approx(0.25)
+
+
+def test_mpc_visibility_gate_releases_once_and_invalidates_early_plan():
+    task = type(
+        "Task",
+        (),
+        {"trajectory_config": {"visibility_release_distance_m": 5.0}},
+    )()
+    coord = type("Coord", (), {"pos_transform_inv": np.eye(3)})()
+    sim = type("Sim", (), {"coord_trans": coord})()
+    env = type("Env", (), {"_task": task, "sim": sim})()
+    item = type(
+        "Item",
+        (),
+        {
+            "encounter_id": 17,
+            "object_id": 3,
+            "obj": type("Object", (), {"translation": np.array([5.1, 0.0, 0.0])})(),
+        },
+    )()
+    expert = type("Expert", (), {"plan": object()})()
+    state = {"x": np.zeros(3)}
+
+    assert not _mpc_visibility_gate_open(env, expert, state, {3: item}, 1.0)
+    assert expert.plan is None
+    assert not getattr(env, "_mpc_visibility_release_events", [])
+
+    item.obj.translation = np.array([4.9, 0.0, 0.0])
+    expert.plan = object()
+    assert _mpc_visibility_gate_open(env, expert, state, {3: item}, 1.1)
+    assert expert.plan is None
+    assert env._mpc_visibility_released_ids == {17}
+    assert env._mpc_visibility_release_events == [
+        {"encounter_id": 17, "time_s": 1.1, "center_distance_m": 4.9}
+    ]
+
+    # The same encounter stays released without duplicating the event.
+    expert.plan = object()
+    assert _mpc_visibility_gate_open(env, expert, state, {3: item}, 1.2)
+    assert expert.plan is not None
+    assert len(env._mpc_visibility_release_events) == 1
 
 
 def test_mpc_temporal_costs_prefer_continuing_the_current_plan():

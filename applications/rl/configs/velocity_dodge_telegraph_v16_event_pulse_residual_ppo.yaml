@@ -1,0 +1,58 @@
+# Pulse-level PPO pilot around the selected event-BC policy. PPO can adjust
+# only the trigger logit and proposed y/z direction while a real event track
+# is present. Once committed, the smooth 20-step non-reversing pulse is fixed.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v16_event_localization10ms_640x480_accel4.yaml
+
+overrides:
+  seed: 45101
+  total_timesteps: 65536
+  num_envs: 4
+  n_gpus: 5
+  envs_on_gpu0: 0
+
+  eval:
+    freq: 16384
+    episodes: 8
+    num_envs: 2
+
+  env:
+    event_pulse_residual:
+      enabled: true
+      device: auto
+      action_checkpoint: outputs/rl/bc/telegraph_v16_event_tracker_action_gru/action_head_pulse_selected.pt
+      gate_logit_scale: 1.0
+      direction_scale: 0.25
+      tracker_threshold: 0.7
+      min_event_activity: 1.0e-8
+      # Threat-conditioned release is implemented as optional pulse_kwargs,
+      # but deliberately disabled here. The current inbound head remains
+      # saturated until the fixed pulse's natural release and is therefore
+      # not a usable post-pass cue. A dedicated receding/passed classifier is
+      # required before enabling minimum_hold_steps/release_* in deployment.
+      pulse_kwargs: {}
+    task:
+      config:
+        privileged_actor: false
+        privileged_critic: true
+
+  ppo:
+    recurrent: false
+    learning_rate: 0.0001
+    n_steps: 256
+    batch_size: 128
+    n_epochs: 4
+    clip_range: 0.10
+    target_kl: 0.02
+    log_std_init: -2.3
+    zero_action_head: true
+    use_sde: true
+    sde_sample_freq: 8
+    ent_coef: 0.002
+    ent_coef_final: 0.0
+    actor_freeze_updates: 8
+    actor_release_explained_variance: 0.05
+    actor_release_patience: 2
+    actor_freeze_max_updates: 16
+    freeze_extractor_for_ppo: false
+    distance_aux_weight: 0.0
+    pretanh_penalty: 0.001

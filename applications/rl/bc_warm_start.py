@@ -52,3 +52,38 @@ def load_clone_into_policy(policy, clone_state_dict: dict) -> dict:
 
     policy.load_state_dict(target)
     return {"updated": updated, "skipped": skipped}
+
+
+def load_gru_clone_into_policy(policy, clone_state_dict: dict) -> dict:
+    """Transfer the strict GRU clone into its RecurrentPPO actor twin."""
+    mappings = {
+        "features_extractor.": ("pi_features_extractor.",),
+        "gru.": ("lstm_actor.",),
+        "policy_net.": ("mlp_extractor.policy_net.",),
+        "action_net.": ("action_net.",),
+    }
+    target = policy.state_dict()
+    updated, skipped = [], []
+    for key, tensor in clone_state_dict.items():
+        destinations = []
+        for prefix, targets in mappings.items():
+            if key.startswith(prefix):
+                suffix = key[len(prefix) :]
+                destinations = [target_prefix + suffix for target_prefix in targets]
+                break
+        if not destinations:
+            skipped.append(key)
+            continue
+        for destination in destinations:
+            if destination not in target:
+                skipped.append(f"{key} -> {destination} (absent)")
+            elif target[destination].shape != tensor.shape:
+                skipped.append(
+                    f"{key} -> {destination} ({tuple(tensor.shape)} vs "
+                    f"{tuple(target[destination].shape)})"
+                )
+            else:
+                target[destination] = tensor.clone()
+                updated.append(destination)
+    policy.load_state_dict(target)
+    return {"updated": updated, "skipped": skipped}

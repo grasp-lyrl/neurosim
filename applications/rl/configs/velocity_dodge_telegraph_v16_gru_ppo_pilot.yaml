@@ -1,0 +1,57 @@
+# Short, explicitly gated PPO correction run from the strict GRU BC clone.
+# This remains a diagnostic because v16 fails the per-encounter blind-motion
+# gate.  Do not extend it unless deterministic real-event evaluation improves
+# while zero-event and blind controls remain clearly worse.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v16_event_bc.yaml
+
+overrides:
+  seed: 314160
+  total_timesteps: 131072        # 32 PPO updates at 16 envs x 256 steps
+  num_envs: 16
+  n_gpus: 2
+  envs_on_gpu0: 0               # reserve visible GPU 0 for the learner
+
+  eval:
+    freq: 32768
+    episodes: 10
+    num_envs: 4
+
+  vecnormalize:
+    # The clone was trained on raw yaw error. Normalizing state would change
+    # its input contract at step zero; reward normalization is still useful.
+    normalize_obs: false
+    normalize_reward: true
+
+  env:
+    event_representation:
+      # The HDF5 data was captured at 160x120 and pooled by 2 in the GRU
+      # loader, so PPO must receive the same 80x60 event tensor directly.
+      downsample_factor: 4
+    task:
+      config:
+        privileged_actor: false
+        privileged_critic: true
+
+  ppo:
+    recurrent: true
+    recurrent_cell: gru
+    lstm_hidden_size: 128        # shared recurrent-state shape used by SB3
+    n_lstm_layers: 1
+    event_backbone: small
+    learning_rate: 0.00005
+    n_steps: 256
+    batch_size: 64
+    n_epochs: 2
+    clip_range: 0.10
+    target_kl: 0.015
+    log_std_init: -2.0
+    use_sde: true
+    sde_sample_freq: 8
+    ent_coef: 0.0
+    ent_coef_final: null
+    actor_freeze_updates: 4
+    actor_release_explained_variance: 0.0
+    actor_freeze_max_updates: 4
+    freeze_extractor_for_ppo: false
+    distance_aux_weight: 0.0
+    pretanh_penalty: 0.001

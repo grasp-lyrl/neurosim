@@ -7,9 +7,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "applications" / "rl"))
 from train_velocity_dodge_bc import (
     HDF5ObservationDataset,
+    balanced_class_weights,
     balanced_sample_weights,
     gated_imitation_loss,
 )
+
+
+def test_categorical_weights_balance_each_present_class():
+    labels = np.array([0, 0, 0, 1, 2, 2], dtype=np.int64)
+    weights = balanced_class_weights(labels)
+    for value in (0, 1, 2):
+        assert weights[labels == value].sum() == pytest.approx(1.0 / 3.0)
 
 
 def test_gated_loss_ignores_quiet_direction_and_trains_gate():

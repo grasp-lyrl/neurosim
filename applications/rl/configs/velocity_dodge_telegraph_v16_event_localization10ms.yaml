@@ -1,0 +1,11 @@
+# Native-resolution perception-only successor to the selected realistic 7 m
+# release task. Keep the four-frame event history, camera, projectile process,
+# physical geometry and 3 m/s2 vehicle acceleration limit fixed; shorten only
+# the time-surface exponential decay from 50 ms to 10 ms so fast projectile
+# edges are not smeared into stale background motion.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v16_event_bc_fullres_release7.yaml
+
+overrides:
+  env:
+    event_representation:
+      ts_decay_ms: 10.0

@@ -1,0 +1,13 @@
+# Selective lifecycle ablation: keep the trained 20-step pulse unless the
+# event tracker and learned gate still agree on the same threat direction as
+# its release ramp approaches. At most one five-step extension is possible.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v17_no_dither_event_pulse_residual_ppo.yaml
+
+overrides:
+  env:
+    event_pulse_residual:
+      pulse_kwargs:
+        renewal_extension_steps: 5
+        renewal_confirm_steps: 2
+        maximum_hold_steps: 25
+        renewal_direction_cosine: 0.0

@@ -1,0 +1,72 @@
+# Guarded object-centric PPO pilot on the selected native-resolution task.
+# The frozen event localizer/tracker supplies causal compact features.  PPO
+# learns at most a 0.35 normalized correction around the fixed, latched
+# geometry controller; that correction is forcibly zero unless the tracker
+# sees an object or the baseline controller is already manoeuvring.  The
+# actor never receives exact obstacle state.  The critic receives it through
+# the existing asymmetric privileged channel during training only.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v16_event_localization10ms_640x480_accel4.yaml
+
+overrides:
+  seed: 35101
+  total_timesteps: 262144
+  num_envs: 4
+  n_gpus: 5
+  envs_on_gpu0: 0
+
+  eval:
+    freq: 32768
+    episodes: 8
+    num_envs: 2
+
+  env:
+    event_geometry_residual:
+      enabled: true
+      device: auto
+      spatial_checkpoint: outputs/rl/localization/telegraph_v16_release7_10ms_640x480_accel4/perception_dagger1/spatial_localizer.best.pt
+      temporal_checkpoint: outputs/rl/localization/telegraph_v16_release7_10ms_640x480_accel4/perception_dagger1/temporal_tracker_inbound_branch.best.pt
+      residual_scale: 0.35
+      gate_threshold: 0.7
+      min_event_activity: 1.0e-8
+      controller_kwargs:
+        threshold: 0.99
+        track_threshold: 0.7
+        minimum_track_age_steps: 12
+        inbound_threshold: 1.1
+        inbound_confirm_steps: 2
+        track_reset_absence_steps: 3
+        confirm_steps: 2
+        hold_steps: 20
+        refractory_absence_steps: 8
+        magnitude: 1.0
+        motion_alpha: 0.5
+        motion_lead_steps: 3.0
+        centre_deadband: 0.015
+        control_mode: image_plane
+        fallback_lateral_sign: 1
+    task:
+      config:
+        privileged_actor: false
+        privileged_critic: true
+
+  ppo:
+    recurrent: false
+    learning_rate: 0.0001
+    n_steps: 256
+    batch_size: 128
+    n_epochs: 4
+    clip_range: 0.10
+    target_kl: 0.02
+    log_std_init: -2.3
+    zero_action_head: true
+    use_sde: true
+    sde_sample_freq: 8
+    ent_coef: 0.002
+    ent_coef_final: 0.0
+    actor_freeze_updates: 8
+    actor_release_explained_variance: 0.05
+    actor_release_patience: 2
+    actor_freeze_max_updates: 16
+    freeze_extractor_for_ppo: false
+    distance_aux_weight: 0.0
+    pretanh_penalty: 0.001

@@ -1,0 +1,8 @@
+# Causal safety arm for selective renewal: the simulator still contains
+# obstacles, but the event-policy tracker receives an all-zero event tensor.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v17_no_dither_event_pulse_residual_ppo_renew5_eval.yaml
+
+overrides:
+  env:
+    event_pulse_residual:
+      intervention: blank

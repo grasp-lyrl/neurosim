@@ -1,0 +1,27 @@
+# True native-resolution perception branch. The earlier "fullres" configs
+# inherited a 320x240 sensor (historically downscaled from 640x480), so
+# downsample_factor: 1 there was native only with respect to that reduced
+# sensor. This branch restores the event camera itself to 640x480.
+#
+# Retain the realistic 0.15 m sphere, fast v16 projectile process, 7 m oracle
+# release, four-frame history and 10 ms time-surface decay. Relax the measured
+# vehicle acceleration gate from 3 to 4 m/s^2, keeping roughly 10% tracking
+# headroom in the desired-acceleration cap as in the accepted 3 m/s^2 setup.
+experiment_config: applications/rl/configs/velocity_dodge_telegraph_v16_event_localization10ms.yaml
+
+overrides:
+  env:
+    sensors:
+      event_camera_1:
+        width: 640
+        height: 480
+    dynamics:
+      max_acceleration_mps2: 3.6
+    task:
+      config:
+        trajectory:
+          sampling_mpc:
+            max_residual_command_acceleration_mps2: 3.9
+            max_vehicle_acceleration_mps2: 3.6
+        residual_control:
+          velocity_command_accel_limit_mps2: 3.9

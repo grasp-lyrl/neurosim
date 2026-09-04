@@ -262,6 +262,42 @@ class CombinedEventStateExtractor(BaseFeaturesExtractor):
         return torch.cat(parts, dim=1)
 
 
+class PrivilegedFusionEventStateExtractor(CombinedEventStateExtractor):
+    """Keep actor feature width BC-compatible while enriching the critic.
+
+    The event BC/GRU actor was trained on 128 event features concatenated
+    with 64 state features.  Appending a privileged branch would change the
+    recurrent input width and make an exact warm start impossible.  Instead,
+    this extractor adds a learned privileged projection to the 64-D state
+    branch.  The asymmetric actor receives a zeroed privileged tensor and is
+    therefore byte-for-byte equivalent to ``CombinedEventStateExtractor``;
+    the critic receives the real projection without changing feature width.
+    """
+
+    def __init__(self, observation_space: gym.spaces.Dict, **kwargs):
+        kwargs["use_privileged"] = False
+        super().__init__(observation_space, **kwargs)
+        privileged = observation_space.spaces.get(PRIVILEGED_KEY)
+        self.privileged_fusion = (
+            nn.Linear(int(privileged.shape[0]), 64, bias=False)
+            if privileged is not None
+            else None
+        )
+
+    def forward(self, observations: dict[str, torch.Tensor]) -> torch.Tensor:
+        parts = []
+        if self.event_backbone is not None:
+            parts.append(self.forward_events(observations))
+        if self.state_head is not None:
+            state = self.state_head(observations["state"])
+            if self.privileged_fusion is not None:
+                state = state + self.privileged_fusion(
+                    observations[PRIVILEGED_KEY]
+                )
+            parts.append(state)
+        return torch.cat(parts, dim=1)
+
+
 class AsymmetricActorCriticPolicy(ActorCriticPolicy):
     """Actor-critic policy where only the value function sees ``privileged``.
 
@@ -360,3 +396,102 @@ class AsymmetricRecurrentActorCriticPolicy(RecurrentMultiInputActorCriticPolicy)
         return super().get_distribution(
             self._blind(obs), lstm_states, episode_starts
         )
+
+
+class AsymmetricGruActorCriticPolicy(RecurrentMultiInputActorCriticPolicy):
+    """Recurrent PPO policy with a BC-compatible GRU actor.
+
+    sb3-contrib's rollout buffer represents recurrent state as an LSTM
+    ``(hidden, cell)`` pair.  The GRU uses the hidden member and returns a
+    zero-valued placeholder for the unused cell member, retaining full
+    compatibility with RecurrentPPO while allowing exact GRU weight transfer.
+    The critic remains a separately initialized LSTM and sees privileged
+    observations.  The actor sees only events and yaw error, matching the
+    strict behavior-cloning observation contract.
+    """
+
+    def __init__(
+        self,
+        *args,
+        actor_events_only_state: bool = True,
+        actor_blank_previous_action: bool = True,
+        **kwargs,
+    ):
+        self.actor_events_only_state = bool(actor_events_only_state)
+        self.actor_blank_previous_action = bool(actor_blank_previous_action)
+        kwargs["share_features_extractor"] = False
+        super().__init__(*args, **kwargs)
+
+        n_layers = int(self.lstm_hidden_state_shape[0])
+        self.lstm_actor = nn.GRU(
+            self.features_dim,
+            self.lstm_output_dim,
+            num_layers=n_layers,
+            **self.lstm_kwargs,
+        ).to(self.device)
+        # The parent constructed its optimizer before the LSTM was replaced.
+        learning_rate = self.optimizer.param_groups[0]["lr"]
+        self.optimizer = self.optimizer_class(
+            self.parameters(), lr=learning_rate, **self.optimizer_kwargs
+        )
+
+    def _blind(self, obs: PyTorchObs) -> PyTorchObs:
+        if not isinstance(obs, dict):
+            return obs
+        blinded = dict(obs)
+        if PRIVILEGED_KEY in blinded:
+            blinded[PRIVILEGED_KEY] = torch.zeros_like(blinded[PRIVILEGED_KEY])
+        if "state" in blinded:
+            state = blinded["state"].clone()
+            if self.actor_events_only_state:
+                yaw = state[..., 6:7].clone()
+                state.zero_()
+                state[..., 6:7] = yaw
+            elif self.actor_blank_previous_action:
+                action_dim = int(self.action_space.shape[0])
+                state[..., -action_dim:] = 0.0
+            blinded["state"] = state
+        return blinded
+
+    def extract_features(self, obs, features_extractor=None):
+        if self.share_features_extractor or features_extractor is not None:
+            return super().extract_features(obs, features_extractor)
+        pi_features = super(ActorCriticPolicy, self).extract_features(
+            self._blind(obs), self.pi_features_extractor
+        )
+        vf_features = super(ActorCriticPolicy, self).extract_features(
+            obs, self.vf_features_extractor
+        )
+        return pi_features, vf_features
+
+    def get_distribution(self, obs, lstm_states, episode_starts):
+        return super().get_distribution(
+            self._blind(obs), lstm_states, episode_starts
+        )
+
+    @staticmethod
+    def _process_sequence(features, lstm_states, episode_starts, recurrent):
+        if not isinstance(recurrent, nn.GRU):
+            return RecurrentMultiInputActorCriticPolicy._process_sequence(
+                features, lstm_states, episode_starts, recurrent
+            )
+
+        hidden_state = lstm_states[0]
+        n_seq = hidden_state.shape[1]
+        sequence = features.reshape(
+            (n_seq, -1, recurrent.input_size)
+        ).swapaxes(0, 1)
+        starts = episode_starts.reshape((n_seq, -1)).swapaxes(0, 1)
+        if torch.all(starts == 0.0):
+            output, hidden_state = recurrent(sequence, hidden_state)
+        else:
+            outputs = []
+            for step_features, episode_start in zip(sequence, starts, strict=True):
+                output, hidden_state = recurrent(
+                    step_features.unsqueeze(0),
+                    (1.0 - episode_start).view(1, n_seq, 1) * hidden_state,
+                )
+                outputs.append(output)
+            output = torch.cat(outputs)
+        output = torch.flatten(output.transpose(0, 1), start_dim=0, end_dim=1)
+        return output, (hidden_state, torch.zeros_like(hidden_state))
