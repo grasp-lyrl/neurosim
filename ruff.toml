@@ -1,0 +1,2 @@
+# Ruff 0.16 started formatting Python blocks inside Markdown; docs stay hand-wrapped.
+extend-exclude = ["*.md"]
