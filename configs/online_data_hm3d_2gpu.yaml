@@ -70,6 +70,10 @@ trajectory:
   max_waypoints: 100
   v_avg: 1.0
 
+safety:
+  # End the episode when the drone leaves the scene
+  abort_out_of_bounds: true
+
 # ── OnlineDataLoader configuration ──────────────────────────────────────────
 online_data:
   batch_size: 16

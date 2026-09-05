@@ -18,6 +18,27 @@ from rotorpy.trajectories.minsnap import MinSnap
 
 logger = logging.getLogger(__name__)
 
+YAW_RATE_MAX = 2 * np.pi
+# rotorpy constrains yaw rate one-sided (v(dt/2) <= vmax, with no lower bound), so
+# keyframes that merely approach the budget still make its QP infeasible, and it then
+# returns None. Spend only half the budget to stay clear of that edge.
+YAW_RATE_MARGIN = 0.5
+
+
+def rate_limit_yaw(yaw_angles: np.ndarray, segment_times: np.ndarray) -> np.ndarray:
+    """Clamp each yaw step to the turn YAW_RATE_MAX permits over that segment.
+
+    Args:
+        yaw_angles: unwrapped yaw per waypoint.
+        segment_times: MinSnap's per-segment durations, ``seg_dist / v_avg``.
+    """
+    limited = np.asarray(yaw_angles, dtype=float).copy()
+    budget = YAW_RATE_MARGIN * YAW_RATE_MAX * segment_times
+    for i in range(1, len(limited)):
+        step = limited[i] - limited[i - 1]
+        limited[i] = limited[i - 1] + np.clip(step, -budget[i - 1], budget[i - 1])
+    return limited
+
 
 def find_shortest_path_points(pathfinder, start: np.ndarray, goal: np.ndarray):
     """Find shortest path points on a Habitat-Sim PathFinder.
@@ -190,25 +211,19 @@ def calculate_smooth_yaw(points: np.ndarray, lookahead_dist: float = 1.0) -> np.
     return np.unwrap(yaw_angles)
 
 
-def generate_interesting_traj(
+def sample_waypoint_path(
     pathfinder,
     seed: int,
     target_length: float = 30.0,
     min_waypoint_distance: float = 2.0,
     max_waypoints: int = 100,
-    v_avg: float = 1.0,
     start: np.ndarray | None = None,
     max_tries_per_waypoint: int = 100,
-    coord_transform=None,
-) -> MinSnap:
-    """Generate a longer trajectory by sampling distant waypoints and connecting them.
+) -> tuple[np.ndarray, float]:
+    """Sample the raw navmesh waypoint path that :func:`generate_interesting_traj` smooths.
 
-    Algorithm:
-    1. Start at a random navigable point (or provided `start`).
-    2. Sample waypoints that are at least `min_waypoint_distance` away from each other.
-    3. Connect consecutive waypoints with shortest paths.
-    4. Add random heights to waypoints while ensuring navigability.
-    5. Smooth the combined path using MinSnap.
+    Split out from the trajectory builder so diagnostics can inspect the path even
+    when the MinSnap solve downstream fails (see ``scripts/check_trajectories.py``).
 
     Args:
         pathfinder: Habitat pathfinder instance
@@ -216,14 +231,13 @@ def generate_interesting_traj(
         target_length: Minimum total path length to achieve
         min_waypoint_distance: Minimum distance between sampled waypoints
         max_waypoints: Maximum number of waypoints to sample
-        v_avg: Average velocity for MinSnap trajectory
         start: Starting point (if None, a random navigable point is used)
         max_tries_per_waypoint: Maximum tries per waypoint sampling
-        coord_transform: Optional coordinate transform function to apply to path points.
-                         Useful to convert from visual sim to dynamics coordinate system.
 
     Returns:
-        MinSnap trajectory object
+        ``(points, total_length)`` where ``points`` is the de-duplicated ``(N, 3)``
+        path in Habitat coordinates and ``total_length`` is the accumulated geodesic
+        length actually achieved (which may fall short of ``target_length``).
     """
     pathfinder.seed(seed)
     random.seed(seed)
@@ -292,6 +306,56 @@ def generate_interesting_traj(
                 full_path_dedup.append(full_path[i])
         full_path = np.array(full_path_dedup)
 
+    return full_path, total_length
+
+
+def generate_interesting_traj(
+    pathfinder,
+    seed: int,
+    target_length: float = 30.0,
+    min_waypoint_distance: float = 2.0,
+    max_waypoints: int = 100,
+    v_avg: float = 1.0,
+    start: np.ndarray | None = None,
+    max_tries_per_waypoint: int = 100,
+    coord_transform=None,
+    episode_duration: float | None = None,
+) -> MinSnap:
+    """Generate a longer trajectory by sampling distant waypoints and connecting them.
+
+    Algorithm:
+    1. Start at a random navigable point (or provided `start`).
+    2. Sample waypoints that are at least `min_waypoint_distance` away from each other.
+    3. Connect consecutive waypoints with shortest paths.
+    4. Add random heights to waypoints while ensuring navigability.
+    5. Smooth the combined path using MinSnap.
+
+    Args:
+        pathfinder: Habitat pathfinder instance
+        seed: Random seed for reproducibility
+        target_length: Minimum total path length to achieve
+        min_waypoint_distance: Minimum distance between sampled waypoints
+        max_waypoints: Maximum number of waypoints to sample
+        v_avg: Average velocity for MinSnap trajectory
+        start: Starting point (if None, a random navigable point is used)
+        max_tries_per_waypoint: Maximum tries per waypoint sampling
+        coord_transform: Optional coordinate transform function to apply to path points.
+                         Useful to convert from visual sim to dynamics coordinate system.
+        episode_duration: Episode length in seconds; warn when the trajectory is shorter.
+
+    Returns:
+        MinSnap trajectory object
+    """
+    full_path, _ = sample_waypoint_path(
+        pathfinder,
+        seed=seed,
+        target_length=target_length,
+        min_waypoint_distance=min_waypoint_distance,
+        max_waypoints=max_waypoints,
+        start=start,
+        max_tries_per_waypoint=max_tries_per_waypoint,
+    )
+
     if coord_transform is not None:
         full_path = coord_transform(full_path)
         logger.info("Applied inverse coordinate transform to path")
@@ -299,10 +363,25 @@ def generate_interesting_traj(
     # Calculate desired yaw angles for waypoints to look ahead
     yaw_angles = calculate_smooth_yaw(full_path, lookahead_dist=2.0)
 
+    # MinSnap derives its own segment durations the same way, so these are the durations
+    # the yaw keyframes have to turn within.
+    segment_times = np.linalg.norm(np.diff(full_path, axis=0), axis=1) / v_avg
+    yaw_angles = rate_limit_yaw(yaw_angles, segment_times)
+
+    duration = float(segment_times.sum())
+    if episode_duration is not None and duration < episode_duration:
+        logger.warning(
+            "Trajectory lasts %.1fs but the episode is %.1fs: MinSnap.update clips t, "
+            "so the reference freezes at the last waypoint for the final %.1fs.",
+            duration,
+            episode_duration,
+            episode_duration - duration,
+        )
+
     traj = MinSnap(
         points=full_path,
         yaw_angles=yaw_angles,
-        yaw_rate_max=2 * np.pi,
+        yaw_rate_max=YAW_RATE_MAX,
         poly_degree=7,
         yaw_poly_degree=7,
         v_max=3.0,

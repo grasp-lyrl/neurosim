@@ -79,6 +79,7 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
             start=kwargs.get("start", None),
             max_tries_per_waypoint=kwargs.get("max_tries_per_waypoint", 100),
             coord_transform=kwargs.get("coord_transform", None),
+            episode_duration=kwargs.get("episode_duration", None),
         )
     else:
         raise ValueError(f"Unsupported trajectory type: {model}")

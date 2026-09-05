@@ -86,6 +86,7 @@ class SynchronousSimulator:
         ####################
         self.time = 0.0
         self.simsteps = 0
+        self.termination_reason = ""
 
         # Owned by the simulator and attached to the visual backend below.
         gpu_id = self.settings["visual_backend"]["gpu_id"]
@@ -311,6 +312,7 @@ class SynchronousSimulator:
             if hasattr(self.visual_backend, "_sim"):
                 traj_kwargs["pathfinder"] = self.visual_backend._sim.pathfinder
             traj_kwargs["coord_transform"] = self.coord_trans.inverse_transform_batch
+            traj_kwargs["episode_duration"] = self.config.sim_time
             self.trajectory = create_trajectory(**traj_kwargs)
 
     def renew_trajectory(self, overrides: dict | None = None) -> None:
@@ -329,8 +331,13 @@ class SynchronousSimulator:
         ``pathfinder.is_navigable(point)``. Sets ``self.safety = None`` for
         non-Habitat backends or when the pathfinder isn't loaded, so
         callers can guard with a single ``is None`` check.
+
+        ``settings["safety"]["abort_out_of_bounds"]`` additionally makes
+        :meth:`run` stop the episode the moment the drone leaves the scene, where
+        Habitat renders only ``clear_color`` and every later frame is worthless.
         """
         self.safety: HabitatSafetyChecker | None = None
+        self._abort_out_of_bounds = False
         pathfinder = self.visual_backend._sim.pathfinder
         if pathfinder is None or not pathfinder.is_loaded:
             return
@@ -339,6 +346,7 @@ class SynchronousSimulator:
         self.safety = HabitatSafetyChecker(
             self, enable_navigable_check=enable_navigable_check
         )
+        self._abort_out_of_bounds = bool(safety_cfg.get("abort_out_of_bounds", False))
 
     def _init_additional_sensors(self) -> None:
         """Initialize additional sensors like IMU."""
@@ -475,6 +483,7 @@ class SynchronousSimulator:
 
         # Compute and display statistics
         stats = self._compute_statistics(latencies)
+        stats["termination_reason"] = self.termination_reason
         logger.info("Simulation completed")
         logger.info("════════════════════════════════════════════════════════════════")
         logger.info("\nSimulation Statistics:")
@@ -529,6 +538,7 @@ class SynchronousSimulator:
         logger.info("════════════════════════════════════════════════════════════════")
 
         prof = self.profiler
+        self.termination_reason = ""
 
         while self.time < self.config.t_final:
             # Inner loop: world rate steps between control updates
@@ -583,6 +593,21 @@ class SynchronousSimulator:
 
                 # Step boundary: resolve deferred GPU timings (one sync/step).
                 prof.step()
+
+            # Once outside the scene the renderer only returns clear_color, so every
+            # remaining frame is worthless; stop rather than fill the episode with them.
+            if self._abort_out_of_bounds:
+                habitat_pos = self.safety.dynamics_to_habitat(self.dynamics.state["x"])
+                if not self.safety.is_in_bounds(habitat_pos):
+                    self.termination_reason = "out_of_bounds"
+                    logger.warning(
+                        "Left the scene at t=%.2fs (habitat %s); ending the episode "
+                        "%.2fs early.",
+                        self.time,
+                        np.round(habitat_pos, 2),
+                        self.config.t_final - self.time,
+                    )
+                    break
 
             # Update control at control rate
             with prof.section("control_update"):
