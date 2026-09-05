@@ -3,6 +3,32 @@
 Train the F3 + DepthAnythingV2 depth model on events+depth streamed live from
 neurosim. Simulators run in their own processes; the model trains on one GPU.
 
+## 0. Set up f3
+
+The model half needs [f3](https://github.com/grasp-lyrl/fast-feature-fields) in
+`deps/`. Two edits to the clone are required in the neurosim env — without them
+the install either breaks the simulator or the training run crashes:
+
+```bash
+git clone git@github.com:grasp-lyrl/fast-feature-fields.git deps/fast-feature-fields
+```
+
+1. **Comment out `dependencies` and `requires-python` in its `pyproject.toml`.**
+   f3 pins `torch==2.8.0`, `numpy==2.1.2` and `python>=3.11`; the neurosim env is
+   Python 3.10 with torch 2.11 / numpy 2.2, and installing those pins downgrades
+   the stack habitat-sim and `neurosim_cu_esim` are compiled against. Then
+   `pip install -e deps/fast-feature-fields` and add only what f3 actually
+   imports: `scikit-learn timm transformers safetensors einops accelerate
+   huggingface_hub`. Skip `xformers` (it pins torch exactly; f3 runs without it).
+
+2. **Delete the `@torch.compile` on `batch_cropper`** in
+   `src/f3/utils/utils_gen.py`. It slices by tensor values, which on torch 2.11
+   raises `PendingUnbackedSymbolNotFound`. It is a cheap crop, so losing the
+   decorator costs nothing — and `eventff` must stay compiled, because the
+   checkpoint's keys are `_orig_mod.*` and only match a compiled module. If you
+   run with `TORCHDYNAMO_DISABLE=1`, `load_weights` (which uses `strict=False`)
+   silently loads **0 of 107** tensors and you train a random backbone.
+
 ## 1. Write the config
 
 Everything lives in one YAML. Start from
@@ -65,15 +91,25 @@ Expect `batch 0: depth=(8, 480, 640) events=(N, 4) ... spec_ids=[0, 1, ...]`.
 ## 3. Train
 
 ```bash
-conda run -n neurosim python applications/f3_training/train_depth.py \
+nohup conda run --no-capture-output -n neurosim python -u \
+    applications/f3_training/train_depth.py \
     --conf applications/f3_training/configs/depth_training_config.yml \
-    --name my_run --amp            # add --wandb if installed
+    --name my_run --batches-per-epoch 2048 --retrain-f3 \
+    > /tmp/my_run.log 2>&1 &      # add --wandb if you want tracking
 ```
 
-Useful flags: `--amp` (bf16), `--batches-per-epoch N`, `--retrain-f3` (unfreeze the
-backbone), `--init path.pth` (warm-start), `--compile`.
+`--batches-per-epoch` counts **mini-batches**, so 2048 with `mini_batch: 8` is
+16,384 samples and `2048 / (batch // mini_batch)` optimizer steps per epoch.
+
+Useful flags: `--batches-per-epoch N`, `--retrain-f3` (unfreeze the backbone),
+`--init path.pth` (warm-start), `--wandb`. `--amp` and `--compile` (which compiles
+the DAv2 decoder) are both off by default and are best left that way; `eventff` is
+compiled regardless, which is what the checkpoint keys expect.
 
 **Outputs:** `outputs/monoculardepth/<name>/` — `models/{last,best}.pth`,
 `training.log`, `config.yaml`, prediction/event visualizations, per-producer logs
 under `logs/`. Resume is automatic if `last.pth` exists. Stop with `Ctrl-C`; the
-loader tears down all simulator processes cleanly.
+loader tears down all simulator processes cleanly. If you `pkill` the parent
+instead, the daemon producers are orphaned and keep holding GPU memory — clear
+them with
+`nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9`.
