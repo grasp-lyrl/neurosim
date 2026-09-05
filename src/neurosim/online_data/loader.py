@@ -26,10 +26,12 @@ import time
 import queue
 import logging
 from pathlib import Path
+from typing import Callable
 from dataclasses import dataclass, field
 
 from neurosim.online_data.bus import SampleBus
 from neurosim.online_data.batcher import ShuffledBatcher
+from neurosim.online_data.sample import TimeAlignedSample
 from neurosim.online_data.schema import SampleSchema
 
 logger = logging.getLogger(__name__)
@@ -194,6 +196,8 @@ class OnlineDataLoader:
             every episode) is set in ``randomization`` (``resample_every`` /
             ``trajectory``) and owned by ``RandomizedSimulator.randomize``.
         bus_maxsize: Bus capacity (backpressure bound).
+        sample_filter: Predicate applied to each sample before batching; a
+            rejected sample is dropped and batch is filled from the next one
         mp_context: Start method (``"spawn"`` for CUDA/Habitat).
         get_timeout: Consumer poll interval / producer-death check.
         stall_warn_s: If no sample arrives for this many seconds while producers are
@@ -215,6 +219,7 @@ class OnlineDataLoader:
         base_seed: int = 0,
         ring_caps: dict | None = None,
         bus_maxsize: int = 256,
+        sample_filter: Callable[[TimeAlignedSample], bool] | None = None,
         mp_context: str = "spawn",
         get_timeout: float = 1.0,
         stall_warn_s: float = 60.0,
@@ -225,6 +230,7 @@ class OnlineDataLoader:
 
         self.schema = schema
         self.batch_size = batch_size
+        self._sample_filter = sample_filter
         self._get_timeout = get_timeout
         self._stall_warn_s = stall_warn_s
         self._log_dir = Path(log_dir) if log_dir is not None else None
@@ -445,6 +451,8 @@ class OnlineDataLoader:
                 continue
             last_sample_t = time.monotonic()
             stall_warned = False
+            if self._sample_filter is not None and not self._sample_filter(sample):
+                continue
             batch = self.batcher.add(sample)
             if batch is not None:
                 yield batch

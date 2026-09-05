@@ -2,10 +2,10 @@
 # Reference: https://github.com/grasp-lyrl/fast-feature-fields/blob/main/confs/monocular_depth/dav2b_fullttairv2indoor_pseudo_308x308x20.yml
 
 # Training options
-lr: 6.0e-6 # Learning rate
-lr_end_factor: 1.0 # Learning rate decay (linear scheduler end factor)
+lr: 5.0e-6 # Learning rate (DAv2 pseudo-label stage: encoder 5e-6, decoder 10x)
+lr_end_factor: 1.0 # Constant LR, as in DAv2's pseudo-label training (no decay)
 clip_grad: 0 # Gradient clipping (0 = disabled)
-epochs: 1000 # Number of epochs
+epochs: 250 # Number of epochs
 log_interval: 10 # Save checkpoint interval in epochs
 val_interval: 10 # Validation interval in epochs
 
@@ -14,7 +14,7 @@ polarity: [False, False] # [use_polarity_ctx, use_polarity_pred]
 
 # Training data options
 train:
-  batch: 8 # Effective batch size
+  batch: 32 # Effective batch size (accumulates 4 x mini_batch)
   mini_batch: 8 # Mini batch size per forward pass
 
 # Loss options
@@ -41,10 +41,11 @@ eventff:
 # `event_time_window_us` are training-only siblings.
 data:
   trainer_gpu: 1 # trainer GPU (producers run on online_data.gpu_ids)
+  min_events_per_sample: 10000 # drop sparser samples before they reach a batch
 
   online_data:
-    base_settings: configs/apartment_1-settings.yaml # sensors, dynamics, controller, trajectory
-    num_producers: 8 # 8 simulators ...
+    base_settings: configs/online_data_hm3d_2gpu.yaml # sensors, dynamics, controller, trajectory
+    num_producers: 16 # 16 simulators ...
     gpu_ids: [0] # ... all on gpu0
     base_seed: 0
     bus_maxsize: 256 # backpressure bound
@@ -53,6 +54,10 @@ data:
       stream: [event_camera_1] # events accumulate within each depth window
     randomization:
       resample_every: 20 # reload scene+sensors every N episodes; trajectory every episode
-      # scenes:  [{name: ..., path: ...}]   # DR scene pool (omit -> fixed base scene)
-      # sensors: {event_camera_1: {contrast_threshold_pos: {range: [0.1, 0.3]}}}
-      # trajectory: {v_avg: {range: [0.8, 1.5]}}
+      scenes_glob: data/hm3d/*/*.basis.glb
+      sensors:
+        event_camera_1:
+          contrast_threshold_pos: {range: [0.1, 0.3]}
+          contrast_threshold_neg: {range: [0.1, 0.3]}
+      trajectory:
+        v_avg: {range: [0.5, 1.5]}

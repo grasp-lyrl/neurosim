@@ -24,6 +24,7 @@ import argparse
 import datetime
 import itertools
 import numpy as np
+from typing import Callable
 from tqdm import tqdm
 from matplotlib import colormaps
 
@@ -35,7 +36,7 @@ try:
 except ImportError:  # pragma: no cover
     wandb = None
 
-from neurosim.online_data import OnlineDataLoader, SampleSchema
+from neurosim.online_data import OnlineDataLoader, SampleSchema, TimeAlignedSample
 
 
 def ev_to_frames_with_polarity(events, counts, w, h):
@@ -91,11 +92,36 @@ def setup_experiment(args, base_path: str, models_path: str):
     return logger, resume
 
 
+def usable_sample_filter(
+    depth_uuid: str,
+    event_sensor: str,
+    max_disparity: float,
+    min_events: int,
+    min_valid_frac: float = 0.5,
+) -> Callable[[TimeAlignedSample], bool]:
+    """Predicate dropping samples the model cannot learn from.
+
+    Rejects a mostly-invalid depth anchor (0 m reads, e.g. a camera facing open
+    sky) and packets too sparse for the backbone. Applied before batching, so a
+    rejected sample costs a row rather than shrinking the batch.
+    """
+    min_depth = 1.0 / max_disparity
+
+    def keep(sample: TimeAlignedSample) -> bool:
+        depth = sample.sensors[depth_uuid]
+        if np.count_nonzero(depth > min_depth) < min_valid_frac * depth.size:
+            return False
+        return len(sample.sensors[event_sensor].get("x", ())) >= min_events
+
+    return keep
+
+
 def build_loader(
     data_cfg: dict,
     *,
     batch_size: int,
     log_dir: str | None = None,
+    sample_filter: Callable[[TimeAlignedSample], bool] | None = None,
 ) -> tuple[OnlineDataLoader, SampleSchema]:
     """Build an OnlineDataLoader from the ``data.online_data`` config block.
 
@@ -116,7 +142,10 @@ def build_loader(
         od["base_settings"] = base
 
     loader = OnlineDataLoader.from_config(
-        {"online_data": od}, batch_size=batch_size, log_dir=log_dir
+        {"online_data": od},
+        batch_size=batch_size,
+        log_dir=log_dir,
+        sample_filter=sample_filter,
     )
     return loader, loader.schema
 
@@ -165,6 +194,11 @@ def process_batch(batch, args, device):
     return ff_events, event_counts, disparity, color_images
 
 
+def usable_samples(valid_mask):
+    """Rows with at least half their depth pixels valid."""
+    return valid_mask.flatten(1).sum(1) * 2 >= valid_mask[0].numel()
+
+
 def train_epoch(
     args,
     logger,
@@ -202,9 +236,12 @@ def train_epoch(
         with torch.autocast(device_type="cuda", enabled=args.amp, dtype=torch.bfloat16):
             disparity_pred = model(ff_events, event_counts, cparams)[0]  # (B, H, W)
             disparity_valid_mask = disparity < args.max_disparity
-            if disparity_valid_mask.sum() < W * H / 2:
+            keep = usable_samples(disparity_valid_mask)
+            if not keep.any():
                 continue
-            loss = loss_fn(disparity_pred, disparity, disparity_valid_mask)
+            loss = loss_fn(
+                disparity_pred[keep], disparity[keep], disparity_valid_mask[keep]
+            )
             loss = loss / iters_to_accumulate
 
         scaler.scale(loss).backward()
@@ -284,13 +321,19 @@ def validate(
 
         disparity_pred = model(ff_events, event_counts, crop_params)[0]  # (B, H, H)
         valid_mask = disparity < args.max_disparity
-        if valid_mask.sum() < W * H / 2:
+        keep = usable_samples(valid_mask)
+        if not keep.any():
             continue
+        kept_mask = valid_mask[keep]
 
-        cur_results = eval_disparity(disparity_pred[valid_mask], disparity[valid_mask])
+        cur_results = eval_disparity(
+            disparity_pred[keep][kept_mask], disparity[keep][kept_mask]
+        )
         for k in cur_results:
             results[k] += cur_results[k]
-        results[loss_fn.name] += loss_fn(disparity_pred, disparity, valid_mask).item()
+        results[loss_fn.name] += loss_fn(
+            disparity_pred[keep], disparity[keep], kept_mask
+        ).item()
         nsamples += 1
 
         if idx % 10 == 0 and save_preds:
@@ -299,6 +342,8 @@ def validate(
                 ev_to_frames_with_polarity(ff_events, event_counts, W, H).cpu().numpy()
             )
             for i in range(disparity_pred.shape[0]):
+                if not keep[i]:
+                    continue
                 disp_img = get_disparity_image(disparity[i], valid_mask[i], cmap)
                 pred_img = get_disparity_image(
                     disparity_pred[i],
@@ -436,7 +481,7 @@ def main():
         args.eventff["config"], args.dav2_config, args.retrain_f3
     )
     model_uncompiled = model
-    model.eventff = torch.compile(model.eventff, fullgraph=False)
+    model.eventff = torch.compile(model.eventff, fullgraph=False, dynamic=True)
     if args.compile:
         model.dav2 = torch.compile(model.dav2)
     model.load_weights(args.eventff["ckpt"])
@@ -517,6 +562,12 @@ def main():
         data_cfg,
         batch_size=int(args.train["mini_batch"]),
         log_dir=f"{base_path}/logs",
+        sample_filter=usable_sample_filter(
+            args.depth_sensor,
+            args.event_sensor,
+            args.max_disparity,
+            int(data_cfg.get("min_events_per_sample", 10000)),
+        ),
     )
 
     if args.wandb:

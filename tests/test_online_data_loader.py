@@ -81,6 +81,27 @@ def test_loader_consumer_builds_batches():
         loader.close()
 
 
+def test_sample_filter_drops_rows_and_keeps_batches_full():
+    """A rejected sample is skipped, not counted -- batches stay batch_size."""
+    loader = OnlineDataLoader(
+        _schema(),
+        batch_size=2,
+        base_settings=None,
+        start=False,
+        get_timeout=0.2,
+        sample_filter=lambda s: s.meta.sample_uid % 2 == 0,  # keep even uids
+    )
+    try:
+        for i in range(8):
+            loader.bus.put(_sample(i))
+        batches = list(itertools.islice(loader, 2))
+        assert [b["depth_1"].shape[0] for b in batches] == [2, 2]
+        assert batches[0].meta.sample_uid.tolist() == [0, 2]
+        assert batches[1].meta.sample_uid.tolist() == [4, 6]
+    finally:
+        loader.close()
+
+
 def test_loader_close_idempotent_without_producer():
     loader = OnlineDataLoader(_schema(), batch_size=2, base_settings=None, start=False)
     loader.close()
