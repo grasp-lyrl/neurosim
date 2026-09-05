@@ -64,13 +64,16 @@ class HabitatWrapper(VisualBackendProtocol):
 
         # Initialize simulator
         self._sim = hsim.Simulator(self._cfg)
-        self._scene_bounds = self._sim.pathfinder.get_bounds()
 
         # Set seed
         self._set_seed(self.settings.get("seed", 324))
 
         # Recompute navmesh based on settings
         self._recompute_navmesh()
+
+        # Cache scene bounds *after* recomputing the navmesh:
+        # bounds are only valid once a navmesh is loaded/built.
+        self._scene_bounds = self._sim.pathfinder.get_bounds()
 
         # init the agent to the start position and orientation
         # self.agent = self._init_agent_state(self.settings["default_agent"])
