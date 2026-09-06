@@ -502,11 +502,45 @@ def main():
         sum(len(g["params"]) for g in param_groups),
     )
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
-    scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer,
-        start_factor=1,
-        end_factor=args.lr_end_factor,
-        total_iters=args.epochs,
+    # Warm up, hold, then cosine to zero. Held flat rather than decayed throughout
+    # because the data never repeats: there is no overfitting to decay away, and the
+    # loss is still falling at block resolution well past the midpoint.
+    # Stepped once per epoch, so both phases are measured in epochs (~512 steps each).
+    phases = [
+        torch.optim.lr_scheduler.ConstantLR(
+            optimizer, factor=1.0, total_iters=args.epochs
+        )
+    ]
+    milestones = []
+    if args.warmup_epochs:
+        phases.insert(
+            0,
+            torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1 / (args.warmup_epochs + 1),
+                end_factor=1.0,
+                total_iters=args.warmup_epochs,
+            ),
+        )
+        milestones.append(args.warmup_epochs)
+    if args.cooldown_epochs:
+        phases.append(
+            torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=args.cooldown_epochs
+            )
+        )
+        milestones.append(args.epochs - args.cooldown_epochs)
+    scheduler = (
+        torch.optim.lr_scheduler.SequentialLR(optimizer, phases, milestones=milestones)
+        if milestones
+        else phases[0]
+    )
+    logger.info(
+        "LR schedule: warmup %d, hold %d, cosine cooldown %d (of %d epochs)",
+        args.warmup_epochs,
+        args.epochs - args.warmup_epochs - args.cooldown_epochs,
+        args.cooldown_epochs,
+        args.epochs,
     )
 
     assert args.loss == "ssimae", (

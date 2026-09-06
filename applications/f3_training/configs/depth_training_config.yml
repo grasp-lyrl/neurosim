@@ -3,7 +3,8 @@
 
 # Training options
 lr: 5.0e-6 # Learning rate (DAv2 pseudo-label stage: encoder 5e-6, decoder 10x)
-lr_end_factor: 1.0 # Constant LR, as in DAv2's pseudo-label training (no decay)
+warmup_epochs: 10 # Linear ramp up to lr; 0 disables
+cooldown_epochs: 30 # Cosine anneal to 0 over the final epochs; 0 disables
 clip_grad: 0 # Gradient clipping (0 = disabled)
 epochs: 250 # Number of epochs
 log_interval: 10 # Save checkpoint interval in epochs
