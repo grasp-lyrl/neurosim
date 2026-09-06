@@ -150,6 +150,7 @@ OnlineDataLoader(
     gpu_ids=[0, 1],                      # GPUs cycled across producers ([0,1] + 8 -> 4/GPU)
     base_seed=0,                         # producer i gets seed = base_seed + i
     bus_maxsize=256,                     # backpressure bound (queue capacity)
+    prefetch=2,                          # batches built ahead on a thread (0 = inline)
     ring_caps={"event_camera_1": 5_000_000},  # optional per-stream packet cap
     get_timeout=1.0,                     # consumer poll / producer-death check
     log_dir="outputs/.../logs",          # optional: per-producer logs + run_setup.yaml
@@ -161,6 +162,8 @@ Tips:
   `num_producers=4` is one sim per GPU; co-locate the trainer on a separate GPU.
 - **Diversity** is automatic: same settings + DR, distinct seed per producer.
 - The loader iterates **forever**; bound with `itertools.islice(loader, n_batches)`.
+- **Prefetch:** a background thread deserializes and batches while you use the previous
+  batch. Set `prefetch=0` to batch inline (deterministic, for debugging).
 - Always `loader.close()` (or use it as a context manager) to stop producers.
 
 ### Building the schema for *any* set of sensors

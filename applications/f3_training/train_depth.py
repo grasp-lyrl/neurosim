@@ -181,10 +181,9 @@ def process_batch(batch, args, device):
         raise ValueError(
             f"Depth sensor '{depth_sensor}' not in batch. Available: {list(batch.keys())}"
         )
-    depth = batch[depth_sensor]
     # Invalid depths are 0.0; clip then convert to disparity (inverse depth).
-    depth = np.clip(depth, 0.5 / args.max_disparity, 1 / args.min_disparity)
-    disparity = torch.from_numpy(1.0 / depth).float().to(device)  # (B, H, W)
+    depth = torch.from_numpy(batch[depth_sensor]).to(device, torch.float32)
+    disparity = 1.0 / depth.clamp(0.5 / args.max_disparity, 1 / args.min_disparity)
 
     color_images = (
         batch[color_sensor].astype(np.uint8)
@@ -235,14 +234,18 @@ def train_epoch(
 
         with torch.autocast(device_type="cuda", enabled=args.amp, dtype=torch.bfloat16):
             disparity_pred = model(ff_events, event_counts, cparams)[0]  # (B, H, W)
-            disparity_valid_mask = disparity < args.max_disparity
-            keep = usable_samples(disparity_valid_mask)
-            if not keep.any():
-                continue
-            loss = loss_fn(
-                disparity_pred[keep], disparity[keep], disparity_valid_mask[keep]
-            )
-            loss = loss / iters_to_accumulate
+
+        # The SSI loss normalizes by a per-sample MAD, so it runs in fp32 even
+        # under autocast; bf16 there would divide by an 8-bit-mantissa scale.
+        disparity_pred = disparity_pred.float()
+        disparity_valid_mask = disparity < args.max_disparity
+        keep = usable_samples(disparity_valid_mask)
+        if not keep.any():
+            continue
+        loss = loss_fn(
+            disparity_pred[keep], disparity[keep], disparity_valid_mask[keep]
+        )
+        loss = loss / iters_to_accumulate
 
         scaler.scale(loss).backward()
         train_loss += loss.item()
@@ -319,7 +322,7 @@ def validate(
         ).repeat(B, 1)
         disparity = batch_cropper(disparity.unsqueeze(1), crop_params).squeeze(1)
 
-        disparity_pred = model(ff_events, event_counts, crop_params)[0]  # (B, H, H)
+        disparity_pred = model(ff_events, event_counts, crop_params)[0].float()
         valid_mask = disparity < args.max_disparity
         keep = usable_samples(valid_mask)
         if not keep.any():
@@ -602,7 +605,7 @@ def main():
             if (epoch + 1) % args.val_interval == 0:
                 save_preds = (epoch + 1) % args.log_interval == 0
                 with torch.autocast(
-                    device_type="cuda", enabled=args.amp, dtype=torch.float16
+                    device_type="cuda", enabled=args.amp, dtype=torch.bfloat16
                 ):
                     val_results = validate(
                         args,

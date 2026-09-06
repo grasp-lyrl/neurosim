@@ -12,6 +12,7 @@ import queue
 import time
 
 import numpy as np
+import pytest
 
 from neurosim.online_data import (
     SampleMeta,
@@ -319,3 +320,107 @@ def test_from_config_rejects_missing_block_and_anchor():
             {"visual_backend": {"sensors": {}}, "online_data": {"batch_size": 1}},
             start=False,
         )
+
+
+class _DeadProc:
+    """Stand-in for a producer process that has exited."""
+
+    def is_alive(self):
+        return False
+
+
+def _prefetch_loader(**kw):
+    kw.setdefault("get_timeout", 0.05)
+    return OnlineDataLoader(
+        _schema(), batch_size=2, base_settings=None, start=False, **kw
+    )
+
+
+def test_prefetch_matches_inline_output():
+    """Same batches, same order, whether or not a thread does the batching."""
+    got = {}
+    for prefetch in (0, 2):
+        loader = _prefetch_loader(prefetch=prefetch)
+        try:
+            for i in range(6):
+                loader.bus.put(_sample(i))
+            got[prefetch] = [
+                (b.meta.sample_uid.tolist(), b["event_1"][0].tolist())
+                for b in itertools.islice(loader, 3)
+            ]
+        finally:
+            loader.close()
+    assert got[0] == got[2] == [([0, 1], [1, 2]), ([2, 3], [3, 4]), ([4, 5], [5, 6])]
+
+
+def test_prefetch_disabled_starts_no_thread():
+    loader = _prefetch_loader(prefetch=0)
+    try:
+        loader.bus.put(_sample(0))
+        loader.bus.put(_sample(1))
+        next(iter(loader))
+        assert loader._prefetch_thread is None
+    finally:
+        loader.close()
+
+
+def test_prefetch_reuses_one_thread_across_iters():
+    """Each epoch calls iter(loader); that must resume, not race a second thread."""
+    loader = _prefetch_loader()
+    try:
+        for i in range(8):
+            loader.bus.put(_sample(i))
+        first = list(itertools.islice(loader, 2))
+        thread = loader._prefetch_thread
+        second = list(itertools.islice(loader, 2))
+        assert thread is loader._prefetch_thread and thread.is_alive()
+        assert [b.meta.sample_uid.tolist() for b in first + second] == [
+            [0, 1],
+            [2, 3],
+            [4, 5],
+            [6, 7],
+        ]
+    finally:
+        loader.close()
+
+
+def test_prefetch_stops_when_all_producers_die():
+    """Dead producers end iteration instead of hanging the consumer."""
+    loader = _prefetch_loader()
+    loader._procs = [_DeadProc()]
+    try:
+        for i in range(2):
+            loader.bus.put(_sample(i))
+        batches = list(loader)  # terminates: bus drains, producers are dead
+        assert [b.meta.sample_uid.tolist() for b in batches] == [[0, 1]]
+    finally:
+        loader._procs = []
+        loader.close()
+
+
+def test_prefetch_surfaces_consumer_exception():
+    """A raising filter must reach the caller, not silently kill the thread."""
+    boom = RuntimeError("filter blew up")
+
+    def explode(_sample):
+        raise boom
+
+    loader = _prefetch_loader(sample_filter=explode)
+    try:
+        loader.bus.put(_sample(0))
+        with pytest.raises(RuntimeError, match="filter blew up"):
+            next(iter(loader))
+    finally:
+        loader.close()
+
+
+def test_prefetch_close_joins_thread():
+    loader = _prefetch_loader()
+    loader.bus.put(_sample(0))
+    loader.bus.put(_sample(1))
+    next(iter(loader))
+    thread = loader._prefetch_thread
+    loader.close()
+    assert not thread.is_alive()
+    assert loader._prefetch_thread is None
+    loader.close()  # idempotent

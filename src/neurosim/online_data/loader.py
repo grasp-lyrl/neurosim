@@ -11,8 +11,7 @@ Construct with a schema + producer settings, iterate batches, close::
 
 **M producer processes** each own a :class:`~neurosim.online_data.sim_worker.SimulatorWorker`
 on an assigned GPU and push time-aligned samples to one bounded
-:class:`~neurosim.online_data.bus.SampleBus`; the consumer (this process) pops them
-and builds batches inline with a :class:`~neurosim.online_data.batcher.ShuffledBatcher`.
+:class:`~neurosim.online_data.bus.SampleBus`; a prefetch thread pops and batches them.
 Because all producers share the bus, consecutive samples come from different specs →
 **diverse batches**. The bounded bus decouples sim from training (producers run ahead)
 and bounds memory (backpressure). Producers use ``spawn`` (Habitat/EGL + CUDA must
@@ -25,6 +24,7 @@ path can be driven by feeding ``loader.bus`` directly (tests).
 import time
 import queue
 import logging
+import threading
 from pathlib import Path
 from typing import Callable
 from dataclasses import dataclass, field
@@ -196,6 +196,8 @@ class OnlineDataLoader:
             every episode) is set in ``randomization`` (``resample_every`` /
             ``trajectory``) and owned by ``RandomizedSimulator.randomize``.
         bus_maxsize: Bus capacity (backpressure bound).
+        prefetch: Batches kept ready by the background thread. ``0`` batches
+            inline on the consumer thread instead (deterministic).
         sample_filter: Predicate applied to each sample before batching; a
             rejected sample is dropped and batch is filled from the next one
         mp_context: Start method (``"spawn"`` for CUDA/Habitat).
@@ -219,6 +221,7 @@ class OnlineDataLoader:
         base_seed: int = 0,
         ring_caps: dict | None = None,
         bus_maxsize: int = 256,
+        prefetch: int = 2,
         sample_filter: Callable[[TimeAlignedSample], bool] | None = None,
         mp_context: str = "spawn",
         get_timeout: float = 1.0,
@@ -230,6 +233,7 @@ class OnlineDataLoader:
 
         self.schema = schema
         self.batch_size = batch_size
+        self._prefetch = int(prefetch)
         self._sample_filter = sample_filter
         self._get_timeout = get_timeout
         self._stall_warn_s = stall_warn_s
@@ -255,6 +259,11 @@ class OnlineDataLoader:
         self.bus = SampleBus(maxsize=bus_maxsize, ctx=self._ctx)
         self._stop = self._ctx.Event()
         self._procs: list = []
+
+        self._out: queue.Queue = queue.Queue(maxsize=max(1, self._prefetch))
+        self._prefetch_thread: threading.Thread | None = None
+        self._prefetch_stop = threading.Event()
+        self._prefetch_error: BaseException | None = None
 
         if start and self._specs:
             self.start()
@@ -365,6 +374,7 @@ class OnlineDataLoader:
             gpu_ids=od.get("gpu_ids", [0]),
             base_seed=int(od.get("base_seed", 0)),
             bus_maxsize=int(od.get("bus_maxsize", 256)),
+            prefetch=int(od.get("prefetch", 2)),
             ring_caps=od.get("ring_caps"),
             log_dir=log_dir,
             start=start,
@@ -422,15 +432,15 @@ class OnlineDataLoader:
     def _all_producers_dead(self) -> bool:
         return bool(self._procs) and all(not p.is_alive() for p in self._procs)
 
-    def __iter__(self):
-        """Yield batches forever.
+    def _consume(self):
+        """Pop samples off the bus, filter them, and yield finished batches.
 
         Watchdog: if no sample arrives for ``stall_warn_s`` while producers are still
         alive, log a one-time warning.
         """
         last_sample_t = time.monotonic()
         stall_warned = False
-        while True:
+        while not self._prefetch_stop.is_set():
             try:
                 sample = self.bus.get(timeout=self._get_timeout)
             except queue.Empty:
@@ -457,12 +467,65 @@ class OnlineDataLoader:
             if batch is not None:
                 yield batch
 
+    def _prefetch_loop(self) -> None:
+        """Run :meth:`_consume` off-thread, handing batches over ``self._out``."""
+        try:
+            for batch in self._consume():
+                while not self._prefetch_stop.is_set():
+                    try:
+                        self._out.put(batch, timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
+                else:
+                    return
+        except BaseException as exc:  # surfaced on the consumer thread
+            self._prefetch_error = exc
+            logger.exception("prefetch thread failed")
+
+    def _drain(self):
+        """Yield whatever the prefetch thread left in the queue, then re-raise."""
+        while True:
+            try:
+                yield self._out.get_nowait()
+            except queue.Empty:
+                break
+        if self._prefetch_error is not None:
+            raise self._prefetch_error
+
+    def __iter__(self):
+        """Yield batches forever."""
+        if self._prefetch < 1:
+            yield from self._consume()
+            return
+
+        if self._prefetch_error is not None:
+            raise self._prefetch_error
+        if self._prefetch_thread is None:
+            self._prefetch_stop.clear()
+            self._prefetch_thread = threading.Thread(
+                target=self._prefetch_loop, name="online-data-prefetch", daemon=True
+            )
+            self._prefetch_thread.start()
+
+        while True:
+            try:
+                yield self._out.get(timeout=self._get_timeout)
+            except queue.Empty:
+                if self._prefetch_thread.is_alive():
+                    continue
+                yield from self._drain()
+                return
+
     def close(self) -> None:
-        """Stop all producers and release the bus (idempotent).
+        """Stop all producers and release the bus
 
         Producers are force-terminated because ``sim.run()`` is uninterruptible
-        mid-episode (it cannot poll ``stop_event``).
         """
+        self._prefetch_stop.set()
+        if self._prefetch_thread is not None:
+            self._prefetch_thread.join(timeout=5.0)
+            self._prefetch_thread = None
         self._stop.set()
         for proc in self._procs:
             proc.terminate()
