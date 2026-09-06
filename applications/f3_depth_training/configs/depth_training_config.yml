@@ -29,12 +29,12 @@ max_disparity: 1000.0 # Maximum disparity for min depth 0.001 m
 dav2_config:
   size: 308 # Input size for DAv2
   encoder: vitb # Encoder type: 'vits', 'vitb', 'vitl'
-  ckpt: applications/f3_training/models/depth_anything_v2_vitb.pth # Path to DAv2 checkpoint
+  ckpt: applications/f3_depth_training/models/depth_anything_v2_vitb.pth # Path to DAv2 checkpoint
 
 # EventFF (F3) config - the feature backbone
 eventff:
   config: deps/fast-feature-fields/confs/ff/modeloptions/640x480x20_patchff_ds1_small_v1.yml
-  ckpt: applications/f3_training/models/640x480x20_patchff_ds1_small_v1.pth # Path to EventFF checkpoint
+  ckpt: applications/f3_depth_training/models/640x480x20_patchff_ds1_small_v1.pth # Path to EventFF checkpoint
 
 # Online data pipeline settings.
 # `online_data` is the same block OnlineDataLoader.from_config(...) reads everywhere

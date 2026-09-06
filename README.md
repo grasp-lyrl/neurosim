@@ -51,7 +51,7 @@
 
 ## Applications
 
-Neurosim enables **real-time closed-loop control** (`src/neurosim/sims/asynchronous_simulator`, `src/neurosim/cortex/`), **online training of multi-modal perception models** (`applications/f3_training/`), and **event-based reinforcement learning with NeurosimRL** (`applications/rl/`). Detailed docs to run each of them are coming soon!
+Neurosim enables **real-time closed-loop control** (`src/neurosim/sims/asynchronous_simulator`, `src/neurosim/cortex/`), **online training of multi-modal perception models** (`applications/f3_depth_training/`), and **event-based reinforcement learning with NeurosimRL** (`applications/rl/`). Detailed docs to run each of them are coming soon!
 
 <div align="center">
   <img src="assets/neurosim_rl.gif" width="70%">

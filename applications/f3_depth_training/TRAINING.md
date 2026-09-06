@@ -57,8 +57,8 @@ Full DR grammar in [online_data/README.md](../../src/neurosim/online_data/README
 
 ```bash
 nohup conda run --no-capture-output -n neurosim python -u \
-    applications/f3_training/train_depth.py \
-    --conf applications/f3_training/configs/depth_training_config.yml \
+    applications/f3_depth_training/train_depth_nonrec.py \
+    --conf applications/f3_depth_training/configs/depth_training_config.yml \
     --name my_run --batches-per-epoch 2048 --retrain-f3 --amp --wandb \
     > /tmp/my_run.log 2>&1 &
 ```
