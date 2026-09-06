@@ -9,11 +9,16 @@ run in their own processes; the model trains on one GPU.
 git clone git@github.com:grasp-lyrl/fast-feature-fields.git deps/fast-feature-fields
 ```
 
-Two edits to the clone are required:
+Three edits to the clone are required:
 
 1. Comment out `dependencies` and `requires-python` in its `pyproject.toml`.
 2. Delete the `@torch.compile` on `batch_cropper` in `src/f3/utils/utils_gen.py` — it
    slices by tensor values, which raises `PendingUnbackedSymbolNotFound` on torch 2.11.
+3. In `src/f3/utils/utils_op.py`, make `VoxelBlurLoss.kernel` a non-persistent buffer
+   instead of `.to("cuda")`, and resolve its device where it is used (`.to(tensor.device)`
+   in `apply_gaussian_blur_1d` and `blurtime`). The `LOSSES` dict instantiates every loss
+   at import, so the original pins a kernel to cuda:0 just for importing f3 — which fails
+   when that GPU is full and ignores whichever device you meant to use.
 
 ## 1. Write the config
 
