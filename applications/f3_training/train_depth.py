@@ -8,9 +8,6 @@ run in separate processes on the producer GPUs, push time-aligned samples to a
 bounded bus, and this (trainer) process builds batches and trains on the
 ``trainer_gpu``.
 
-Use ``--smoke-data`` to validate the data path (build the loader, pull a few
-batches, print shapes) without the model — handy on a fresh setup.
-
 Reference: https://github.com/grasp-lyrl/fast-feature-fields/tree/main/src/f3/tasks/depth
 """
 
@@ -22,14 +19,12 @@ import torch
 import logging
 import argparse
 import datetime
-import itertools
 import numpy as np
 from typing import Callable
 from tqdm import tqdm
 from matplotlib import colormaps
 
-# NOTE: f3 (fast-feature-fields) is imported lazily inside the functions that use
-# it, so this module imports — and ``--smoke-data`` runs — without f3 installed.
+# NOTE: f3 (fast-feature-fields) is imported lazily inside the functions that use it.
 # wandb is optional (only when --wandb is passed).
 try:
     import wandb
@@ -398,37 +393,7 @@ def get_args():
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument("--batches-per-epoch", type=int, default=100)
     parser.add_argument("--amp", action="store_true", help="Mixed precision (bf16)")
-    parser.add_argument(
-        "--smoke-data",
-        action="store_true",
-        help="Build the loader, pull a few batches, print shapes, and exit (no model).",
-    )
-    parser.add_argument("--smoke-batches", type=int, default=3)
     return parser.parse_args()
-
-
-def _smoke_data(args, data_cfg, logger=None):
-    """Validate the data path without the model: pull a few batches, log shapes."""
-    log = logger or logging.getLogger("smoke")
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    batch_size = int(args.train["mini_batch"]) if hasattr(args, "train") else 4
-    loader, schema = build_loader(data_cfg, batch_size=batch_size)
-    log.info("smoke: deliver=%s, batch_size=%d", schema.deliver_uuids(), batch_size)
-    try:
-        for i, batch in enumerate(itertools.islice(loader, args.smoke_batches)):
-            depth = batch[args.depth_sensor]
-            counts, events = batch[args.event_sensor]
-            log.info(
-                "batch %d: depth=%s events=%s counts.sum=%d spec_ids=%s",
-                i,
-                tuple(depth.shape),
-                tuple(events.shape),
-                int(counts.sum()),
-                sorted(set(batch.meta.spec_id.tolist())),
-            )
-    finally:
-        loader.close()
-    log.info("smoke: OK")
 
 
 def main():
@@ -448,10 +413,6 @@ def main():
     args.depth_sensor = roles["anchor"][0]
     args.event_sensor = roles["stream"][0]
     args.color_sensor = data_cfg.get("color_sensor")
-
-    if args.smoke_data:
-        _smoke_data(args, data_cfg)
-        return
 
     from f3.utils import num_params, setup_torch, log_dict
     from f3.tasks.depth.utils import (

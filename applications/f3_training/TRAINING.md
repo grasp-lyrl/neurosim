@@ -48,17 +48,7 @@ Full DR grammar in [online_data/README.md](../../src/neurosim/online_data/README
 > frame-T ms × 1000). Set `simulator.sensor_rates.depth_camera_1` to `1000 / T_ms`
 > (50 Hz for a 20 ms model).
 
-## 2. Verify the data path
-
-f3 is imported lazily, so this works before f3 is installed:
-
-```bash
-conda run -n neurosim python applications/f3_training/train_depth.py \
-    --conf applications/f3_training/configs/depth_training_config.yml \
-    --smoke-data --smoke-batches 3
-```
-
-## 3. Train
+## 2. Train
 
 ```bash
 nohup conda run --no-capture-output -n neurosim python -u \
