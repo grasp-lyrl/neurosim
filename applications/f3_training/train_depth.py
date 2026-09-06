@@ -90,6 +90,15 @@ def setup_experiment(args, base_path: str, models_path: str):
 
     resume = os.path.exists(f"{models_path}/last.pth")
 
+    # Carry the wandb run id across resumes, otherwise each restart forks a new run.
+    config_path = f"{base_path}/config.yaml"
+    args.wandb_run_id = None
+    if resume and os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            args.wandb_run_id = yaml.safe_load(f).get("wandb_run_id")
+    if args.wandb_run_id is None:
+        args.wandb_run_id = wandb.util.generate_id()
+
     logging.basicConfig(
         filename=f"{base_path}/training.log",
         filemode="a" if resume else "w",
@@ -98,7 +107,7 @@ def setup_experiment(args, base_path: str, models_path: str):
     )
     logger = logging.getLogger(__name__)
 
-    with open(f"{base_path}/config.yaml", "w") as f:
+    with open(config_path, "w") as f:
         yaml.dump(vars(args), f, default_flow_style=False)
 
     return logger, resume
@@ -209,6 +218,26 @@ def usable_samples(valid_mask):
     return valid_mask.flatten(1).sum(1) * 2 >= valid_mask[0].numel()
 
 
+def predict_full_frame(model, ff_events, event_counts, height, width):
+    """Whole-frame disparity, aspect preserved — a batched ``model.infer_image``.
+
+    Training crops a random square, but every f3 eval path (``evaluate``,
+    ``dsec_benchmark``, its own validator) runs ``infer_image``, which resizes the
+    short edge to the DAv2 size and keeps aspect. ``infer_image`` handles one sample
+    at a time, so its steps are inlined here to keep validation batched.
+    """
+    import torch.nn.functional as F
+    from f3.tasks.depth.utils.utils import get_resize_shapes
+
+    field = model.eventff(ff_events, event_counts)[1].permute(0, 3, 2, 1)  # (B,C,H,W)
+    fh, fw = get_resize_shapes(height, width, model.size, 14)
+    field = F.interpolate(field, (fh, fw), mode="bilinear", align_corners=False)
+    pred = model.dav2(field).unsqueeze(1)  # (B, 1, fh, fw)
+    return F.interpolate(
+        pred, (height, width), mode="bilinear", align_corners=True
+    ).squeeze(1)
+
+
 def train_epoch(
     args,
     logger,
@@ -293,8 +322,8 @@ def train_epoch(
 def validate(
     args, logger, model, dataloader, loss_fn, epoch, max_batches=50, save_preds=False
 ):
-    """Validate the model on ``max_batches`` batches."""
-    from f3.utils import log_dict, batch_cropper
+    """Validate the model on ``max_batches`` batches, at inference framing."""
+    from f3.utils import log_dict
     from f3.tasks.depth.utils import eval_disparity, get_disparity_image
 
     model.eval()
@@ -311,14 +340,9 @@ def validate(
             batch, args, args.device
         )
         B, H, W = disparity.shape
-        crop_params = torch.tensor(
-            [[0, (W - H) // 2, H, (W + H) // 2]],
-            dtype=torch.int32,
-            device=ff_events.device,
-        ).repeat(B, 1)
-        disparity = batch_cropper(disparity.unsqueeze(1), crop_params).squeeze(1)
-
-        disparity_pred = model(ff_events, event_counts, crop_params)[0].float()
+        disparity_pred = predict_full_frame(
+            model, ff_events, event_counts, H, W
+        ).float()
         valid_mask = disparity < args.max_disparity
         keep = usable_samples(valid_mask)
         if not keep.any():
@@ -355,11 +379,13 @@ def validate(
                     "training_events/events": event_frames[i],
                 }
                 if color_images is not None:
-                    images["training_events/color"] = cv2.cvtColor(
-                        color_images[i], cv2.COLOR_RGB2BGR
-                    )
+                    images["training_events/color"] = color_images[i]
+                # Every panel above is RGB (matplotlib cmap, polarity channels); cv2 wants BGR.
                 for stem, image in images.items():
-                    cv2.imwrite(f"{base_path}/{stem}_{epoch}_{idx}_{i}.png", image)
+                    cv2.imwrite(
+                        f"{base_path}/{stem}_{epoch}_{idx}_{i}.png",
+                        cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+                    )
 
     for k in results:
         results[k] /= nsamples
@@ -452,19 +478,30 @@ def main():
     logger.info(f"Total trainable parameters: {num_params(model)}")
 
     # ── Optimizer / scheduler ─────────────────────────────────────────────────
-    def param_lr(name):
+    # DAv2 encoder at lr, F3 backbone at half, DAv2 decoder head at 10x. Grouped
+    # rather than one group per parameter, so AdamW's foreach path can batch them.
+    def lr_scale(name):
         if "pretrained" in name:
-            return args.lr
-        return 0.5 * args.lr if "eventff" in name else 10 * args.lr
+            return 1.0
+        return 0.5 if "eventff" in name else 10.0
 
+    def decays(name, param):
+        # Norms and biases are 1-D; the re-initialised patch embed is left free too.
+        return param.ndim > 1 and "patch_embed.proj" not in name
+
+    grouped: dict[tuple[float, bool], list] = {}
+    for name, param in model.named_parameters():
+        grouped.setdefault((lr_scale(name), decays(name, param)), []).append(param)
     param_groups = [
-        {"params": param, "lr": param_lr(name)}
-        | ({"weight_decay": 0.0} if "patch_embed.proj" in name else {})
-        for name, param in model.named_parameters()
+        {"params": params, "lr": scale * args.lr, "weight_decay": 0.01 if wd else 0.0}
+        for (scale, wd), params in grouped.items()
     ]
-    optimizer = torch.optim.AdamW(
-        param_groups, lr=args.lr, betas=(0.9, 0.999), weight_decay=0.01
+    logger.info(
+        "Optimizer: %d param groups over %d tensors",
+        len(param_groups),
+        sum(len(g["params"]) for g in param_groups),
     )
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
     scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1,
@@ -515,7 +552,13 @@ def main():
     )
 
     if args.wandb:
-        wandb.init(project="f3-depth-neurosim", name=args.name, config=vars(args))
+        wandb.init(
+            project="f3-depth-neurosim",
+            name=args.name,
+            id=args.wandb_run_id,
+            resume="allow",
+            config=vars(args),
+        )
 
     val_results = dict(best_results)
     iters_to_accumulate = args.train["batch"] // args.train["mini_batch"]
