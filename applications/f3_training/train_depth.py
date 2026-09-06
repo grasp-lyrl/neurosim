@@ -206,7 +206,6 @@ def train_epoch(
     optimizer,
     scheduler,
     loss_fn,
-    scaler,
     epoch,
     max_batches,
     iters_to_accumulate=1,
@@ -247,16 +246,14 @@ def train_epoch(
         )
         loss = loss / iters_to_accumulate
 
-        scaler.scale(loss).backward()
+        loss.backward()
         train_loss += loss.item()
         iter_loss += loss.item()
 
         if (idx + 1) % iters_to_accumulate == 0:
             if args.clip_grad > 0:
-                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             pbar.set_postfix(
                 {"loss": f"{iter_loss:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"}
@@ -578,7 +575,6 @@ def main():
 
     val_results = copy.deepcopy(best_results)
     iters_to_accumulate = args.train["batch"] // args.train["mini_batch"]
-    scaler = torch.GradScaler(enabled=args.amp)
 
     logger.info("=" * 60)
     logger.info("Starting training...")
@@ -594,7 +590,6 @@ def main():
                 optimizer,
                 scheduler,
                 loss_fn,
-                scaler,
                 epoch,
                 args.batches_per_epoch,
                 iters_to_accumulate,
