@@ -13,25 +13,39 @@ Reference: https://github.com/grasp-lyrl/fast-feature-fields/tree/main/src/f3/ta
 
 import os
 import cv2
-import copy
 import yaml
 import torch
+import wandb
 import logging
 import argparse
 import datetime
 import numpy as np
-from typing import Callable
 from tqdm import tqdm
+from typing import Callable
 from matplotlib import colormaps
 
-# NOTE: f3 (fast-feature-fields) is imported lazily inside the functions that use it.
-# wandb is optional (only when --wandb is passed).
-try:
-    import wandb
-except ImportError:  # pragma: no cover
-    wandb = None
+from neurosim.online_data import OnlineDataLoader, TimeAlignedSample
 
-from neurosim.online_data import OnlineDataLoader, SampleSchema, TimeAlignedSample
+# Disparity metrics from f3's eval_disparity; the loss name is appended per run.
+METRICS = ("1pe", "2pe", "3pe", "rmse", "rmse_log", "log10", "silog")
+
+
+def log_wandb(args, **fields):
+    if args.wandb:
+        wandb.log(fields)
+
+
+def save_checkpoint(path, epoch, results, model, optimizer, scheduler):
+    torch.save(
+        {
+            "epoch": epoch,
+            "results": results,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+        },
+        path,
+    )
 
 
 def ev_to_frames_with_polarity(events, counts, w, h):
@@ -66,10 +80,12 @@ def ev_to_frames_with_polarity(events, counts, w, h):
 
 def setup_experiment(args, base_path: str, models_path: str):
     """Setup experiment directories and check for resume."""
-    os.makedirs(base_path, exist_ok=True)
-    os.makedirs(models_path, exist_ok=True)
-    os.makedirs(f"{base_path}/predictions", exist_ok=True)
-    os.makedirs(f"{base_path}/training_events", exist_ok=True)
+    for path in (
+        models_path,
+        f"{base_path}/predictions",
+        f"{base_path}/training_events",
+    ):
+        os.makedirs(path, exist_ok=True)
 
     resume = os.path.exists(f"{models_path}/last.pth")
 
@@ -117,7 +133,7 @@ def build_loader(
     batch_size: int,
     log_dir: str | None = None,
     sample_filter: Callable[[TimeAlignedSample], bool] | None = None,
-) -> tuple[OnlineDataLoader, SampleSchema]:
+) -> OnlineDataLoader:
     """Build an OnlineDataLoader from the ``data.online_data`` config block.
 
     Delegates to :meth:`OnlineDataLoader.from_config` (the same YAML schema used
@@ -136,13 +152,12 @@ def build_loader(
         base.setdefault("simulator", {})["sim_time"] = sim_time
         od["base_settings"] = base
 
-    loader = OnlineDataLoader.from_config(
+    return OnlineDataLoader.from_config(
         {"online_data": od},
         batch_size=batch_size,
         log_dir=log_dir,
         sample_filter=sample_filter,
     )
-    return loader, loader.schema
 
 
 def process_batch(batch, args, device):
@@ -253,15 +268,13 @@ def train_epoch(
             pbar.set_postfix(
                 {"loss": f"{iter_loss:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"}
             )
-            if args.wandb:
-                wandb.log(
-                    {
-                        "train_iter_loss": iter_loss,
-                        "train_lr": scheduler.get_last_lr()[0],
-                        "epoch": epoch,
-                        "iteration": idx,
-                    }
-                )
+            log_wandb(
+                args,
+                train_iter_loss=iter_loss,
+                train_lr=scheduler.get_last_lr()[0],
+                epoch=epoch,
+                iteration=idx,
+            )
             iter_loss = 0.0
 
     num_iters = max(1, (idx + 1) // iters_to_accumulate)
@@ -284,19 +297,7 @@ def validate(
     model.eval()
     cmap = colormaps["magma"]
 
-    results = {
-        k: torch.tensor([0.0]).cuda()
-        for k in (
-            "1pe",
-            "2pe",
-            "3pe",
-            "rmse",
-            "rmse_log",
-            "log10",
-            "silog",
-            loss_fn.name,
-        )
-    }
+    results = {k: torch.tensor([0.0]).cuda() for k in (*METRICS, loss_fn.name)}
     nsamples = torch.tensor([0.0]).cuda()
 
     for idx, batch in tqdm(enumerate(dataloader), total=max_batches, desc="Validation"):
@@ -339,29 +340,23 @@ def validate(
             for i in range(disparity_pred.shape[0]):
                 if not keep[i]:
                     continue
-                disp_img = get_disparity_image(disparity[i], valid_mask[i], cmap)
-                pred_img = get_disparity_image(
-                    disparity_pred[i],
-                    torch.ones_like(disparity_pred[i], dtype=torch.bool),
-                    cmap,
-                )
-                cv2.imwrite(
-                    f"{base_path}/training_events/disparity_{epoch}_{idx}_{i}.png",
-                    disp_img,
-                )
-                cv2.imwrite(
-                    f"{base_path}/predictions/disparity_pred_{epoch}_{idx}_{i}.png",
-                    pred_img,
-                )
-                cv2.imwrite(
-                    f"{base_path}/training_events/events_{epoch}_{idx}_{i}.png",
-                    event_frames[i],
-                )
+                images = {
+                    "training_events/disparity": get_disparity_image(
+                        disparity[i], valid_mask[i], cmap
+                    ),
+                    "predictions/disparity_pred": get_disparity_image(
+                        disparity_pred[i],
+                        torch.ones_like(disparity_pred[i], dtype=torch.bool),
+                        cmap,
+                    ),
+                    "training_events/events": event_frames[i],
+                }
                 if color_images is not None:
-                    cv2.imwrite(
-                        f"{base_path}/training_events/color_{epoch}_{idx}_{i}.png",
-                        cv2.cvtColor(color_images[i], cv2.COLOR_RGB2BGR),
+                    images["training_events/color"] = cv2.cvtColor(
+                        color_images[i], cv2.COLOR_RGB2BGR
                     )
+                for stem, image in images.items():
+                    cv2.imwrite(f"{base_path}/{stem}_{epoch}_{idx}_{i}.png", image)
 
     for k in results:
         results[k] /= nsamples
@@ -454,19 +449,16 @@ def main():
     logger.info(f"Total trainable parameters: {num_params(model)}")
 
     # ── Optimizer / scheduler ─────────────────────────────────────────────────
-    param_groups = []
-    for name, param in model.named_parameters():
+    def param_lr(name):
         if "pretrained" in name:
-            if "patch_embed.proj" in name:
-                param_groups.append(
-                    {"params": param, "lr": args.lr, "weight_decay": 0.0}
-                )
-            else:
-                param_groups.append({"params": param, "lr": args.lr})
-        elif "eventff" in name:
-            param_groups.append({"params": param, "lr": 0.5 * args.lr})
-        else:
-            param_groups.append({"params": param, "lr": 10 * args.lr})
+            return args.lr
+        return 0.5 * args.lr if "eventff" in name else 10 * args.lr
+
+    param_groups = [
+        {"params": param, "lr": param_lr(name)}
+        | ({"weight_decay": 0.0} if "patch_embed.proj" in name else {})
+        for name, param in model.named_parameters()
+    ]
     optimizer = torch.optim.AdamW(
         param_groups, lr=args.lr, betas=(0.9, 0.999), weight_decay=0.01
     )
@@ -481,19 +473,7 @@ def main():
         "ScaleAndShiftInvariantLoss for monocular relative depth"
     )
     loss_fn = ScaleAndShiftInvariantLoss(alpha=args.alpha, scales=args.scales)
-    best_results = {
-        k: 100.0
-        for k in (
-            "1pe",
-            "2pe",
-            "3pe",
-            "rmse",
-            "rmse_log",
-            "log10",
-            "silog",
-            loss_fn.name,
-        )
-    }
+    best_results = {k: 100.0 for k in (*METRICS, loss_fn.name)}
     start = 0
 
     if resume:
@@ -519,7 +499,7 @@ def main():
     window_us = data_cfg.get("event_time_window_us", event_T * 1000)
     args.event_norm = (event_W, event_H, window_us)
     logger.info("Initializing OnlineDataLoader (event norm window=%s us)...", window_us)
-    dataloader, _ = build_loader(
+    dataloader = build_loader(
         data_cfg,
         batch_size=int(args.train["mini_batch"]),
         log_dir=f"{base_path}/logs",
@@ -534,7 +514,7 @@ def main():
     if args.wandb:
         wandb.init(project="f3-depth-neurosim", name=args.name, config=vars(args))
 
-    val_results = copy.deepcopy(best_results)
+    val_results = dict(best_results)
     iters_to_accumulate = args.train["batch"] // args.train["mini_batch"]
 
     logger.info("=" * 60)
@@ -555,8 +535,7 @@ def main():
                 args.batches_per_epoch,
                 iters_to_accumulate,
             )
-            if args.wandb:
-                wandb.log({"train_loss": train_loss, "epoch": epoch})
+            log_wandb(args, train_loss=train_loss, epoch=epoch)
 
             if (epoch + 1) % args.val_interval == 0:
                 save_preds = (epoch + 1) % args.log_interval == 0
@@ -576,36 +555,32 @@ def main():
                 better_ssimae = val_results[loss_fn.name] < best_results[loss_fn.name]
                 set_best_results(best_results, val_results)
                 if better_ssimae:
-                    torch.save(
-                        {
-                            "epoch": epoch,
-                            "results": best_results,
-                            "model": model.state_dict(),
-                            "optimizer": optimizer.state_dict(),
-                            "scheduler": scheduler.state_dict(),
-                        },
+                    save_checkpoint(
                         f"{models_path}/best.pth",
+                        epoch,
+                        best_results,
+                        model,
+                        optimizer,
+                        scheduler,
                     )
                     logger.info(f"Saved best model at epoch {epoch}")
-                if args.wandb:
-                    wandb.log(
-                        {
-                            f"val_{k}": (v.item() if isinstance(v, torch.Tensor) else v)
-                            for k, v in val_results.items()
-                        }
-                        | {"epoch": epoch}
-                    )
+                log_wandb(
+                    args,
+                    epoch=epoch,
+                    **{
+                        f"val_{k}": (v.item() if isinstance(v, torch.Tensor) else v)
+                        for k, v in val_results.items()
+                    },
+                )
 
             scheduler.step()
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "results": val_results,
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict(),
-                },
+            save_checkpoint(
                 f"{models_path}/last.pth",
+                epoch,
+                val_results,
+                model,
+                optimizer,
+                scheduler,
             )
             if (epoch + 1) % args.log_interval == 0:
                 torch.save(
