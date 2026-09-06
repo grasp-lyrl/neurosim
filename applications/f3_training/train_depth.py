@@ -30,9 +30,10 @@ from neurosim.online_data import OnlineDataLoader, TimeAlignedSample
 METRICS = ("1pe", "2pe", "3pe", "rmse", "rmse_log", "log10", "silog")
 
 
-def log_wandb(args, **fields):
+def log_wandb(args, metrics: dict):
+    """Log under the ``train/``, ``val/`` and ``opt/`` namespaces."""
     if args.wandb:
-        wandb.log(fields)
+        wandb.log(metrics)
 
 
 def save_checkpoint(path, epoch, results, model, optimizer, scheduler):
@@ -270,10 +271,12 @@ def train_epoch(
             )
             log_wandb(
                 args,
-                train_iter_loss=iter_loss,
-                train_lr=scheduler.get_last_lr()[0],
-                epoch=epoch,
-                iteration=idx,
+                {
+                    "train/iter_loss": iter_loss,
+                    "opt/lr": scheduler.get_last_lr()[0],
+                    "opt/epoch": epoch,
+                    "opt/iteration": idx,
+                },
             )
             iter_loss = 0.0
 
@@ -535,7 +538,7 @@ def main():
                 args.batches_per_epoch,
                 iters_to_accumulate,
             )
-            log_wandb(args, train_loss=train_loss, epoch=epoch)
+            log_wandb(args, {"train/loss": train_loss, "opt/epoch": epoch})
 
             if (epoch + 1) % args.val_interval == 0:
                 save_preds = (epoch + 1) % args.log_interval == 0
@@ -566,9 +569,9 @@ def main():
                     logger.info(f"Saved best model at epoch {epoch}")
                 log_wandb(
                     args,
-                    epoch=epoch,
-                    **{
-                        f"val_{k}": (v.item() if isinstance(v, torch.Tensor) else v)
+                    {"opt/epoch": epoch}
+                    | {
+                        f"val/{k}": (v.item() if isinstance(v, torch.Tensor) else v)
                         for k, v in val_results.items()
                     },
                 )
