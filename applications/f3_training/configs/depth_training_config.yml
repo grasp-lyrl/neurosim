@@ -45,10 +45,10 @@ data:
 
   online_data:
     base_settings: configs/online_data_hm3d_2gpu.yaml # sensors, dynamics, controller, trajectory
-    num_producers: 16 # 16 simulators ...
+    num_producers: 8 # 8 simulators ...
     gpu_ids: [0] # ... all on gpu0
     base_seed: 0
-    bus_maxsize: 256 # backpressure bound
+    bus_maxsize: 2048 # backpressure bound
     roles:
       anchor: [depth_camera_1] # depth tick defines the sample boundary
       stream: [event_camera_1] # events accumulate within each depth window
