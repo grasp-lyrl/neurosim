@@ -1,9 +1,4 @@
-"""F3 event feature field: hash-encode events, scatter, encode, upsample back to full res.
-
-In-house copy of `f3.event_FF.EventPatchFF` restricted to the `use_upsampling` feature
-path the depth model uses. The event-prediction head (`pred`) is not built, so its
-checkpoint keys are dropped on load.
-"""
+"""F3 event feature field: hash-encode events, scatter, encode, upsample back to full res."""
 
 from pathlib import Path
 
