@@ -23,6 +23,8 @@ YAW_RATE_MAX = 2 * np.pi
 # keyframes that merely approach the budget still make its QP infeasible, and it then
 # returns None. Spend only half the budget to stay clear of that edge.
 YAW_RATE_MARGIN = 0.5
+# Fraction of a chunk's arc length that a hover split may wander from the even spacing.
+SPLIT_JITTER = 0.5
 
 
 def rate_limit_yaw(yaw_angles: np.ndarray, segment_times: np.ndarray) -> np.ndarray:
@@ -309,6 +311,68 @@ def sample_waypoint_path(
     return full_path, total_length
 
 
+class HoverMinSnap:
+    """Min-snap segments separated by hovers: fly, stop, fly, stop, ...
+
+    MinSnap zeroes velocity, acceleration and jerk at both endpoints and clips ``t`` into
+    its own range, so holding a finished segment past its end is already an exact hover.
+    Hovers sit between segments, so ``n`` segments hold ``n - 1`` of them.
+    """
+
+    def __init__(self, segments: list[MinSnap], hover_s: float):
+        self.segments = segments
+        self.hover_s = hover_s
+
+        starts, keyframes, t = [], [], 0.0
+        for segment in segments:
+            starts.append(t)
+            keyframes.append(segment.t_keyframes + t)
+            t += float(segment.t_keyframes[-1]) + hover_s
+        self.starts = np.array(starts)
+        self.t_keyframes = np.concatenate(keyframes)
+        self.duration = t - hover_s
+
+    def update(self, t: float) -> dict:
+        """Flat output at ``t``; inside a hover this is the previous segment held at its end."""
+        i = max(int(np.searchsorted(self.starts, t, side="right")) - 1, 0)
+        return self.segments[i].update(t - self.starts[i])
+
+
+def split_indices(path: np.ndarray, chunks: int, rng: np.random.Generator) -> list[int]:
+    """Boundaries cutting ``path`` into ``chunks`` runs at jittered equal arc lengths.
+
+    Consecutive runs share their boundary waypoint, so ``path[b[i] : b[i + 1] + 1]`` tiles
+    the path and every join is continuous in position and yaw.
+    """
+    arc = np.concatenate(
+        [[0.0], np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))]
+    )
+    edges = np.arange(1, chunks) / chunks
+    edges = edges + (rng.random(chunks - 1) - 0.5) * SPLIT_JITTER / chunks
+    bounds = [0, *np.searchsorted(arc, edges * arc[-1]), len(path) - 1]
+    assert np.all(np.diff(bounds) >= 1), (
+        f"{chunks} chunks need {chunks + 1} waypoints spread wider than this path's "
+        f"{len(path)}; lower `hovers` or raise `target_length`"
+    )
+    return bounds
+
+
+def build_minsnap(points: np.ndarray, yaw_angles: np.ndarray, v_avg: float) -> MinSnap:
+    """One min-snap segment over ``points``, starting and ending at rest."""
+    return MinSnap(
+        points=points,
+        yaw_angles=yaw_angles,
+        yaw_rate_max=YAW_RATE_MAX,
+        poly_degree=7,
+        yaw_poly_degree=7,
+        v_max=3.0,
+        v_avg=v_avg,
+        v_start=np.zeros(3),
+        v_end=np.zeros(3),
+        verbose=False,
+    )
+
+
 def generate_interesting_traj(
     pathfinder,
     seed: int,
@@ -320,7 +384,9 @@ def generate_interesting_traj(
     max_tries_per_waypoint: int = 100,
     coord_transform=None,
     episode_duration: float | None = None,
-) -> MinSnap:
+    hovers: int = 0,
+    hover_s: float = 2.5,
+) -> MinSnap | HoverMinSnap:
     """Generate a longer trajectory by sampling distant waypoints and connecting them.
 
     Algorithm:
@@ -342,10 +408,18 @@ def generate_interesting_traj(
         coord_transform: Optional coordinate transform function to apply to path points.
                          Useful to convert from visual sim to dynamics coordinate system.
         episode_duration: Episode length in seconds; warn when the trajectory is shorter.
+        hovers: Pauses to hold between flight segments; 0 flies straight through.
+        hover_s: Seconds held at each pause.
 
     Returns:
-        MinSnap trajectory object
+        A MinSnap, or a HoverMinSnap when ``hovers`` is non-zero.
     """
+    # A hover spends episode time without covering ground, so fly proportionally less.
+    if hovers and episode_duration is not None:
+        target_length = min(
+            target_length, v_avg * (episode_duration - hovers * hover_s)
+        )
+
     full_path, _ = sample_waypoint_path(
         pathfinder,
         seed=seed,
@@ -368,7 +442,7 @@ def generate_interesting_traj(
     segment_times = np.linalg.norm(np.diff(full_path, axis=0), axis=1) / v_avg
     yaw_angles = rate_limit_yaw(yaw_angles, segment_times)
 
-    duration = float(segment_times.sum())
+    duration = float(segment_times.sum()) + hovers * hover_s
     if episode_duration is not None and duration < episode_duration:
         logger.warning(
             "Trajectory lasts %.1fs but the episode is %.1fs: MinSnap.update clips t, "
@@ -378,17 +452,21 @@ def generate_interesting_traj(
             episode_duration - duration,
         )
 
-    traj = MinSnap(
-        points=full_path,
-        yaw_angles=yaw_angles,
-        yaw_rate_max=YAW_RATE_MAX,
-        poly_degree=7,
-        yaw_poly_degree=7,
-        v_max=3.0,
-        v_avg=v_avg,
-        v_start=np.zeros(3),
-        v_end=np.zeros(3),
-        verbose=False,
-    )
+    if not hovers:
+        return build_minsnap(full_path, yaw_angles, v_avg)
 
-    return traj
+    bounds = split_indices(full_path, hovers + 1, np.random.default_rng(seed))
+    segments = [
+        build_minsnap(full_path[a : b + 1], yaw_angles[a : b + 1], v_avg)
+        for a, b in zip(bounds[:-1], bounds[1:])
+    ]
+    assert not any(segment.null for segment in segments), (
+        "a flight segment collapsed to one waypoint; MinSnap drops waypoints under 0.1m"
+    )
+    logger.info(
+        "Trajectory: %d flight segments split by %d hovers of %.1fs",
+        len(segments),
+        hovers,
+        hover_s,
+    )
+    return HoverMinSnap(segments, hover_s)
