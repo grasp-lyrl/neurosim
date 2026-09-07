@@ -272,3 +272,42 @@ def test_moving_the_model_carries_the_hash_encoder_buffers(f3_config):
     cparams = torch.tensor([[0, 0, H, H]], device="cuda")
     pred, _ = model(ff_events.cuda(), counts.cuda(), cparams)
     assert pred.is_cuda
+
+
+# ── exponential head (DA3-style log disparity) ───────────────────────────────
+def test_the_exp_head_emits_positive_finite_disparity(f3_config, events):
+    model = EventFFDepthAnythingV2(
+        f3_config, {"size": DAV2_SIZE, "encoder": "vits", "head": "exp"}
+    )
+    ff_events, counts = events
+    cparams = torch.tensor([[0, 0, H, H], [0, W - H, H, W]])
+    pred = model(ff_events, counts, cparams)[0]
+    assert torch.isfinite(pred).all(), "exp overflowed at initialisation"
+    assert (pred > 0).all(), "disparity must be positive"
+
+
+def test_the_exp_head_starts_near_one(f3_config, events):
+    """z ~ 0 at init, so the first predictions sit around exp(0) and cannot explode."""
+    model = EventFFDepthAnythingV2(
+        f3_config, {"size": DAV2_SIZE, "encoder": "vits", "head": "exp"}
+    )
+    ff_events, counts = events
+    cparams = torch.tensor([[0, 0, H, H], [0, W - H, H, W]])
+    pred = model(ff_events, counts, cparams)[0]
+    assert 0.1 < pred.median() < 10, (
+        f"median disparity {pred.median():.3g} is off scale"
+    )
+
+
+def test_both_heads_share_a_state_dict(f3_config):
+    """Only the emit conv differs, and it is index 2 either way, so weights transfer."""
+    relu = EventFFDepthAnythingV2(f3_config, {"size": DAV2_SIZE, "encoder": "vits"})
+    exp = EventFFDepthAnythingV2(
+        f3_config, {"size": DAV2_SIZE, "encoder": "vits", "head": "exp"}
+    )
+    assert set(relu.state_dict()) == set(exp.state_dict())
+
+
+def test_the_relu_head_is_still_the_default(f3_config):
+    model = EventFFDepthAnythingV2(f3_config, {"size": DAV2_SIZE, "encoder": "vits"})
+    assert model.dav2.head == "relu"

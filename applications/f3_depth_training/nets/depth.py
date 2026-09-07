@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import yaml
 from torch import Tensor
 
-from .dav2 import MODEL_CONFIGS, DepthAnythingV2
+from .dav2 import MODEL_CONFIGS, DepthAnythingV2, reset_log_emit
 from .f3 import HEAD_PREFIXES, F3, load_f3_weights
 
 logger = logging.getLogger(__name__)
@@ -85,12 +85,18 @@ class EventFFDepthAnythingV2(nn.Module):
             self.eventff.requires_grad_(False)
 
         encoder = dav2_config["encoder"]
-        self.dav2 = DepthAnythingV2(encoder=encoder, **MODEL_CONFIGS[encoder])
+        self.dav2 = DepthAnythingV2(
+            encoder=encoder,
+            head=dav2_config.get("head", "relu"),
+            **MODEL_CONFIGS[encoder],
+        )
         if "ckpt" in dav2_config:
             self.dav2.load_state_dict(
                 torch.load(dav2_config["ckpt"], map_location="cpu", weights_only=True)
             )
             logger.info("Loaded DepthAnythingV2 ckpt from %s", dav2_config["ckpt"])
+            if self.dav2.head == "exp":
+                reset_log_emit(self.dav2.depth_head)
         widen_patch_embed(self.dav2, self.eventff.feature_size)
 
     def load_eventff_weights(self, checkpoint: str | Path) -> None:
