@@ -86,7 +86,9 @@ class DomainRandomizationConfig:
 
     Attributes:
         scenes: List of ``{"name": ..., "path": ...}`` dicts; one chosen per :meth:`sample`.
-        sensors: Per-sensor-UUID dict of randomizable parameters.
+        sensors: Per-sensor-UUID dict of randomizable parameters. A key may list
+            several UUIDs comma-separated (``"event_camera_1,depth_camera_1"``) to
+            sample once and apply the same values to all of them.
         resample_every: Episodes between scene/sensor reconfigures (same meaning as
             the RL ``domain_randomization.resample_every``).
         trajectory: Optional per-param ``{range|choices}`` specs for the trajectory.
@@ -115,9 +117,21 @@ class DomainRandomizationConfig:
                 logger.warning("scenes_glob %r matched no files", pattern)
             scenes += [{"name": Path(p).stem.split(".")[0], "path": p} for p in matched]
             logger.info("scenes_glob %r -> %d scene(s)", pattern, len(matched))
+        # Two keys writing the same sensor param would silently last-writer-win
+        sensors = dict(data.get("sensors", {}))
+        owner: dict[tuple[str, str], str] = {}
+        for key, params in sensors.items():
+            for uuid in (u.strip() for u in key.split(",")):
+                for param in params:
+                    prev = owner.setdefault((uuid, param), key)
+                    if prev != key:
+                        raise ValueError(
+                            f"sensor randomization sets '{param}' for '{uuid}' from both "
+                            f"'{prev}' and '{key}'; give each param exactly one key"
+                        )
         return cls(
             scenes=scenes,
-            sensors=dict(data.get("sensors", {})),
+            sensors=sensors,
             resample_every=max(1, int(data.get("resample_every", 1))),
             trajectory=dict(data.get("trajectory", {})),
         )
@@ -142,14 +156,21 @@ class DomainRandomizationConfig:
             vb_sensors = settings.setdefault("visual_backend", {}).setdefault(
                 "sensors", {}
             )
-            for uuid, param_specs in self.sensors.items():
-                if uuid not in vb_sensors:
-                    logger.warning(
-                        "Randomization references sensor '%s' not present in base settings; skipping",
-                        uuid,
-                    )
-                    continue
-                _apply_randomization_layer(vb_sensors[uuid], param_specs, rng)
+            for key, param_specs in self.sensors.items():
+                # Sample once, then apply the *same* values to every UUID in a
+                # comma-separated key ("a,b") -- for params that must agree across
+                # sensors, e.g. a shared hfov keeping depth labels pixel-aligned
+                # with the events. A plain single-UUID key is the 1-element case.
+                resolved: dict[str, Any] = {}
+                _apply_randomization_layer(resolved, param_specs, rng)
+                for uuid in (u.strip() for u in key.split(",")):
+                    if uuid not in vb_sensors:
+                        logger.warning(
+                            "Randomization references sensor '%s' not present in base settings; skipping",
+                            uuid,
+                        )
+                        continue
+                    _apply_randomization_layer(vb_sensors[uuid], resolved, rng)
 
         return settings
 

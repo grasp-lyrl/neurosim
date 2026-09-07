@@ -6,7 +6,7 @@ lr: 5.0e-6 # Learning rate (DAv2 pseudo-label stage: encoder 5e-6, decoder 10x)
 warmup_epochs: 10 # Linear ramp up to lr; 0 disables
 cooldown_epochs: 30 # Cosine anneal to 0 over the final epochs; 0 disables
 clip_grad: 0 # Gradient clipping (0 = disabled)
-epochs: 250 # Number of epochs
+epochs: 300 # Number of epochs
 log_interval: 10 # Save checkpoint interval in epochs
 val_interval: 10 # Validation interval in epochs
 
@@ -42,7 +42,7 @@ eventff:
 # `event_time_window_us` are training-only siblings.
 data:
   trainer_gpu: 1 # trainer GPU (producers run on online_data.gpu_ids)
-  min_events_per_sample: 10000 # drop sparser samples before they reach a batch
+  min_events_per_sample: 500 # drop sparser samples before they reach a batch
 
   online_data:
     base_settings: configs/online_data_hm3d_2gpu.yaml # sensors, dynamics, controller, trajectory
@@ -54,11 +54,16 @@ data:
       anchor: [depth_camera_1] # depth tick defines the sample boundary
       stream: [event_camera_1] # events accumulate within each depth window
     randomization:
-      resample_every: 20 # reload scene+sensors every N episodes; trajectory every episode
+      resample_every: 1 # reload scene+sensors every N episodes; trajectory every episode
       scenes_glob: data/hm3d/*/*.basis.glb
       sensors:
         event_camera_1:
-          contrast_threshold_pos: {range: [0.1, 0.3]}
-          contrast_threshold_neg: {range: [0.1, 0.3]}
+          contrast_threshold_pos: {range: [0.1, 0.4]}
+          contrast_threshold_neg: {range: [0.1, 0.4]}
+        # One shared draw:  both frusta must match.
+        "event_camera_1,depth_camera_1":
+          hfov: {range: [40, 90]}
       trajectory:
-        v_avg: {range: [0.5, 1.5]}
+        v_avg: {range: [0.2, 1.5]}
+        hovers: {choices: [0, 1, 2, 3]} # a count, so `choices`; `range` samples a float
+        hover_s: {range: [0.5, 1.5]}
