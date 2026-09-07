@@ -30,11 +30,14 @@ from typing import Callable
 from dataclasses import dataclass, field
 
 from neurosim.online_data.bus import SampleBus
-from neurosim.online_data.batcher import ShuffledBatcher
+from neurosim.online_data.batcher import LaneBatcher, ShuffledBatcher
 from neurosim.online_data.sample import TimeAlignedSample
 from neurosim.online_data.schema import SampleSchema
 
 logger = logging.getLogger(__name__)
+
+
+BATCHERS = {"shuffled": ShuffledBatcher, "lane": LaneBatcher}
 
 
 @dataclass(slots=True)
@@ -196,6 +199,9 @@ class OnlineDataLoader:
             every episode) is set in ``randomization`` (``resample_every`` /
             ``trajectory``) and owned by ``RandomizedSimulator.randomize``.
         bus_maxsize: Bus capacity (backpressure bound).
+        batcher: ``shuffled`` mixes producers into every batch (feed-forward training);
+            ``lane`` pins row ``i`` to one producer
+            equal the producer count.
         prefetch: Batches kept ready by the background thread. ``0`` batches
             inline on the consumer thread instead (deterministic).
         sample_filter: Predicate applied to each sample before batching; a
@@ -222,6 +228,7 @@ class OnlineDataLoader:
         ring_caps: dict | None = None,
         bus_maxsize: int = 256,
         prefetch: int = 2,
+        batcher: str = "shuffled",
         sample_filter: Callable[[TimeAlignedSample], bool] | None = None,
         mp_context: str = "spawn",
         get_timeout: float = 1.0,
@@ -253,7 +260,18 @@ class OnlineDataLoader:
         else:
             self._specs = []
 
-        self.batcher = ShuffledBatcher(schema, batch_size)
+        if batcher == "lane":
+            if batch_size != len(self._specs):
+                raise ValueError(
+                    f"batcher='lane' pins one batch row to each producer, so batch_size "
+                    f"({batch_size}) must equal num_producers ({len(self._specs)})"
+                )
+            if sample_filter is not None:
+                raise ValueError(
+                    "batcher='lane' cannot use a sample_filter: dropping a sample leaves "
+                    "a gap in that lane's step sequence with no reset flag to mark it"
+                )
+        self.batcher = BATCHERS[batcher](schema, batch_size)
 
         self._ctx = mp.get_context(mp_context)
         self.bus = SampleBus(maxsize=bus_maxsize, ctx=self._ctx)
@@ -284,6 +302,7 @@ class OnlineDataLoader:
               gpu_ids: [0]
               base_seed: 0
               bus_maxsize: 256            # optional
+              batcher: shuffled           # optional; 'lane' for recurrent training
               ring_caps: {event_camera_1: 5000000}   # optional
               roles:
                 anchor: [depth_camera_1]
@@ -375,6 +394,7 @@ class OnlineDataLoader:
             base_seed=int(od.get("base_seed", 0)),
             bus_maxsize=int(od.get("bus_maxsize", 256)),
             prefetch=int(od.get("prefetch", 2)),
+            batcher=od.get("batcher", "shuffled"),
             ring_caps=od.get("ring_caps"),
             log_dir=log_dir,
             start=start,

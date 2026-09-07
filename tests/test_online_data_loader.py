@@ -424,3 +424,50 @@ def test_prefetch_close_joins_thread():
     assert not thread.is_alive()
     assert loader._prefetch_thread is None
     loader.close()  # idempotent
+
+
+# --------------------------------------------------------------------------- #
+# lane batcher selection
+# --------------------------------------------------------------------------- #
+def _specs(n: int):
+    """`n` producer specs, enough for the loader to count producers."""
+    from neurosim.online_data.loader import ProducerSpec
+
+    return [ProducerSpec(base_settings={}, spec_id=i, seed=i) for i in range(n)]
+
+
+def test_lane_batcher_selected_by_name():
+    from neurosim.online_data.batcher import LaneBatcher
+
+    loader = OnlineDataLoader(
+        _schema(), batch_size=3, producers=_specs(3), batcher="lane", start=False
+    )
+
+    assert isinstance(loader.batcher, LaneBatcher)
+
+
+def test_lane_batcher_requires_one_row_per_producer():
+    with pytest.raises(ValueError, match="must equal num_producers"):
+        OnlineDataLoader(
+            _schema(), batch_size=2, producers=_specs(3), batcher="lane", start=False
+        )
+
+
+def test_lane_batcher_rejects_a_sample_filter():
+    with pytest.raises(ValueError, match="gap in that lane"):
+        OnlineDataLoader(
+            _schema(),
+            batch_size=3,
+            producers=_specs(3),
+            batcher="lane",
+            sample_filter=lambda _: True,
+            start=False,
+        )
+
+
+def test_shuffled_batcher_is_the_default():
+    from neurosim.online_data.batcher import ShuffledBatcher
+
+    loader = OnlineDataLoader(_schema(), batch_size=2, producers=_specs(3), start=False)
+
+    assert isinstance(loader.batcher, ShuffledBatcher)

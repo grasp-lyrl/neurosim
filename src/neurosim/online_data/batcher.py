@@ -14,10 +14,13 @@ delivered sensor at once, so there is no per-sensor "ready" bookkeeping.
 
 ``ShuffledBatcher`` builds batches in arrival order — diversity comes from
 producers interleaving on the shared bus, not from a shuffle buffer.
+``LaneBatcher`` instead pins row ``i`` to one producer so a row continues the same
+episode from batch to batch, which is what recurrent training needs.
 """
 
 import logging
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -134,18 +137,6 @@ class Batcher(ABC):
         self.schema = schema
         self.batch_size = batch_size
 
-    @abstractmethod
-    def add(self, sample: TimeAlignedSample) -> Batch | None:
-        """Add one sample; return a finished :class:`Batch` or ``None``."""
-        raise NotImplementedError
-
-
-class ShuffledBatcher(Batcher):
-    """Arrival-order feed-forward batcher (v1)."""
-
-    def __init__(self, schema: SampleSchema, batch_size: int):
-        super().__init__(schema, batch_size)
-
         self._frame_bufs: dict[str, FrameBuffer] = {}
         self._event_uuids: list[str] = []
         for uuid in schema.deliver_uuids():
@@ -172,6 +163,11 @@ class ShuffledBatcher(Batcher):
 
         self._reset_accumulators()
 
+    @abstractmethod
+    def add(self, sample: TimeAlignedSample) -> Batch | None:
+        """Add one sample; return a finished :class:`Batch` or ``None``."""
+        raise NotImplementedError
+
     def _reset_accumulators(self) -> None:
         self._idx = 0
         self._event_rows: dict[str, list[np.ndarray]] = {
@@ -179,7 +175,8 @@ class ShuffledBatcher(Batcher):
         }
         self._metas: list[SampleMeta] = []
 
-    def add(self, sample: TimeAlignedSample) -> Batch | None:
+    def _pack(self, sample: TimeAlignedSample) -> Batch | None:
+        """Fill the next row; return the batch once it is full."""
         i = self._idx
         for uuid, buf in self._frame_bufs.items():
             buf.set(i, sample.sensors[uuid])
@@ -210,3 +207,38 @@ class ShuffledBatcher(Batcher):
         meta = BatchMeta.from_metas(self._metas)
         self._reset_accumulators()
         return Batch(data, meta)
+
+
+class ShuffledBatcher(Batcher):
+    """Arrival-order feed-forward batcher."""
+
+    def add(self, sample: TimeAlignedSample) -> Batch | None:
+        return self._pack(sample)
+
+
+class LaneBatcher(Batcher):
+    """One row per producer, each row continuing that producer's own step order.
+
+    Recurrent training needs row ``i`` of consecutive batches to be consecutive steps of
+    one episode, so the trainer can carry that lane's memory across them. A producer emits
+    its own samples in order, so holding one queue per producer and releasing a row from
+    each is enough; no episode-affinity router is needed. Rows are ordered by worker id,
+    which is stable for the life of the loader.
+
+    Lanes are unbounded, but the bus is not: a lagging producer stalls every batch, the
+    bus fills, and its peers block. Total samples in flight stay at ``bus_maxsize``.
+    """
+
+    def __init__(self, schema: SampleSchema, batch_size: int):
+        super().__init__(schema, batch_size)
+        self._lanes: dict[int, deque] = {}
+
+    def add(self, sample: TimeAlignedSample) -> Batch | None:
+        self._lanes.setdefault(sample.meta.worker_id, deque()).append(sample)
+        if len(self._lanes) < self.batch_size or not all(self._lanes.values()):
+            return None
+
+        batch = None
+        for _, lane in sorted(self._lanes.items()):
+            batch = self._pack(lane.popleft())
+        return batch
