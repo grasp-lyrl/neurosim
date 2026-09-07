@@ -22,6 +22,7 @@ import datetime
 import numpy as np
 import torch.nn.functional as F
 from tqdm import tqdm
+from pathlib import Path
 from typing import Callable
 from matplotlib import colormaps
 
@@ -71,17 +72,26 @@ def log_wandb(args, metrics: dict):
         wandb.log(metrics)
 
 
+def uncompiled_state_dict(model) -> dict:
+    """Weights without ``torch.compile``'s ``_orig_mod.`` prefix."""
+    return {k.replace("_orig_mod.", ""): v for k, v in model.state_dict().items()}
+
+
 def save_checkpoint(path, epoch, results, model, optimizer, scheduler):
+    """Write the resumable checkpoint."""
+    state = uncompiled_state_dict(model)
     torch.save(
         {
             "epoch": epoch,
             "results": results,
-            "model": model.state_dict(),
+            "model": state,
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
         },
         path,
     )
+    path = Path(path)
+    torch.save(state, path.with_stem(f"{path.stem}_weights"))
 
 
 def ev_to_frames_with_polarity(events, counts, w, h):
@@ -679,7 +689,10 @@ def main():
                 scheduler,
             )
             if (epoch + 1) % args.log_interval == 0:
-                torch.save(model.state_dict(), f"{models_path}/checkpoint_{epoch}.pth")
+                torch.save(
+                    uncompiled_state_dict(model),
+                    f"{models_path}/checkpoint_{epoch}.pth",
+                )
     except KeyboardInterrupt:
         logger.info("Training interrupted by user")
     finally:

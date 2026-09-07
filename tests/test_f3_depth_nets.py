@@ -12,6 +12,7 @@ from applications.f3_depth_training.nets import (
     batch_cropper,
     get_resize_shapes,
     load_depth_weights,
+    load_f3_weights,
 )
 from applications.f3_depth_training.utils import ScaleAndShiftInvariantLoss
 
@@ -237,3 +238,22 @@ def test_the_application_no_longer_depends_on_f3():
         if imports.search(p.read_text()) or "deps/fast-feature-fields" in p.read_text()
     ]
     assert not offenders, f"still reaching into f3: {offenders}"
+
+
+def test_load_f3_weights_takes_a_bare_state_dict_with_the_head(model, tmp_path):
+    """f3's backbone weights are a plain state dict that still carries `pred.*`."""
+    state = dict(model.eventff.state_dict())
+    state["pred.weight"] = torch.zeros(1)
+    path = tmp_path / "f3.pth"
+    torch.save(state, path)
+    load_f3_weights(model.eventff, path)
+
+
+def test_load_f3_weights_rejects_compiled_keys(model, tmp_path):
+    """A checkpoint saved from a compiled module prefixes every key, and must not load."""
+    path = tmp_path / "f3_compiled.pth"
+    torch.save(
+        {f"_orig_mod.{k}": v for k, v in model.eventff.state_dict().items()}, path
+    )
+    with pytest.raises(AssertionError, match="no weights for"):
+        load_f3_weights(model.eventff, path)

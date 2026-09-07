@@ -199,11 +199,10 @@ class F3(nn.Module):
         return self.encode(self.feature_field(events, counts))
 
 
-def load_f3_weights(model: F3, checkpoint: str | Path) -> dict:
-    """Load released F3 weights, dropping the event-prediction head. Returns its metadata."""
-    ckpt = torch.load(checkpoint, weights_only=True, map_location="cpu")
-    missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
+def load_f3_weights(model: F3, checkpoint: str | Path) -> None:
+    """Load f3 weights, dropping the event-prediction head."""
+    state = torch.load(checkpoint, weights_only=True, map_location="cpu")
+    missing, unexpected = model.load_state_dict(state, strict=False)
     assert not missing, f"checkpoint has no weights for {missing}"
     stray = [k for k in unexpected if not k.startswith(HEAD_PREFIXES)]
     assert not stray, f"checkpoint keys match no module and are not head keys: {stray}"
-    return {k: ckpt[k] for k in ("epoch", "loss", "acc") if k in ckpt}

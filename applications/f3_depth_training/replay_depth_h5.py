@@ -57,8 +57,8 @@ def read_window(grp, ms_idx, t0_ms: int, window_ms: int, crop):
 def event_frame(events, w: int, h: int):
     """Polarity frame, positive red and negative blue, in BGR."""
     frame = np.zeros((h, w, 3), np.uint8)
-    x = (events[:, 0] * w).astype(np.int32).clip(0, w - 1)
-    y = (events[:, 1] * h).astype(np.int32).clip(0, h - 1)
+    x = np.rint(events[:, 0] * w).astype(np.int32).clip(0, w - 1)
+    y = np.rint(events[:, 1] * h).astype(np.int32).clip(0, h - 1)
     pos = events[:, 3] > 0
     frame[y[pos], x[pos], 2] = 255
     frame[y[~pos], x[~pos], 0] = 255

@@ -94,8 +94,8 @@ class EventFFDepthAnythingV2(nn.Module):
         widen_patch_embed(self.dav2, self.eventff.feature_size)
 
     def load_eventff_weights(self, checkpoint: str | Path) -> None:
-        meta = load_f3_weights(self.eventff, checkpoint)
-        logger.info("Loaded F3 ckpt from %s. %s", checkpoint, meta)
+        load_f3_weights(self.eventff, checkpoint)
+        logger.info("Loaded F3 ckpt from %s", checkpoint)
 
     def save_configs(self, path: str) -> None:
         with open(f"{path}/depth_config.yml", "w") as f:

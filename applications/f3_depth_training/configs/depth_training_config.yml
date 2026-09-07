@@ -34,7 +34,7 @@ dav2_config:
 # EventFF (F3) config - the feature backbone
 eventff:
   config: applications/f3_depth_training/configs/f3_640x480x20_small.yml
-  ckpt: applications/f3_depth_training/models/640x480x20_patchff_ds1_small_v1.pth # Path to EventFF checkpoint
+  ckpt: applications/f3_depth_training/models/640x480x20_patchff_ds1_small_v1_uncompiled.pth # Path to EventFF weights
 
 # Online data pipeline settings.
 # `online_data` is the same block OnlineDataLoader.from_config(...) reads everywhere
