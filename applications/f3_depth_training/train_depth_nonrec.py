@@ -490,6 +490,7 @@ def main():
     )
     model.load_eventff_weights(args.eventff["ckpt"])
     model.save_configs(models_path)
+    model = model.to(args.device)
     if args.init is not None:
         logger.info(f"Loading initial weights from {args.init}")
         load_depth_weights(model, torch.load(args.init)["model"])

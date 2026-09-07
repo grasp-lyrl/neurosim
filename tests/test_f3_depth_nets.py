@@ -257,3 +257,18 @@ def test_load_f3_weights_rejects_compiled_keys(model, tmp_path):
     )
     with pytest.raises(AssertionError, match="no weights for"):
         load_f3_weights(model.eventff, path)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_moving_the_model_carries_the_hash_encoder_buffers(f3_config):
+    """`nets/` pins no device, so `.to()` has to carry `resolutions` and `is_ceil` too."""
+    model = EventFFDepthAnythingV2(
+        f3_config, {"size": DAV2_SIZE, "encoder": "vits"}
+    ).cuda()
+    encoder = model.eventff.multi_hash_encoder
+    assert encoder.resolutions.is_cuda and encoder.is_ceil.is_cuda
+
+    ff_events, counts = make_events([40])
+    cparams = torch.tensor([[0, 0, H, H]], device="cuda")
+    pred, _ = model(ff_events.cuda(), counts.cuda(), cparams)
+    assert pred.is_cuda
