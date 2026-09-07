@@ -14,6 +14,10 @@ import cv2
 import h5py
 import numpy as np
 import torch
+from matplotlib import colormaps
+
+from .nets import EventFFDepthAnythingV2, load_depth_weights
+from .utils import get_disparity_image
 
 # dataset -> (event group, ms->index dataset, sensor width, height)
 LAYOUTS = {
@@ -24,16 +28,12 @@ LAYOUTS = {
 
 def load_model(run: Path, ckpt: str, device):
     """Rebuild the model from its saved config and load weights."""
-    from f3.tasks.depth.utils import EventFFDepthAnythingV2
-
     model = EventFFDepthAnythingV2.init_from_config(f"{run}/models/depth_config.yml")
     # best/last also carry optimizer+scheduler (3x the model); mmap skips what we drop.
     state = torch.load(
         f"{run}/models/{ckpt}", map_location="cpu", weights_only=False, mmap=True
     )
-    state = state.get("model", state)
-    # Training compiles eventff, which prefixes its keys.
-    model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in state.items()})
+    load_depth_weights(model, state.get("model", state))
     return model.to(device).eval()
 
 
@@ -86,9 +86,6 @@ def main():
     args = parse_args()
     device = torch.device(f"cuda:{args.gpu}")
     torch.cuda.set_device(device)
-
-    from f3.tasks.depth.utils import get_disparity_image
-    from matplotlib import colormaps
 
     model = load_model(Path(args.run), args.ckpt, device)
 

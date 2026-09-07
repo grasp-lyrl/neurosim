@@ -20,14 +20,49 @@ import logging
 import argparse
 import datetime
 import numpy as np
+import torch.nn.functional as F
 from tqdm import tqdm
 from typing import Callable
 from matplotlib import colormaps
 
 from neurosim.online_data import OnlineDataLoader, TimeAlignedSample
 
-# Disparity metrics from f3's eval_disparity; the loss name is appended per run.
+from .nets import (
+    EventFFDepthAnythingV2,
+    batch_cropper,
+    get_resize_shapes,
+    load_depth_weights,
+)
+from .utils import (
+    ScaleAndShiftInvariantLoss,
+    eval_disparity,
+    get_disparity_image,
+    get_random_crop_params,
+    set_best_results,
+)
+
+# Disparity metrics from eval_disparity; the loss name is appended per run.
 METRICS = ("1pe", "2pe", "3pe", "rmse", "rmse_log", "log10", "silog")
+
+
+def setup_torch() -> None:
+    """f3's training defaults: fixed seed, tf32 matmuls, dynamo tracing dynamic shapes."""
+    torch.manual_seed(403)
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+    torch._dynamo.config.capture_dynamic_output_shape_ops = True
+    torch._dynamo.config.capture_scalar_outputs = True
+    torch._dynamo.config.compiled_autograd = True
+
+
+def log_dict(logger, values: dict) -> None:
+    """One log line of ``k: v``, tensors unwrapped."""
+    logger.info(
+        ", ".join(
+            f"{k}: {v.item():.4f}" if isinstance(v, torch.Tensor) else f"{k}: {v:.4f}"
+            for k, v in values.items()
+        )
+    )
 
 
 def log_wandb(args, metrics: dict):
@@ -51,21 +86,14 @@ def save_checkpoint(path, epoch, results, model, optimizer, scheduler):
 
 def ev_to_frames_with_polarity(events, counts, w, h):
     """Convert events to RGB frames with polarity coloring (pos=red, neg=blue)."""
-    from f3.utils import unnormalize_events
-
-    if events.max() <= 1.0:
-        events = unnormalize_events(events, (w, h, 1, 1))
+    scale = torch.tensor([w, h, 1, 1], device=events.device)
+    events = (events * scale).round().to(torch.int32)
 
     B = counts.shape[0]
-
-    if isinstance(events, torch.Tensor):
-        event_frames = torch.zeros(B, h, w, 3, dtype=torch.uint8).to(events.device)
-        c = torch.cumsum(torch.cat((torch.zeros(1).to(counts.device), counts)), 0).to(
-            torch.int32
-        )
-    elif isinstance(events, np.ndarray):
-        event_frames = np.zeros((B, h, w, 3), dtype=np.uint8)
-        c = np.cumsum(np.concatenate((np.zeros(1), counts))).astype(np.int32)
+    event_frames = torch.zeros(B, h, w, 3, dtype=torch.uint8, device=events.device)
+    c = torch.cumsum(torch.cat((torch.zeros(1).to(counts.device), counts)), 0).to(
+        torch.int32
+    )
 
     for i in range(B):
         x_coords = events[c[i] : c[i + 1], 0]
@@ -226,10 +254,7 @@ def predict_full_frame(model, ff_events, event_counts, height, width):
     short edge to the DAv2 size and keeps aspect. ``infer_image`` handles one sample
     at a time, so its steps are inlined here to keep validation batched.
     """
-    import torch.nn.functional as F
-    from f3.tasks.depth.utils.utils import get_resize_shapes
-
-    field = model.eventff(ff_events, event_counts)[1].permute(0, 3, 2, 1)  # (B,C,H,W)
+    field = model.field(ff_events, event_counts)  # (B, C, H, W)
     fh, fw = get_resize_shapes(height, width, model.size, 14)
     field = F.interpolate(field, (fh, fw), mode="bilinear", align_corners=False)
     pred = model.dav2(field).unsqueeze(1)  # (B, 1, fh, fw)
@@ -251,8 +276,6 @@ def train_epoch(
     iters_to_accumulate=1,
 ):
     """Train for one epoch (consumes ``max_batches`` batches from the loader)."""
-    from f3.utils import get_random_crop_params, batch_cropper
-
     model.train()
     train_loss = 0.0
     iter_loss = 0.0
@@ -323,9 +346,6 @@ def validate(
     args, logger, model, dataloader, loss_fn, epoch, max_batches=50, save_preds=False
 ):
     """Validate the model on ``max_batches`` batches, at inference framing."""
-    from f3.utils import log_dict
-    from f3.tasks.depth.utils import eval_disparity, get_disparity_image
-
     model.eval()
     cmap = colormaps["magma"]
 
@@ -438,14 +458,7 @@ def main():
     args.event_sensor = roles["stream"][0]
     args.color_sensor = data_cfg.get("color_sensor")
 
-    from f3.utils import num_params, setup_torch, log_dict
-    from f3.tasks.depth.utils import (
-        EventFFDepthAnythingV2,
-        ScaleAndShiftInvariantLoss,
-        set_best_results,
-    )
-
-    setup_torch(cudnn_benchmark=True)
+    setup_torch()
 
     # Trainer GPU (producers run on their own GPUs in separate processes).
     trainer_gpu = int(data_cfg.get("trainer_gpu", 0))
@@ -465,17 +478,14 @@ def main():
     model = EventFFDepthAnythingV2(
         args.eventff["config"], args.dav2_config, args.retrain_f3
     )
-    model_uncompiled = model
-    model.eventff = torch.compile(model.eventff, fullgraph=False, dynamic=True)
-    if args.compile:
-        model.dav2 = torch.compile(model.dav2)
-    model.load_weights(args.eventff["ckpt"])
+    model.load_eventff_weights(args.eventff["ckpt"])
     model.save_configs(models_path)
     if args.init is not None:
         logger.info(f"Loading initial weights from {args.init}")
-        model.load_state_dict(torch.load(args.init)["model"])
+        load_depth_weights(model, torch.load(args.init)["model"])
         torch.cuda.empty_cache()
-    logger.info(f"Total trainable parameters: {num_params(model)}")
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Total trainable parameters: {trainable}")
 
     # ── Optimizer / scheduler ─────────────────────────────────────────────────
     # DAv2 encoder at lr, F3 backbone at half, DAv2 decoder head at 10x. Grouped
@@ -553,7 +563,7 @@ def main():
     if resume:
         logger.info(f"Resuming from {models_path}/last.pth")
         last_dict = torch.load(f"{models_path}/last.pth")
-        model.load_state_dict(last_dict["model"])
+        load_depth_weights(model, last_dict["model"])
         optimizer.load_state_dict(last_dict["optimizer"])
         scheduler.load_state_dict(last_dict["scheduler"])
         start = last_dict["epoch"] + 1
@@ -565,6 +575,12 @@ def main():
         except FileNotFoundError:
             logger.info("No best model found; using default best results")
         torch.cuda.empty_cache()
+
+    # Compiled last: OptimizedModule prefixes its state_dict keys, so every load above
+    # runs on the plain modules and only the saves carry the prefix.
+    model.eventff = torch.compile(model.eventff, fullgraph=False, dynamic=True)
+    if args.compile:
+        model.dav2 = torch.compile(model.dav2)
 
     # ── Data loader (built after the model so the event window matches frame T) ─
     # Events ship raw from the loader; process_batch normalizes to the model's
@@ -663,10 +679,7 @@ def main():
                 scheduler,
             )
             if (epoch + 1) % args.log_interval == 0:
-                torch.save(
-                    model_uncompiled.state_dict(),
-                    f"{models_path}/checkpoint_{epoch}.pth",
-                )
+                torch.save(model.state_dict(), f"{models_path}/checkpoint_{epoch}.pth")
     except KeyboardInterrupt:
         logger.info("Training interrupted by user")
     finally:

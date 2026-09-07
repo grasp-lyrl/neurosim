@@ -33,7 +33,7 @@ dav2_config:
 
 # EventFF (F3) config - the feature backbone
 eventff:
-  config: deps/fast-feature-fields/confs/ff/modeloptions/640x480x20_patchff_ds1_small_v1.yml
+  config: applications/f3_depth_training/configs/f3_640x480x20_small.yml
   ckpt: applications/f3_depth_training/models/640x480x20_patchff_ds1_small_v1.pth # Path to EventFF checkpoint
 
 # Online data pipeline settings.

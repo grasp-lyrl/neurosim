@@ -3,22 +3,9 @@
 Train F3 + DepthAnythingV2 on events+depth streamed live from neurosim. Simulators
 run in their own processes; the model trains on one GPU.
 
-## 0. Set up f3
-
-```bash
-git clone git@github.com:grasp-lyrl/fast-feature-fields.git deps/fast-feature-fields
-```
-
-Three edits to the clone are required:
-
-1. Comment out `dependencies` and `requires-python` in its `pyproject.toml`.
-2. Delete the `@torch.compile` on `batch_cropper` in `src/f3/utils/utils_gen.py` — it
-   slices by tensor values, which raises `PendingUnbackedSymbolNotFound` on torch 2.11.
-3. In `src/f3/utils/utils_op.py`, make `VoxelBlurLoss.kernel` a non-persistent buffer
-   instead of `.to("cuda")`, and resolve its device where it is used (`.to(tensor.device)`
-   in `apply_gaussian_blur_1d` and `blurtime`). The `LOSSES` dict instantiates every loss
-   at import, so the original pins a kernel to cuda:0 just for importing f3 — which fails
-   when that GPU is full and ignores whichever device you meant to use.
+The model lives in [nets/](nets/): F3 and DepthAnythingV2 are in-house, so there is no
+`f3` package to install. Two weight files go under `models/` (gitignored): the released F3
+backbone and the DAv2 ViT-B checkpoint, both named in the config below.
 
 ## 1. Write the config
 
@@ -57,7 +44,7 @@ Full DR grammar in [online_data/README.md](../../src/neurosim/online_data/README
 
 ```bash
 nohup conda run --no-capture-output -n neurosim python -u \
-    applications/f3_depth_training/train_depth_nonrec.py \
+    -m applications.f3_depth_training.train_depth_nonrec \
     --conf applications/f3_depth_training/configs/depth_training_config.yml \
     --name my_run --batches-per-epoch 2048 --retrain-f3 --amp --wandb \
     > /tmp/my_run.log 2>&1 &
@@ -70,6 +57,17 @@ Flags: `--retrain-f3` (unfreeze the backbone), `--amp` (bf16; ~1.4x on the model
 SSI loss stays fp32), `--init path.pth` (warm-start), `--wandb`. `--compile` (the DAv2
 decoder) is off by default and best left there; `eventff` is compiled regardless.
 
+Run from the repo root: the entry points import their siblings (`nets/`, `utils/`), so they
+go through `-m`, not a file path.
+
 **Outputs:** `outputs/monoculardepth/<name>/` — `models/{last,best}.pth`, `training.log`,
 `config.yaml`, visualizations, per-producer logs under `logs/`. Resume is automatic if
 `last.pth` exists.
+
+## 3. Replay a checkpoint over recorded events
+
+```bash
+python -m applications.f3_depth_training.replay_depth_h5 \
+    --run outputs/monoculardepth/my_run --h5 data/falcon_indoor_flight_3.h5 \
+    --video /tmp/replay.mp4
+```
