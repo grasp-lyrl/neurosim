@@ -14,7 +14,11 @@ from applications.f3_depth_training.nets import (
     load_depth_weights,
     load_f3_weights,
 )
-from applications.f3_depth_training.utils import ScaleAndShiftInvariantLoss
+from applications.f3_depth_training.utils import (
+    ScaleAndShiftInvariantLoss,
+    align_least_squares,
+    eval_relative_depth,
+)
 
 APP = Path(__file__).resolve().parents[1] / "applications" / "f3_depth_training"
 
@@ -311,3 +315,72 @@ def test_both_heads_share_a_state_dict(f3_config):
 def test_the_relu_head_is_still_the_default(f3_config):
     model = EventFFDepthAnythingV2(f3_config, {"size": DAV2_SIZE, "encoder": "vits"})
     assert model.dav2.head == "relu"
+
+
+@pytest.fixture
+def disparity():
+    """Two images of disparity in [0.1, 1.55], i.e. depth 0.65 m to 10 m, all valid."""
+    torch.manual_seed(0)
+    return torch.rand(2, 8, 8) * 1.45 + 0.1, torch.ones(2, 8, 8, dtype=torch.bool)
+
+
+def test_alignment_recovers_a_known_affine_map(disparity):
+    target, mask = disparity
+    aligned = align_least_squares((target - 0.3) / 7.0, target, mask)
+    assert torch.allclose(aligned, target, atol=1e-5), "the fit did not invert the map"
+
+
+def test_alignment_fits_each_image_separately(disparity):
+    target, mask = disparity
+    pred = torch.stack([target[0] * 3 + 1.0, target[1] * 1e5 - 2e5])
+    aligned = align_least_squares(pred, target, mask)
+    assert torch.allclose(aligned, target, atol=1e-5), (
+        "one gauge was fitted for the batch"
+    )
+
+
+def test_a_constant_prediction_gets_the_best_constant_fit(disparity):
+    target, mask = disparity
+    aligned = align_least_squares(torch.full_like(target, 0.7), target, mask)
+    expected = target.mean((1, 2), keepdim=True).expand_as(target)
+    assert torch.allclose(aligned, expected, atol=1e-5)
+
+
+def test_relative_depth_metrics_ignore_the_gauge(disparity):
+    """The point of the protocol: an affine map of the prediction changes nothing."""
+    target, mask = disparity
+    pred = torch.rand_like(target) * 1.45 + 0.1
+    plain = eval_relative_depth(pred, target, mask)
+    walked = eval_relative_depth(pred * 1e14 + 5.0, target, mask)
+    for k, value in plain.items():
+        assert walked[k] == pytest.approx(value, rel=1e-4), f"{k} moved with the gauge"
+
+
+def test_a_perfect_prediction_scores_perfectly(disparity):
+    target, mask = disparity
+    results = eval_relative_depth(target, target, mask)
+    assert results["abs_rel"] == pytest.approx(0.0, abs=1e-6)
+    assert results["d1"] == pytest.approx(100.0)
+    assert results["silog"] == pytest.approx(0.0, abs=1e-3)
+
+
+def test_the_trainer_totals_every_metric_returned(disparity):
+    """METRICS keys the running totals, so a name it misses raises mid-validation."""
+    listed = re.search(
+        r"^METRICS = \((.*?)\)", (APP / "train_depth_nonrec.py").read_text(), re.M
+    )
+    target, mask = disparity
+    assert set(re.findall(r'"(\w+)"', listed.group(1))) == set(
+        eval_relative_depth(target, target, mask)
+    )
+
+
+def test_masked_pixels_do_not_reach_the_metrics(disparity):
+    target, mask = disparity
+    mask = mask.clone()
+    mask[:, :, 4:] = False
+    corrupted = target.clone()
+    corrupted[:, :, 4:] = 1e6
+    assert eval_relative_depth(corrupted, target, mask) == pytest.approx(
+        eval_relative_depth(target, target, mask)
+    )

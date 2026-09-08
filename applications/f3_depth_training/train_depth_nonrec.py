@@ -35,15 +35,16 @@ from .nets import (
     load_depth_weights,
 )
 from .utils import (
+    HIGHER_IS_BETTER,
     ScaleAndShiftInvariantLoss,
-    eval_disparity,
+    eval_relative_depth,
     get_disparity_image,
     get_random_crop_params,
     set_best_results,
 )
 
-# Disparity metrics from eval_disparity; the loss name is appended per run.
-METRICS = ("1pe", "2pe", "3pe", "rmse", "rmse_log", "log10", "silog")
+# Metrics from eval_relative_depth; the loss name is appended per run.
+METRICS = ("abs_rel", "sq_rel", "d1", "d2", "d3", "rmse", "rmse_log", "log10", "silog")
 
 
 def setup_torch() -> None:
@@ -379,8 +380,8 @@ def validate(
             continue
         kept_mask = valid_mask[keep]
 
-        cur_results = eval_disparity(
-            disparity_pred[keep][kept_mask], disparity[keep][kept_mask]
+        cur_results = eval_relative_depth(
+            disparity_pred[keep], disparity[keep], kept_mask, args.min_disparity
         )
         for k in cur_results:
             results[k] += cur_results[k]
@@ -568,7 +569,9 @@ def main():
         "ScaleAndShiftInvariantLoss for monocular relative depth"
     )
     loss_fn = ScaleAndShiftInvariantLoss(alpha=args.alpha, scales=args.scales)
-    best_results = {k: 100.0 for k in (*METRICS, loss_fn.name)}
+    best_results = {
+        k: 0.0 if k in HIGHER_IS_BETTER else 100.0 for k in (*METRICS, loss_fn.name)
+    }
     start = 0
 
     if resume:
@@ -580,9 +583,8 @@ def main():
         start = last_dict["epoch"] + 1
         del last_dict
         try:
-            best_results = torch.load(f"{models_path}/best.pth").get(
-                "results", best_results
-            )
+            saved = torch.load(f"{models_path}/best.pth").get("results", {})
+            best_results.update({k: v for k, v in saved.items() if k in best_results})
         except FileNotFoundError:
             logger.info("No best model found; using default best results")
         torch.cuda.empty_cache()
