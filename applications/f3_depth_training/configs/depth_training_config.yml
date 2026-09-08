@@ -47,7 +47,7 @@ data:
 
   online_data:
     base_settings: configs/online_data_hm3d_2gpu.yaml # sensors, dynamics, controller, trajectory
-    num_producers: 7 # 7 simulators ...
+    num_producers: 8 # 8 simulators ...
     gpu_ids: [0] # ... all on gpu0
     base_seed: 0
     bus_maxsize: 2048 # backpressure bound
