@@ -59,6 +59,12 @@ class HabitatWrapper(VisualBackendProtocol):
         # Initialize edge detectors
         self._edge_detectors: dict[str, EdgeDetector] = {}
 
+        # Habitat caches every scene it loads for the life of a Simulator and offers no
+        # way to evict one. Rebuilding the Simulator is the only way to give that back; this
+        # bounds how many scenes one instance is allowed to accumulate first.
+        self._scene_cache_limit = int(settings.get("scene_cache_limit", 4))
+        self._cached_scenes: set[str] = {settings.get("scene", "")}
+
         # Create Habitat configuration and fill in event simulators if any
         self._cfg = self._make_cfg()
 
@@ -793,7 +799,7 @@ class HabitatWrapper(VisualBackendProtocol):
             torch.cuda.empty_cache()
 
         self._cfg = self._make_cfg()
-        self._sim.reconfigure(self._cfg)
+        self._reconfigure_or_rebuild(self.settings.get("scene", ""))
 
         self._scene_bounds = self._sim.pathfinder.get_bounds()
         self._set_seed(self.settings.get("seed", 324))
@@ -819,6 +825,31 @@ class HabitatWrapper(VisualBackendProtocol):
             "Habitat simulator reconfigured with scene: %s",
             self.settings["scene"],
         )
+
+    def _reconfigure_or_rebuild(self, scene: str) -> None:
+        """Swap the scene, rebuilding the Simulator once it has cached too many.
+
+        Reconfiguring reuses the GL context and is much cheaper, but it never releases the
+        scenes already loaded, so it can only be done a bounded number of times.
+        """
+        if scene in self._cached_scenes or (
+            len(self._cached_scenes) < self._scene_cache_limit
+        ):
+            self._sim.reconfigure(self._cfg)
+            self._cached_scenes.add(scene)
+            return
+
+        logger.info(
+            "rebuilding the Habitat simulator to release %d cached scenes",
+            len(self._cached_scenes),
+        )
+        if self._dynamic_obstacles is not None:
+            self._dynamic_obstacles.cleanup()
+            self._dynamic_obstacles = None
+        self._sim.close(destroy=True)
+        gc.collect()
+        self._sim = hsim.Simulator(self._cfg)
+        self._cached_scenes = {scene}
 
     def close(self) -> None:
         """Close the simulator."""
