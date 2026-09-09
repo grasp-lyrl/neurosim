@@ -75,19 +75,17 @@ data:
       resample_every: 1 # reload scene+sensors every N episodes; trajectory every episode
       scenes_glob: data/hm3d/*/*.basis.glb
       sensors:
-        # DVS-Voltmeter has no contrast threshold: k1..k6 are the calibrated
-        # process parameters (reference src/config.py), sampled +/-30% about the
-        # DVS346 preset [5.265, 20.0, 1e-4, 1e-7, 5e-9, 1e-5]. k1-k3 shape the
-        # signal response, k4/k5 the leakage drift, k6 the noise variance floor.
+        # DVS-Voltmeter has no contrast threshold; k1..k6 are the calibrated
+        # process parameters
         event_camera_1:
-          leak_scale: {range: [0.25, 1.5]} # 1.0 is the faithful calibration
+          leak_scale: {range: [0.25, 1.0]} # 1.0 is the calibration; above it is unphysical
           k:
-            - {range: [3.69, 6.84]} # k1
-            - {range: [14.0, 26.0]} # k2, spans the DVS240 preset's 23.0
-            - {range: [0.7e-4, 2.2e-4]} # k3, up to the DVS240 preset's 2e-4
-            - {range: [0.7e-7, 1.3e-7]} # k4 thermal leakage
-            - {range: [3.5e-9, 6.5e-9]} # k5 photocurrent leakage
-            - {range: [0.7e-5, 1.3e-5]} # k6 noise floor
+            - {range: [4.739, 5.792]} # k1, the rate knob
+            - {range: [17.0, 23.0]} # k2, spanning both camera presets
+            - 1.0e-4 # k3
+            - 1.0e-7 # k4 thermal leakage
+            - {range: [5.0e-9, 5.0e-8]} # k5 photocurrent leakage, DVS346 -> DVS240
+            - 1.0e-5 # k6 noise floor
         # One shared draw:  both frusta must match.
         "event_camera_1,depth_camera_1":
           hfov: {range: [40, 90]}
