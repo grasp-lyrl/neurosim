@@ -1,0 +1,97 @@
+# Monocular Depth Training Configuration, DVS-Voltmeter event model.
+# Differs from depth_training_config.yml only in the event simulator and its DR.
+# Reference: https://github.com/grasp-lyrl/fast-feature-fields/blob/main/confs/monocular_depth/dav2b_fullttairv2indoor_pseudo_308x308x20.yml
+
+# Which validation drives the metrics and checkpoint selection.
+validation:
+  source: m3ed # 'simulator' or 'm3ed'
+  track_best: [SSIMAELoss, d1, abs_rel]
+
+# Training options
+lr: 5.0e-6 # Learning rate (DAv2 pseudo-label stage: encoder 5e-6, decoder 10x)
+warmup_epochs: 10 # Linear ramp up to lr; 0 disables
+cooldown_epochs: 30 # Cosine anneal to 0 over the final epochs; 0 disables
+clip_grad: 0 # Gradient clipping (0 = disabled)
+epochs: 300 # Number of epochs
+log_interval: 10 # Save checkpoint interval in epochs
+val_interval: 10 # Validation interval in epochs
+
+# Event options
+polarity: [False, False] # [use_polarity_ctx, use_polarity_pred]
+
+# Training data options
+train:
+  batch: 32 # Effective batch size (accumulates 4 x mini_batch)
+  mini_batch: 8 # Mini batch size per forward pass
+
+# Loss options
+loss: ssimae # Loss function: 'ssimae', 'silog', 'siloggrad'
+scales: 4 # Number of scales for gradient matching loss
+alpha: 0.3 # Weight for gradient matching loss
+min_disparity: 0.05 # Minimum disparity for max depth 20.0 m
+max_disparity: 1000.0 # Maximum disparity for min depth 0.001 m
+
+# DepthAnythingV2 config
+dav2_config:
+  size: 308 # Input size for DAv2
+  encoder: vitb # Encoder type: 'vits', 'vitb', 'vitl'
+  head: exp # 'relu' emits disparity, 'exp' a log disparity that cannot overflow
+  ckpt: applications/f3_depth_training/models/depth_anything_v2_vitb.pth # Path to DAv2 checkpoint
+
+# EventFF (F3) config - the feature backbone
+eventff:
+  config: applications/f3_depth_training/configs/f3_640x480x20_small.yml
+  ckpt: applications/f3_depth_training/models/640x480x20_patchff_ds1_small_v1_uncompiled.pth # Path to EventFF weights
+
+# Online data pipeline settings.
+# `online_data` is the same block OnlineDataLoader.from_config(...) reads everywhere
+# (roles + scenes/DR + loader knobs); `trainer_gpu`/`color_sensor`/`sim_time`/
+# `event_time_window_us` are training-only siblings.
+data:
+  trainer_gpu: 1 # trainer GPU (producers run on online_data.gpu_ids)
+  min_events_per_sample: 500 # drop sparser samples before they reach a batch
+
+  # Recorded M3ED flights scored against LiDAR
+  m3ed:
+    stride: 4 # every Nth LiDAR frame; 561 per sequence at 10 Hz, and adjacent ones agree
+    min_coverage: 0.01 # skip a frame under this fraction of valid LiDAR pixels
+    batch: 8
+    num_workers: 4 # h5 reads and cropping run ahead of the GPU
+    sequences:
+      - data/m3ed/falcon_indoor_flight_1
+      - data/m3ed/falcon_indoor_flight_2
+      - data/m3ed/falcon_indoor_flight_3
+
+  online_data:
+    base_settings: configs/online_data_hm3d_2gpu_voltmeter.yaml # sensors, dynamics, controller, trajectory
+    num_producers: 8 # 8 simulators ...
+    gpu_ids: [0] # ... all on gpu0
+    base_seed: 0
+    bus_maxsize: 2048 # backpressure bound
+    roles:
+      anchor: [depth_camera_1] # depth tick defines the sample boundary
+      stream: [event_camera_1] # events accumulate within each depth window
+    randomization:
+      resample_every: 1 # reload scene+sensors every N episodes; trajectory every episode
+      scenes_glob: data/hm3d/*/*.basis.glb
+      sensors:
+        # DVS-Voltmeter has no contrast threshold: k1..k6 are the calibrated
+        # process parameters (reference src/config.py), sampled +/-30% about the
+        # DVS346 preset [5.265, 20.0, 1e-4, 1e-7, 5e-9, 1e-5]. k1-k3 shape the
+        # signal response, k4/k5 the leakage drift, k6 the noise variance floor.
+        event_camera_1:
+          leak_scale: {range: [0.25, 1.5]} # 1.0 is the faithful calibration
+          k:
+            - {range: [3.69, 6.84]} # k1
+            - {range: [14.0, 26.0]} # k2, spans the DVS240 preset's 23.0
+            - {range: [0.7e-4, 2.2e-4]} # k3, up to the DVS240 preset's 2e-4
+            - {range: [0.7e-7, 1.3e-7]} # k4 thermal leakage
+            - {range: [3.5e-9, 6.5e-9]} # k5 photocurrent leakage
+            - {range: [0.7e-5, 1.3e-5]} # k6 noise floor
+        # One shared draw:  both frusta must match.
+        "event_camera_1,depth_camera_1":
+          hfov: {range: [40, 90]}
+      trajectory:
+        v_avg: {range: [0.2, 1.5]}
+        hovers: {choices: [0, 1, 2, 3]} # a count, so `choices`; `range` samples a float
+        hover_s: {range: [0.5, 1.5]}

@@ -52,6 +52,20 @@ class TestSampleValue:
         assert _sample_value(42, rng) == 42
         assert _sample_value("fixed", rng) == "fixed"
 
+    def test_list_resolves_each_entry(self):
+        """Vector parameters, e.g. the DVS-Voltmeter's k1..k6."""
+        rng = np.random.default_rng(3)
+        spec = [{"range": [1.0, 2.0]}, 5.0, {"choices": [7, 8]}]
+        for _ in range(20):
+            k1, k2, k3 = _sample_value(spec, rng)
+            assert 1.0 <= k1 <= 2.0
+            assert k2 == 5.0
+            assert k3 in (7, 8)
+
+    def test_a_list_of_plain_numbers_is_unchanged(self):
+        rng = np.random.default_rng(4)
+        assert _sample_value([0.0, 0.0, 0.05], rng) == [0.0, 0.0, 0.05]
+
 
 class TestDomainRandomizationConfigSample:
     def test_scenes_replaces_visual_backend_scene(self):

@@ -2,8 +2,7 @@
 Monocular Depth Training with F3 + the online_data pipeline.
 
 Trains a monocular depth model (F3 / EventPatchFF backbone + DepthAnythingV2
-decoder) on time-aligned events+depth streamed from the neurosim
-``OnlineDataLoader``.
+decoder) on time-aligned events+depth streamed from the neurosim ``OnlineDataLoader``.
 
 Reference: https://github.com/grasp-lyrl/fast-feature-fields/tree/main/src/f3/tasks/depth
 """

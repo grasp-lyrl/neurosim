@@ -74,7 +74,9 @@ def parse_args():
     )
     parser.add_argument("--h5", required=True, help="Event sequence HDF5")
     parser.add_argument("--dataset", default="m3ed", choices=sorted(LAYOUTS))
-    parser.add_argument("--ckpt", default="best.pth", help="Checkpoint under models/")
+    parser.add_argument(
+        "--ckpt", default="best_d1.pth", help="Checkpoint under models/"
+    )
     parser.add_argument("--start-ms", type=int, default=0)
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--video", help="Write an mp4 instead of opening a window")

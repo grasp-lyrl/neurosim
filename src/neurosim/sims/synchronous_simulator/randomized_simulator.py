@@ -35,8 +35,12 @@ def _sample_value(spec: Any, rng: np.random.Generator) -> Any:
     *spec* is one of:
     - ``{"range": [lo, hi]}`` -> ``rng.uniform(lo, hi)``
     - ``{"choices": [a, b, ...]}`` -> ``rng.choice(...)``
+    - a list -> each entry resolved in turn, for vector parameters like the
+      voltmeter's ``k1..k6``
     - any other value -> returned as-is (fixed override)
     """
+    if isinstance(spec, list):
+        return [_sample_value(item, rng) for item in spec]
     if isinstance(spec, dict):
         if "range" in spec:
             lo, hi = spec["range"]
