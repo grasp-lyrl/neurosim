@@ -1,6 +1,11 @@
 # Monocular Depth Training Configuration (online_data pipeline)
 # Reference: https://github.com/grasp-lyrl/fast-feature-fields/blob/main/confs/monocular_depth/dav2b_fullttairv2indoor_pseudo_308x308x20.yml
 
+# Which validation drives the metrics and checkpoint selection.
+validation:
+  source: m3ed # 'simulator' or 'm3ed'
+  track_best: [SSIMAELoss, d1, abs_rel]
+
 # Training options
 lr: 5.0e-6 # Learning rate (DAv2 pseudo-label stage: encoder 5e-6, decoder 10x)
 warmup_epochs: 10 # Linear ramp up to lr; 0 disables
@@ -44,6 +49,17 @@ eventff:
 data:
   trainer_gpu: 1 # trainer GPU (producers run on online_data.gpu_ids)
   min_events_per_sample: 500 # drop sparser samples before they reach a batch
+
+  # Recorded M3ED flights scored against LiDAR
+  m3ed:
+    stride: 4 # every Nth LiDAR frame; 561 per sequence at 10 Hz, and adjacent ones agree
+    min_coverage: 0.01 # skip a frame under this fraction of valid LiDAR pixels
+    batch: 8
+    num_workers: 4 # h5 reads and cropping run ahead of the GPU
+    sequences:
+      - data/m3ed/falcon_indoor_flight_1
+      - data/m3ed/falcon_indoor_flight_2
+      - data/m3ed/falcon_indoor_flight_3
 
   online_data:
     base_settings: configs/online_data_hm3d_2gpu.yaml # sensors, dynamics, controller, trajectory

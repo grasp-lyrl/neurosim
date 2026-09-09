@@ -13,7 +13,7 @@ __pycache__/
 *.avi
 
 
-data/
+/data/
 build/
 install/
 log/

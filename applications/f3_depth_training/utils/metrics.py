@@ -1,8 +1,7 @@
-"""Disparity evaluation metrics and colourisation, after f3's depth task utils."""
+"""Relative-depth metrics: align out the gauge, then measure in metres."""
 
 import math
 
-import numpy as np
 import torch
 from torch import Tensor
 
@@ -56,13 +55,9 @@ def eval_relative_depth(
     return {name: value.mean().item() for name, value in per_metric.items()}
 
 
-def get_disparity_image(disparity: Tensor, mask: Tensor, cmap) -> np.ndarray:
-    """Disparity [H, W] -> RGB uint8, normalized over `mask` and black outside it."""
-    lo, hi = disparity[mask].min().item(), disparity[mask].max().item()
-    normalized = ((disparity.clamp(lo, hi) - lo) / (hi - lo)).squeeze().cpu().numpy()
-    coloured = (cmap(normalized)[:, :, :3] * 255).astype(np.uint8)
-    coloured[~mask.cpu().numpy()] = 0
-    return coloured
+def improved(name: str, value: float, best: float) -> bool:
+    """Whether `value` beats `best`, in that metric's own direction."""
+    return value > best if name in HIGHER_IS_BETTER else value < best
 
 
 def set_best_results(best: dict, new: dict) -> None:
@@ -70,4 +65,5 @@ def set_best_results(best: dict, new: dict) -> None:
     for k in best:
         value = new[k]
         value = value.item() if isinstance(value, Tensor) else value
-        best[k] = max(best[k], value) if k in HIGHER_IS_BETTER else min(best[k], value)
+        if improved(k, value, best[k]):
+            best[k] = value

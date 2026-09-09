@@ -3,258 +3,59 @@ Monocular Depth Training with F3 + the online_data pipeline.
 
 Trains a monocular depth model (F3 / EventPatchFF backbone + DepthAnythingV2
 decoder) on time-aligned events+depth streamed from the neurosim
-``OnlineDataLoader``: ``num_producers`` SynchronousSimulators (events + depth)
-run in separate processes on the producer GPUs, push time-aligned samples to a
-bounded bus, and this (trainer) process builds batches and trains on the
-``trainer_gpu``.
+``OnlineDataLoader``.
 
 Reference: https://github.com/grasp-lyrl/fast-feature-fields/tree/main/src/f3/tasks/depth
 """
 
-import os
-import cv2
-import yaml
-import torch
-import wandb
-import logging
 import argparse
 import datetime
-import numpy as np
+
+import cv2
+import torch
 import torch.nn.functional as F
-from tqdm import tqdm
-from pathlib import Path
-from typing import Callable
+import wandb
+import yaml
 from matplotlib import colormaps
+from tqdm import tqdm
 
-from neurosim.online_data import OnlineDataLoader, TimeAlignedSample
-
+from .data import (
+    build_m3ed_loader,
+    build_online_loader,
+    evaluate_m3ed,
+    process_batch,
+    usable_sample_filter,
+    usable_samples,
+)
 from .nets import (
     EventFFDepthAnythingV2,
     batch_cropper,
     get_resize_shapes,
     load_depth_weights,
 )
+from .utils.experiment import (
+    log_dict,
+    log_wandb,
+    save_checkpoint,
+    setup_experiment,
+    setup_torch,
+    uncompiled_state_dict,
+)
 from .utils import (
     HIGHER_IS_BETTER,
     ScaleAndShiftInvariantLoss,
+    build_optimizer,
+    build_scheduler,
+    ev_to_frames_with_polarity,
     eval_relative_depth,
     get_disparity_image,
     get_random_crop_params,
+    improved,
     set_best_results,
 )
 
 # Metrics from eval_relative_depth; the loss name is appended per run.
 METRICS = ("abs_rel", "sq_rel", "d1", "d2", "d3", "rmse", "rmse_log", "log10", "silog")
-
-
-def setup_torch() -> None:
-    """f3's training defaults: fixed seed, tf32 matmuls, dynamo tracing dynamic shapes."""
-    torch.manual_seed(403)
-    torch.backends.cudnn.benchmark = True
-    torch.set_float32_matmul_precision("high")
-    torch._dynamo.config.capture_dynamic_output_shape_ops = True
-    torch._dynamo.config.capture_scalar_outputs = True
-    torch._dynamo.config.compiled_autograd = True
-
-
-def log_dict(logger, values: dict) -> None:
-    """One log line of ``k: v``, tensors unwrapped."""
-    logger.info(
-        ", ".join(
-            f"{k}: {v.item():.4f}" if isinstance(v, torch.Tensor) else f"{k}: {v:.4f}"
-            for k, v in values.items()
-        )
-    )
-
-
-def log_wandb(args, metrics: dict):
-    """Log under the ``train/``, ``val/`` and ``opt/`` namespaces."""
-    if args.wandb:
-        wandb.log(metrics)
-
-
-def uncompiled_state_dict(model) -> dict:
-    """Weights without ``torch.compile``'s ``_orig_mod.`` prefix."""
-    return {k.replace("_orig_mod.", ""): v for k, v in model.state_dict().items()}
-
-
-def save_checkpoint(path, epoch, results, model, optimizer, scheduler):
-    """Write the resumable checkpoint."""
-    state = uncompiled_state_dict(model)
-    torch.save(
-        {
-            "epoch": epoch,
-            "results": results,
-            "model": state,
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-        },
-        path,
-    )
-    path = Path(path)
-    torch.save(state, path.with_stem(f"{path.stem}_weights"))
-
-
-def ev_to_frames_with_polarity(events, counts, w, h):
-    """Convert events to RGB frames with polarity coloring (pos=red, neg=blue)."""
-    scale = torch.tensor([w, h, 1, 1], device=events.device)
-    events = (events * scale).round().to(torch.int32)
-
-    B = counts.shape[0]
-    event_frames = torch.zeros(B, h, w, 3, dtype=torch.uint8, device=events.device)
-    c = torch.cumsum(torch.cat((torch.zeros(1).to(counts.device), counts)), 0).to(
-        torch.int32
-    )
-
-    for i in range(B):
-        x_coords = events[c[i] : c[i + 1], 0]
-        y_coords = events[c[i] : c[i + 1], 1]
-        polarities = events[c[i] : c[i + 1], 3]
-        pos_mask = polarities == 1
-        neg_mask = polarities == 0
-        event_frames[i, y_coords[pos_mask], x_coords[pos_mask], 0] = 255  # Red
-        event_frames[i, y_coords[neg_mask], x_coords[neg_mask], 2] = 255  # Blue
-
-    return event_frames
-
-
-def setup_experiment(args, base_path: str, models_path: str):
-    """Setup experiment directories and check for resume."""
-    for path in (
-        models_path,
-        f"{base_path}/predictions",
-        f"{base_path}/training_events",
-    ):
-        os.makedirs(path, exist_ok=True)
-
-    resume = os.path.exists(f"{models_path}/last.pth")
-
-    # Carry the wandb run id across resumes, otherwise each restart forks a new run.
-    config_path = f"{base_path}/config.yaml"
-    args.wandb_run_id = None
-    if resume and os.path.exists(config_path):
-        with open(config_path, "r") as f:
-            args.wandb_run_id = yaml.safe_load(f).get("wandb_run_id")
-    if args.wandb_run_id is None:
-        args.wandb_run_id = wandb.util.generate_id()
-
-    logging.basicConfig(
-        filename=f"{base_path}/training.log",
-        filemode="a" if resume else "w",
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
-    logger = logging.getLogger(__name__)
-
-    with open(config_path, "w") as f:
-        yaml.dump(vars(args), f, default_flow_style=False)
-
-    return logger, resume
-
-
-def usable_sample_filter(
-    depth_uuid: str,
-    event_sensor: str,
-    max_disparity: float,
-    min_events: int,
-    min_valid_frac: float = 0.5,
-) -> Callable[[TimeAlignedSample], bool]:
-    """Predicate dropping samples the model cannot learn from.
-
-    Rejects a mostly-invalid depth anchor (0 m reads, e.g. a camera facing open
-    sky) and packets too sparse for the backbone. Applied before batching, so a
-    rejected sample costs a row rather than shrinking the batch.
-    """
-    min_depth = 1.0 / max_disparity
-
-    def keep(sample: TimeAlignedSample) -> bool:
-        depth = sample.sensors[depth_uuid]
-        if np.count_nonzero(depth > min_depth) < min_valid_frac * depth.size:
-            return False
-        return len(sample.sensors[event_sensor].get("x", ())) >= min_events
-
-    return keep
-
-
-def build_loader(
-    data_cfg: dict,
-    *,
-    batch_size: int,
-    log_dir: str | None = None,
-    sample_filter: Callable[[TimeAlignedSample], bool] | None = None,
-) -> OnlineDataLoader:
-    """Build an OnlineDataLoader from the ``data.online_data`` config block.
-
-    Delegates to :meth:`OnlineDataLoader.from_config` (the same YAML schema used
-    everywhere — roles, scenes, DR, and loader knobs live in ``data.online_data``).
-    ``batch_size`` comes from the training config (``train.mini_batch``), and an
-    optional ``data.sim_time`` overrides the base settings' episode length.
-    """
-    od = dict(data_cfg["online_data"])
-
-    sim_time = data_cfg.get("sim_time")
-    if sim_time is not None:
-        base = od.get("base_settings")
-        if isinstance(base, str):
-            with open(base, "r") as f:
-                base = yaml.safe_load(f)
-        base.setdefault("simulator", {})["sim_time"] = sim_time
-        od["base_settings"] = base
-
-    return OnlineDataLoader.from_config(
-        {"online_data": od},
-        batch_size=batch_size,
-        log_dir=log_dir,
-        sample_filter=sample_filter,
-    )
-
-
-def process_batch(batch, args, device):
-    """Process a batch from the OnlineDataLoader into model-ready tensors.
-
-    ``batch[event_sensor]`` is ``(counts, events)`` where events are *raw*
-    ``[x, y, t_anchor - t, p]`` (pixel coords, anchor-relative µs); the loader no
-    longer normalizes. We normalize here to the model's frame sizes:
-    ``[x/W, y/H, t_rel/window_us, p]`` (on-GPU, cheap). ``args.event_norm`` is
-    ``(W, H, window_us)``. ``batch[depth_sensor]`` is ``(B, H, W)``.
-    Returns ``(ff_events, event_counts, disparity, color_images)``.
-    """
-    event_sensor = args.event_sensor
-    depth_sensor = args.depth_sensor
-    color_sensor = args.color_sensor
-
-    if event_sensor not in batch:
-        raise ValueError(
-            f"Event sensor '{event_sensor}' not in batch. Available: {list(batch.keys())}"
-        )
-    counts, events = batch[event_sensor]
-    ff_events = torch.from_numpy(events).float().to(device)  # (N, 4) raw [x,y,t_rel,p]
-    event_counts = torch.from_numpy(counts).to(device)  # (B,)
-    # Normalize to the model's frame sizes (loader ships raw events).
-    norm_w, norm_h, norm_window = args.event_norm
-    ff_events[:, 0] /= norm_w
-    ff_events[:, 1] /= norm_h
-    ff_events[:, 2] /= norm_window
-
-    if depth_sensor not in batch:
-        raise ValueError(
-            f"Depth sensor '{depth_sensor}' not in batch. Available: {list(batch.keys())}"
-        )
-    # Invalid depths are 0.0; clip then convert to disparity (inverse depth).
-    depth = torch.from_numpy(batch[depth_sensor]).to(device, torch.float32)
-    disparity = 1.0 / depth.clamp(0.5 / args.max_disparity, 1 / args.min_disparity)
-
-    color_images = (
-        batch[color_sensor].astype(np.uint8)
-        if color_sensor and color_sensor in batch
-        else None
-    )
-    return ff_events, event_counts, disparity, color_images
-
-
-def usable_samples(valid_mask):
-    """Rows with at least half their depth pixels valid."""
-    return valid_mask.flatten(1).sum(1) * 2 >= valid_mask[0].numel()
 
 
 def predict_full_frame(model, ff_events, event_counts, height, width):
@@ -353,6 +154,47 @@ def train_epoch(
 
 
 @torch.no_grad()
+def make_validator(args, logger, model, dataloader, loss_fn, data_cfg, frame):
+    """Resolve `validation.source` once into the callable the training loop calls."""
+    source = getattr(args, "validation", {}).get("source", "simulator")
+
+    if source == "m3ed":
+        loader = build_m3ed_loader(data_cfg.get("m3ed", {}), *frame)
+        assert loader is not None, "validation.source is m3ed but data.m3ed is empty"
+
+        def run(epoch):
+            results = evaluate_m3ed(
+                model,
+                loader,
+                predict_full_frame,
+                args.device,
+                args.min_disparity,
+                loss_fn,
+            )
+            logger.info("Validation (M3ED): Epoch: %d", epoch)
+            log_dict(logger, results)
+            return results
+
+    elif source == "simulator":
+
+        def run(epoch):
+            return validate(
+                args,
+                logger,
+                model,
+                dataloader,
+                loss_fn,
+                epoch,
+                max_batches=args.batches_per_epoch // 2,
+                save_preds=(epoch + 1) % args.log_interval == 0,
+            )
+
+    else:
+        raise ValueError(f"validation.source is {source!r}, not 'simulator' or 'm3ed'")
+
+    return run
+
+
 def validate(
     args, logger, model, dataloader, loss_fn, epoch, max_batches=50, save_preds=False
 ):
@@ -499,63 +341,9 @@ def main():
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Total trainable parameters: {trainable}")
 
-    # ── Optimizer / scheduler ─────────────────────────────────────────────────
-    # DAv2 encoder at lr, F3 backbone at half, DAv2 decoder head at 10x. Grouped
-    # rather than one group per parameter, so AdamW's foreach path can batch them.
-    def lr_scale(name):
-        if "pretrained" in name:
-            return 1.0
-        return 0.5 if "eventff" in name else 10.0
-
-    def decays(name, param):
-        # Norms and biases are 1-D; the re-initialised patch embed is left free too.
-        return param.ndim > 1 and "patch_embed.proj" not in name
-
-    grouped: dict[tuple[float, bool], list] = {}
-    for name, param in model.named_parameters():
-        grouped.setdefault((lr_scale(name), decays(name, param)), []).append(param)
-    param_groups = [
-        {"params": params, "lr": scale * args.lr, "weight_decay": 0.01 if wd else 0.0}
-        for (scale, wd), params in grouped.items()
-    ]
-    logger.info(
-        "Optimizer: %d param groups over %d tensors",
-        len(param_groups),
-        sum(len(g["params"]) for g in param_groups),
-    )
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
-    # Warm up, hold, then cosine to zero. Held flat rather than decayed throughout
-    # because the data never repeats: there is no overfitting to decay away, and the
-    # loss is still falling at block resolution well past the midpoint.
-    # Stepped once per epoch, so both phases are measured in epochs (~512 steps each).
-    phases = [
-        torch.optim.lr_scheduler.ConstantLR(
-            optimizer, factor=1.0, total_iters=args.epochs
-        )
-    ]
-    milestones = []
-    if args.warmup_epochs:
-        phases.insert(
-            0,
-            torch.optim.lr_scheduler.LinearLR(
-                optimizer,
-                start_factor=1 / (args.warmup_epochs + 1),
-                end_factor=1.0,
-                total_iters=args.warmup_epochs,
-            ),
-        )
-        milestones.append(args.warmup_epochs)
-    if args.cooldown_epochs:
-        phases.append(
-            torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=args.cooldown_epochs
-            )
-        )
-        milestones.append(args.epochs - args.cooldown_epochs)
-    scheduler = (
-        torch.optim.lr_scheduler.SequentialLR(optimizer, phases, milestones=milestones)
-        if milestones
-        else phases[0]
+    optimizer = build_optimizer(model, args.lr)
+    scheduler = build_scheduler(
+        optimizer, args.epochs, args.warmup_epochs, args.cooldown_epochs
     )
     logger.info(
         "LR schedule: warmup %d, hold %d, cosine cooldown %d (of %d epochs)",
@@ -581,12 +369,8 @@ def main():
         optimizer.load_state_dict(last_dict["optimizer"])
         scheduler.load_state_dict(last_dict["scheduler"])
         start = last_dict["epoch"] + 1
-        del last_dict
-        try:
-            saved = torch.load(f"{models_path}/best.pth").get("results", {})
-            best_results.update({k: v for k, v in saved.items() if k in best_results})
-        except FileNotFoundError:
-            logger.info("No best model found; using default best results")
+        saved = last_dict.get("results", {})
+        best_results.update({k: v for k, v in saved.items() if k in best_results})
         torch.cuda.empty_cache()
 
     # Compiled last: OptimizedModule prefixes its state_dict keys, so every load above
@@ -596,13 +380,11 @@ def main():
         model.dav2 = torch.compile(model.dav2)
 
     # ── Data loader (built after the model so the event window matches frame T) ─
-    # Events ship raw from the loader; process_batch normalizes to the model's
-    # frame sizes using args.event_norm = (W, H, window_us).
     event_W, event_H, event_T = model.eventff.frame_sizes
     window_us = data_cfg.get("event_time_window_us", event_T * 1000)
     args.event_norm = (event_W, event_H, window_us)
     logger.info("Initializing OnlineDataLoader (event norm window=%s us)...", window_us)
-    dataloader = build_loader(
+    dataloader = build_online_loader(
         data_cfg,
         batch_size=int(args.train["mini_batch"]),
         log_dir=f"{base_path}/logs",
@@ -612,6 +394,11 @@ def main():
             args.max_disparity,
             int(data_cfg.get("min_events_per_sample", 10000)),
         ),
+    )
+
+    track_best = getattr(args, "validation", {}).get("track_best", [loss_fn.name])
+    run_validation = make_validator(
+        args, logger, model, dataloader, loss_fn, data_cfg, (event_W, event_H, event_T)
     )
 
     if args.wandb:
@@ -647,32 +434,27 @@ def main():
             log_wandb(args, {"train/loss": train_loss, "opt/epoch": epoch})
 
             if (epoch + 1) % args.val_interval == 0:
-                save_preds = (epoch + 1) % args.log_interval == 0
                 with torch.autocast(
                     device_type="cuda", enabled=args.amp, dtype=torch.bfloat16
                 ):
-                    val_results = validate(
-                        args,
-                        logger,
-                        model,
-                        dataloader,
-                        loss_fn,
-                        epoch,
-                        max_batches=args.batches_per_epoch // 2,
-                        save_preds=save_preds,
-                    )
-                better_ssimae = val_results[loss_fn.name] < best_results[loss_fn.name]
+                    val_results = run_validation(epoch)
+
+                beaten = [
+                    m
+                    for m in track_best
+                    if improved(m, val_results[m], best_results[m])
+                ]
                 set_best_results(best_results, val_results)
-                if better_ssimae:
+                for metric in beaten:
                     save_checkpoint(
-                        f"{models_path}/best.pth",
+                        f"{models_path}/best_{metric}.pth",
                         epoch,
                         best_results,
                         model,
                         optimizer,
                         scheduler,
                     )
-                    logger.info(f"Saved best model at epoch {epoch}")
+                    logger.info("Saved best_%s at epoch %d", metric, epoch)
                 log_wandb(
                     args,
                     {"opt/epoch": epoch}
@@ -686,7 +468,7 @@ def main():
             save_checkpoint(
                 f"{models_path}/last.pth",
                 epoch,
-                val_results,
+                best_results,
                 model,
                 optimizer,
                 scheduler,
