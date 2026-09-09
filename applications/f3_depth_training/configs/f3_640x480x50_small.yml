@@ -1,0 +1,23 @@
+# F3 backbone shape for `640x480x20_patchff_ds1_small_v1.pth` with the context window
+# stretched to 50 ms.
+model: EventPatchFF
+T: 50
+convbtlncks: [2, 2, 2]
+convdepths: [2, 2, 2]
+convdilations: [1, 1, 1]
+convkernels: [5, 5, 5]
+dims: [96, 160, 192]
+dskernels: [5, 3, 3]
+dsstrides: [4, 2, 2]
+use_upsampling: true
+upsampling_dims: 16
+frame_sizes: [640, 480, 50]
+multi_hash_encoder:
+  coarsest_resolution: [8, 8, 1]
+  feature_size: 2
+  finest_resolution: [320, 180, 8]
+  levels: 4
+  log2_entries_per_level: 19
+patch_size: 1
+use_decoder_block: false
+variable_mode: true

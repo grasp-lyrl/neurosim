@@ -184,6 +184,33 @@ def test_choosing_m3ed_without_sequences_fails_at_startup():
 
 
 # ── layering ─────────────────────────────────────────────────────────────────
+def test_uniform_blend_weights_every_checkpoint_equally():
+    from applications.f3_depth_training.average_checkpoints import blend
+
+    assert blend([None] * 4, "uniform", 0.6) == [0.25] * 4
+
+
+def test_ema_blend_favours_the_newest_and_sums_to_one():
+    from applications.f3_depth_training.average_checkpoints import blend
+
+    weights = blend([None] * 4, "ema", 0.5)
+    assert weights == pytest.approx([1 / 15, 2 / 15, 4 / 15, 8 / 15])
+    assert sum(weights) == pytest.approx(1.0)
+
+
+def test_averaging_recovers_the_mean_and_keeps_integer_buffers():
+    from applications.f3_depth_training.average_checkpoints import average_weights
+
+    states = [
+        {"w": torch.full((2, 2), 1.0), "steps": torch.tensor([1])},
+        {"w": torch.full((2, 2), 3.0), "steps": torch.tensor([2])},
+    ]
+    out = average_weights(states, [0.5, 0.5])
+    assert torch.allclose(out["w"], torch.full((2, 2), 2.0))
+    assert out["steps"].tolist() == [2], "integer buffers come from the last state"
+    assert out["w"].dtype == torch.float32, "dtype survives the float64 accumulation"
+
+
 def imported_modules(path: Path) -> set[str]:
     """Every module name the file imports, relative ones by their last segment."""
     names = set()
