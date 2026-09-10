@@ -5,6 +5,7 @@ the next sample and ``q`` to quit, or pass ``--video`` to write an mp4 instead.
 """
 
 import argparse
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -15,7 +16,10 @@ from matplotlib import colormaps
 from .data import build_online_loader, process_batch, usable_sample_filter
 from .nets import EventFFDepthAnythingV2, load_depth_weights
 from .train_depth_nonrec import predict_full_frame
-from .utils import ev_to_frames_with_polarity, get_disparity_image
+from .utils import ev_to_frames_with_polarity, eval_relative_depth, get_disparity_image
+
+HEADER_H = 96
+COLUMNS = ("events", "ground truth", "prediction")
 
 
 def load_model(run: str, ckpt: str, device):
@@ -28,19 +32,53 @@ def load_model(run: str, ckpt: str, device):
     return model.to(device).eval()
 
 
-def panels(events, counts, disparity, prediction, index, cmap):
-    """Events | ground-truth disparity | prediction, side by side in BGR."""
+def header(width: int, lines: list[str]) -> np.ndarray:
+    """Caption strip: two rows of stats, then a label under each panel."""
+    strip = np.zeros((HEADER_H, width, 3), np.uint8)
+    for row, text in enumerate(lines):
+        cv2.putText(
+            strip,
+            text,
+            (14, 28 + 26 * row),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (235, 235, 235),
+            1,
+            cv2.LINE_AA,
+        )
+    for column, label in enumerate(COLUMNS):
+        cv2.putText(
+            strip,
+            label,
+            (14 + column * width // 3, HEADER_H - 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (150, 150, 150),
+            1,
+            cv2.LINE_AA,
+        )
+    return strip
+
+
+def panels(events, counts, disparity, prediction, valid, cmap, lines):
+    """Stats strip over events | ground-truth disparity | prediction, in BGR."""
     height, width = disparity.shape
-    valid = disparity < disparity.max()
     frames = ev_to_frames_with_polarity(events, counts, width, height).cpu().numpy()
-    images = [
-        frames[index],
-        get_disparity_image(disparity, valid, cmap),
-        get_disparity_image(
-            prediction, torch.ones_like(prediction, dtype=torch.bool), cmap
-        ),
-    ]
-    return cv2.cvtColor(np.hstack(images), cv2.COLOR_RGB2BGR)
+    images = np.hstack(
+        [
+            frames[0],
+            get_disparity_image(disparity, valid, cmap),
+            get_disparity_image(
+                prediction, torch.ones_like(prediction, dtype=torch.bool), cmap
+            ),
+        ]
+    )
+    return np.vstack(
+        [
+            header(images.shape[1], lines),
+            cv2.cvtColor(images, cv2.COLOR_RGB2BGR),
+        ]
+    )
 
 
 def parse_args():
@@ -102,7 +140,7 @@ def main():
             args.video,
             cv2.VideoWriter_fourcc(*"mp4v"),
             1000 / window_ms,
-            (3 * width, height),
+            (3 * width, height + HEADER_H),
         )
         print(f"writing {args.frames} samples to {args.video}")
     else:
@@ -118,8 +156,27 @@ def main():
                     model, events, counts, *disparity.shape[1:]
                 ).float()
 
-            panel = panels(events, counts, disparity[0], prediction[0], 0, cmap)
-            print(f"sample {index:5d}  {int(counts[0]):9,} events")
+            valid = disparity < args.max_disparity
+            scores = eval_relative_depth(
+                prediction, disparity, valid, args.min_disparity
+            )
+            depths = 1.0 / disparity[0][valid[0]]
+            meta = batch.meta
+            lines = [
+                f"sample {index}   episode {meta.episode_id[0]} step {meta.step_idx[0]}"
+                f"   scene {Path(str(meta.scene[0])).stem.split('.')[0]}"
+                f"   window {meta.window_us[0] / 1000:.0f} ms"
+                f"   {int(counts[0]):,} events",
+                f"abs_rel {scores['abs_rel']:.3f}   d1 {scores['d1']:.1f}"
+                f"   rmse {scores['rmse']:.2f} m   silog {scores['silog']:.1f}"
+                f"   gt depth {depths.min():.1f}-{depths.max():.1f} m"
+                f"   valid {100 * valid[0].float().mean():.0f}%",
+            ]
+
+            panel = panels(
+                events, counts, disparity[0], prediction[0], valid[0], cmap, lines
+            )
+            print(lines[0])
             if writer is not None:
                 writer.write(panel)
             else:
