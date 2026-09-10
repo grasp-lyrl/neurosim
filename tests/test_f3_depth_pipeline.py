@@ -28,6 +28,7 @@ def batch_args():
         depth_sensor="dep",
         color_sensor=None,
         event_norm=(640, 480, 20000),
+        max_events=0,
         max_disparity=1000.0,
         min_disparity=0.05,
     )
@@ -58,6 +59,38 @@ def test_process_batch_converts_depth_to_inverse_depth(batch_args):
     }
     _, _, disparity, _ = process_batch(batch, batch_args, torch.device("cpu"))
     assert torch.allclose(disparity, torch.full((1, 4, 4), 0.2)), "disparity is 1/depth"
+
+
+def test_the_cap_thins_only_the_samples_over_budget():
+    from applications.f3_depth_training.data import cap_events
+
+    events = np.arange(4 * 900, dtype=np.float32).reshape(900, 4)
+    counts = np.array([100, 500, 300], np.int32)
+    capped, kept = cap_events(events, counts, 200)
+    assert kept.tolist() == [100, 200, 200]
+    assert len(capped) == 500
+    assert kept.dtype == counts.dtype
+
+
+def test_the_cap_spans_the_window_rather_than_truncating_it():
+    """Events arrive oldest-first, so keeping a prefix would shorten the window."""
+    from applications.f3_depth_training.data import cap_events
+
+    events = np.zeros((1000, 4), np.float32)
+    events[:, 2] = np.linspace(20_000, 0, 1000)  # age, oldest first
+    capped, _ = cap_events(events, np.array([1000], np.int32), 100)
+    assert capped[0, 2] == pytest.approx(20_000), "oldest event dropped"
+    assert capped[-1, 2] == pytest.approx(0), "newest event dropped"
+
+
+def test_an_unset_or_generous_cap_is_a_no_op():
+    from applications.f3_depth_training.data import cap_events
+
+    events = np.arange(4 * 40, dtype=np.float32).reshape(40, 4)
+    counts = np.array([10, 30], np.int32)
+    for cap in (0, 30, 10_000):
+        capped, kept = cap_events(events, counts, cap)
+        assert capped is events and kept is counts, f"cap={cap} copied needlessly"
 
 
 def test_usable_samples_needs_half_the_depth_valid():

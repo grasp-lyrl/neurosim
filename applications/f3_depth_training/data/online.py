@@ -66,6 +66,26 @@ def build_online_loader(
     )
 
 
+def cap_events(events: np.ndarray, counts: np.ndarray, cap: int):
+    """Thin each sample down to `cap` events, evenly across its window.
+
+    Deployment runs a fixed event budget so the backbone fits the frame time, so training
+    sees the same. Evenly spaced rather than newest-first: the model is trained on a whole
+    window, and dropping the oldest events would quietly shorten it.
+    """
+    if cap <= 0 or counts.max() <= cap:
+        return events, counts
+
+    offsets = np.concatenate([[0], np.cumsum(counts)])
+    keep = [
+        np.arange(offsets[i], offsets[i + 1])
+        if n <= cap
+        else offsets[i] + np.linspace(0, n - 1, cap).astype(np.int64)
+        for i, n in enumerate(counts)
+    ]
+    return events[np.concatenate(keep)], np.minimum(counts, cap).astype(counts.dtype)
+
+
 def process_batch(batch, args, device):
     """One loader batch -> ``(events, counts, disparity, color_images)`` on `device`.
 
@@ -78,6 +98,7 @@ def process_batch(batch, args, device):
     assert depth_sensor in batch, f"no '{depth_sensor}' in batch: {list(batch)}"
 
     counts, events = batch[event_sensor]
+    events, counts = cap_events(events, counts, args.max_events)
     ff_events = torch.from_numpy(events).float().to(device)
     event_counts = torch.from_numpy(counts).to(device)
     ff_events[:, :3] /= torch.tensor(

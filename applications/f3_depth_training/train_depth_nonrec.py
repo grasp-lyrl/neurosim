@@ -382,6 +382,7 @@ def main():
     event_W, event_H, event_T = model.eventff.frame_sizes
     window_us = data_cfg.get("event_time_window_us", event_T * 1000)
     args.event_norm = (event_W, event_H, window_us)
+    args.max_events = int(data_cfg.get("max_events_per_sample", 0))
     logger.info("Initializing OnlineDataLoader (event norm window=%s us)...", window_us)
     dataloader = build_online_loader(
         data_cfg,

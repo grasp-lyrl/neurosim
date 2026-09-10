@@ -51,6 +51,7 @@ eventff:
 data:
   trainer_gpu: 1 # trainer GPU (producers run on online_data.gpu_ids)
   min_events_per_sample: 500 # drop sparser samples before they reach a batch
+  max_events_per_sample: 800000 # thin a sample to this many events; 0 disables
 
   # Recorded M3ED flights scored against LiDAR
   m3ed:
@@ -81,8 +82,7 @@ data:
         event_camera_1:
           leak_scale: {range: [0.75, 1.0]} # 1.0 is the calibration; above it is unphysical
           k:
-            - {range: [5.36, 6.55]} # k1 +/-10% about 5.95, the rate matching a
-              # real Prophesee's 27 ev/px/s at hfov 90
+            - {range: [4.739, 5.792]} # k1, the event-rate knob, +/-10% about DVS346
             - {range: [17.0, 23.0]} # k2, spanning both camera presets
             - 1.0e-4 # k3
             - 1.0e-7 # k4 thermal leakage

@@ -115,6 +115,7 @@ def main():
     model = load_model(args.run, args.ckpt, device)
     width, height, window_ms = model.eventff.frame_sizes
     args.event_norm = (width, height, window_ms * 1000)
+    args.max_events = int(data_cfg.get("max_events_per_sample", 0))
     cmap = colormaps["magma"]
 
     # One producer: this is a viewer, and episodes should arrive in order.
