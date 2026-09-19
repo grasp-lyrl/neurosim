@@ -1,5 +1,6 @@
 """F3 event feature field: hash-encode events, scatter, encode, upsample back to full res."""
 
+import math
 from pathlib import Path
 
 import torch
@@ -74,6 +75,15 @@ class F3(nn.Module):
         self.feature_size = upsampling_dims
         self.multi_hash_encoder = hash_encoder
 
+        # Off during training, where every event sits on an integer sensor pixel and the
+        # splat would be an identity costing 24% of feature_field. Turn it on to infer on
+        # events whose coordinates are not integers -- undistorted ones -- where rounding
+        # alone leaves cells no event can reach. Not a checkpoint field: it describes the
+        # stream being fed, not the model.
+        self.bilinear_splat = False
+
+        self.latent_channels = dims[-1]
+        self.latent_stride = math.prod(dsstrides)
         in_channels = hash_encoder.levels * hash_encoder.feature_size
         self.downsample_layers = nn.ModuleList(
             [
@@ -162,9 +172,18 @@ class F3(nn.Module):
         )
 
     def feature_field(self, events: Tensor, counts: Tensor) -> Tensor:
-        """Events [N, 3] with per-sample counts [B] -> accumulated hash field [B, L*F, W, H]."""
-        px = (events[:, 0] * self.w).round().int()
-        py = (events[:, 1] * self.h).round().int()
+        """Events [N, 3] with per-sample counts [B] -> accumulated hash field [B, L*F, W, H].
+
+        Events land in the cell they round to. Under :attr:`bilinear_splat` each one is
+        instead spread over the 2x2 cells around that one, which is an identity for the
+        integer sensor coordinates all training data uses, and matters only for streams
+        whose coordinates are fractional -- undistorted events, say -- where rounding
+        alone leaves a fixed pattern of cells that nothing can reach (36% of them, for
+        the 80 deg DVXplorer calibration) and the field reads that pattern as structure.
+        """
+        fx = events[:, 0] * self.w
+        fy = events[:, 1] * self.h
+        cx, cy = fx.round(), fy.round()
         encoded = self.multi_hash_encoder(events.unsqueeze(0)).squeeze(0)
 
         field = torch.zeros(
@@ -173,11 +192,27 @@ class F3(nn.Module):
             dtype=encoded.dtype,
         )
         batch = batch_index(counts, encoded.shape[0]).int()
-        field.index_put_((batch, px, py), encoded, accumulate=True)
+        # Clamp regardless: a coordinate a hair under 1.0 rounds up to w, and indexing
+        # off the field is a device-side assert rather than an error you can read.
+        if not self.bilinear_splat:
+            gx = cx.clamp(0, self.w - 1).int()
+            gy = cy.clamp(0, self.h - 1).int()
+            field.index_put_((batch, gx, gy), encoded, accumulate=True)
+            return field.permute(0, 3, 1, 2)
+
+        dx, dy = fx - cx, fy - cy  # in [-0.5, 0.5]; exactly 0 on the sensor grid
+        # The neighbour lies whichever way the event fell; clamping at the border folds
+        # its share back onto the centre cell, so no event loses weight off the edge.
+        for offset_x, weight_x in ((0, 1 - dx.abs()), (torch.sign(dx), dx.abs())):
+            gx = (cx + offset_x).clamp(0, self.w - 1).int()
+            for offset_y, weight_y in ((0, 1 - dy.abs()), (torch.sign(dy), dy.abs())):
+                gy = (cy + offset_y).clamp(0, self.h - 1).int()
+                share = (weight_x * weight_y).to(encoded.dtype).unsqueeze(-1)
+                field.index_put_((batch, gx, gy), encoded * share, accumulate=True)
         return field.permute(0, 3, 1, 2)
 
-    def encode(self, field: Tensor) -> Tensor:
-        """Hash field [B, L*F, W, H] -> feature field [B, upsampling_dims, W, H]."""
+    def contract(self, field: Tensor) -> tuple[Tensor, list[Tensor]]:
+        """Hash field -> stride-16 latent [B, dims[-1], W/16, H/16], plus the skips."""
         skips = [field]
         x = field
         for i, (downsample, stage) in enumerate(
@@ -186,13 +221,21 @@ class F3(nn.Module):
             x = stage(downsample(x))
             if i < len(self.stages) - 1:
                 skips.append(x)
+        return x, skips
 
+    def expand(self, latent: Tensor, skips: list[Tensor], field: Tensor) -> Tensor:
+        """Stride-16 latent + skips -> feature field [B, upsampling_dims, W, H]."""
+        x = latent
         for i in range(len(self.upsample_layers) - 1):
             x = self.upsample_layers[i](x)
             x = self.upsample_process[i](torch.cat([skips[-(i + 1)], x], dim=1))
         x = self.upsample_layers[-1](x)
         x = torch.cat([x, self.downsample_hash_to_patchsize(field)], dim=1)
         return self.upsample_process[-1](x)
+
+    def encode(self, field: Tensor) -> Tensor:
+        """Hash field [B, L*F, W, H] -> feature field [B, upsampling_dims, W, H]."""
+        return self.expand(*self.contract(field), field)
 
     def forward(self, events: Tensor, counts: Tensor) -> Tensor:
         """Events [N, 3] with per-sample counts [B] -> feature field [B, C, W, H]."""
