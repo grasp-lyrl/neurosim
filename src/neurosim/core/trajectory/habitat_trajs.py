@@ -119,12 +119,19 @@ def sample_minsnap_trajectory(
 def sample_random_navigable_point_with_height(
     pathfinder,
     max_retries: int = 100,
+    margin: float = 0.35,
+    max_height: float | None = None,
 ) -> np.ndarray | None:
     """Sample a random navigable point with random height and check navigability.
+
+    The height is sampled above *that point's own floor*, not from the navmesh's
+    global ``min_y``.
 
     Args:
         pathfinder: Habitat pathfinder instance
         max_retries: Number of retries before giving up
+        margin: Clearance held above the local floor and below the ceiling (m)
+        max_height: Ceiling for the flight band, measured above the local floor (m).
 
     Returns:
         A navigable point with random height, or None if unable to find one
@@ -142,8 +149,16 @@ def sample_random_navigable_point_with_height(
         if point[2] < min_z or point[2] > max_z:
             continue
 
-        # Sample random height within specified range
-        point[1] = random.uniform(min_y, max_y)
+        # get_random_navigable_point returns the floor height at that point; fly
+        # between it and the ceiling, keeping `margin` clear of both.
+        floor_y = float(point[1])
+        low = max(float(min_y) + margin, floor_y + margin)
+        high = float(max_y) - margin
+        if max_height is not None:
+            high = min(high, floor_y + float(max_height))
+        if high <= low:  # scene too short for the margin: use its middle
+            low = high = 0.5 * (max(float(min_y), floor_y) + float(max_y))
+        point[1] = random.uniform(low, high)
 
         # Check if navigable
         if pathfinder.is_navigable(point):
@@ -221,6 +236,7 @@ def sample_waypoint_path(
     max_waypoints: int = 100,
     start: np.ndarray | None = None,
     max_tries_per_waypoint: int = 100,
+    max_height: float | None = None,
 ) -> tuple[np.ndarray, float]:
     """Sample the raw navmesh waypoint path that :func:`generate_interesting_traj` smooths.
 
@@ -247,7 +263,9 @@ def sample_waypoint_path(
     max_tries = max_tries_per_waypoint * max_waypoints
 
     if start is None:
-        start = sample_random_navigable_point_with_height(pathfinder)
+        start = sample_random_navigable_point_with_height(
+            pathfinder, max_height=max_height
+        )
         if start is None:
             raise RuntimeError(
                 "Unable to sample initial navigable point."
@@ -269,7 +287,9 @@ def sample_waypoint_path(
         num_tries += 1
 
         # Sample a random navigable point with random height within bounds
-        candidate = sample_random_navigable_point_with_height(pathfinder)
+        candidate = sample_random_navigable_point_with_height(
+            pathfinder, max_height=max_height
+        )
 
         # ensure candidate is valid and sufficiently far
         if (
@@ -386,6 +406,7 @@ def generate_interesting_traj(
     episode_duration: float | None = None,
     hovers: int = 0,
     hover_s: float = 2.5,
+    max_height: float | None = None,
 ) -> MinSnap | HoverMinSnap:
     """Generate a longer trajectory by sampling distant waypoints and connecting them.
 
@@ -410,6 +431,7 @@ def generate_interesting_traj(
         episode_duration: Episode length in seconds; warn when the trajectory is shorter.
         hovers: Pauses to hold between flight segments; 0 flies straight through.
         hover_s: Seconds held at each pause.
+        max_height: Ceiling for the flight band above the local floor (m).
 
     Returns:
         A MinSnap, or a HoverMinSnap when ``hovers`` is non-zero.
@@ -428,6 +450,7 @@ def generate_interesting_traj(
         max_waypoints=max_waypoints,
         start=start,
         max_tries_per_waypoint=max_tries_per_waypoint,
+        max_height=max_height,
     )
 
     if coord_transform is not None:

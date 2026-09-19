@@ -82,6 +82,7 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
             episode_duration=kwargs.get("episode_duration", None),
             hovers=int(kwargs.get("hovers", 0)),
             hover_s=float(kwargs.get("hover_s", 2.5)),
+            max_height=kwargs.get("max_height", None),
         )
     else:
         raise ValueError(f"Unsupported trajectory type: {model}")
