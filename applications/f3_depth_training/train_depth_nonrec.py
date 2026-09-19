@@ -53,6 +53,20 @@ from .utils import (
     set_best_results,
 )
 
+
+def valid_disparity(disparity: torch.Tensor, args) -> torch.Tensor:
+    """Pixels the loss may learn from: near enough to read, far enough to be real.
+
+    Both bounds matter because the depth clamp that builds this disparity is two-sided.
+    Below ``min_disparity`` every pixel was pinned to exactly that value -- one flat
+    patch covering everything past the far limit, often most of the frame looking down a
+    corridor. A scale-and-shift-invariant loss fits scale and shift per frame, so that
+    patch pulls them around as its size changes, and the prediction has to flicker to
+    follow. Masking it out leaves the fit to the range the model is actually judged on.
+    """
+    return (disparity < args.max_disparity) & (disparity > args.min_disparity)
+
+
 # Metrics from eval_relative_depth; the loss name is appended per run.
 METRICS = ("abs_rel", "sq_rel", "d1", "d2", "d3", "rmse", "rmse_log", "log10", "silog")
 
@@ -89,7 +103,7 @@ def train_epoch(
     """Train for one epoch (consumes ``max_batches`` batches from the loader)."""
     model.train()
     train_loss = 0.0
-    iter_loss = 0.0
+    iter_loss = torch.zeros((), device=args.device)
     idx = 0
 
     pbar = tqdm(enumerate(dataloader), desc=f"Epoch {epoch}", total=max_batches)
@@ -105,43 +119,48 @@ def train_epoch(
         )
         disparity = batch_cropper(disparity.unsqueeze(1), cparams).squeeze(1)
 
+        # Decided before the forward: an unusable batch should not cost one, and the
+        # host sync this costs then waits only on the copy, not on the whole step.
+        disparity_valid_mask = valid_disparity(disparity, args)
+        keep = usable_samples(disparity_valid_mask)
+        if not keep.any():
+            continue
+
         with torch.autocast(device_type="cuda", enabled=args.amp, dtype=torch.bfloat16):
             disparity_pred = model(ff_events, event_counts, cparams)[0]  # (B, H, W)
 
         # The SSI loss normalizes by a per-sample MAD, so it runs in fp32 even
         # under autocast; bf16 there would divide by an 8-bit-mantissa scale.
-        disparity_pred = disparity_pred.float()
-        disparity_valid_mask = disparity < args.max_disparity
-        keep = usable_samples(disparity_valid_mask)
-        if not keep.any():
-            continue
         loss = loss_fn(
-            disparity_pred[keep], disparity[keep], disparity_valid_mask[keep]
+            disparity_pred.float()[keep], disparity[keep], disparity_valid_mask[keep]
         )
         loss = loss / iters_to_accumulate
 
         loss.backward()
-        train_loss += loss.item()
-        iter_loss += loss.item()
+        # Summed on the device: reading it here would stall the host every batch and
+        # leave the GPU idle through the next batch's copy and crop.
+        iter_loss += loss.detach()
 
         if (idx + 1) % iters_to_accumulate == 0:
             if args.clip_grad > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            step_loss = iter_loss.item()
+            train_loss += step_loss
             pbar.set_postfix(
-                {"loss": f"{iter_loss:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"}
+                {"loss": f"{step_loss:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"}
             )
             log_wandb(
                 args,
                 {
-                    "train/iter_loss": iter_loss,
+                    "train/iter_loss": step_loss,
                     "opt/lr": scheduler.get_last_lr()[0],
                     "opt/epoch": epoch,
                     "opt/iteration": idx,
                 },
             )
-            iter_loss = 0.0
+            iter_loss.zero_()
 
     num_iters = max(1, (idx + 1) // iters_to_accumulate)
     train_loss /= num_iters
@@ -215,7 +234,7 @@ def validate(
         disparity_pred = predict_full_frame(
             model, ff_events, event_counts, H, W
         ).float()
-        valid_mask = disparity < args.max_disparity
+        valid_mask = valid_disparity(disparity, args)
         keep = usable_samples(valid_mask)
         if not keep.any():
             continue
