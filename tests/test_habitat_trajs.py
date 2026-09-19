@@ -7,6 +7,8 @@ from neurosim.core.trajectory.habitat_trajs import (
     YAW_RATE_MARGIN,
     YAW_RATE_MAX,
     HoverMinSnap,
+    RateLimitedYaw,
+    rate_limited_profile,
     build_minsnap,
     rate_limit_yaw,
     split_indices,
@@ -171,3 +173,111 @@ def test_split_indices_are_deterministic():
 def test_split_indices_rejects_a_path_too_short_to_chunk():
     with pytest.raises(AssertionError, match="waypoints spread wider"):
         split_indices(straight_path(n=3), 4, np.random.default_rng(0))
+
+
+# --------------------------------------------------------------------------- #
+# RateLimitedYaw
+# --------------------------------------------------------------------------- #
+class SpinningTrajectory:
+    """A trajectory whose yaw whips round far faster than any cap would allow."""
+
+    def __init__(self, duration: float = 10.0, rate: float = 6.0):
+        self.t_keyframes = np.array([0.0, duration])
+        self.rate = rate
+        self.null = False
+
+    def update(self, t: float) -> dict:
+        return {
+            "x": np.array([t, 0.0, 0.0]),
+            "x_dot": np.array([1.0, 0.0, 0.0]),
+            "x_ddot": np.zeros(3),
+            "yaw": self.rate * t,
+            "yaw_dot": self.rate,
+            "yaw_ddot": 0.0,
+        }
+
+
+def sampled_yaw_rate(traj, duration: float = 10.0, dt: float = 0.02) -> np.ndarray:
+    return np.array(
+        [abs(traj.update(float(t))["yaw_dot"]) for t in np.arange(0, duration, dt)]
+    )
+
+
+def test_yaw_rate_never_exceeds_the_cap():
+    """The point of the class: the cap is a bound, not a request to the solver."""
+    cap = np.pi / 3
+    raw = SpinningTrajectory(rate=6.0)
+    assert sampled_yaw_rate(raw).max() > cap, "the fixture should exceed the cap"
+
+    limited = RateLimitedYaw(raw, yaw_rate_max=cap)
+    assert sampled_yaw_rate(limited).max() <= cap + 1e-6
+
+
+def test_yaw_stays_continuous_under_the_cap():
+    """A slew limiter that stepped would hand the controller a discontinuous demand."""
+    limited = RateLimitedYaw(SpinningTrajectory(rate=6.0), yaw_rate_max=np.pi / 3)
+    yaw = np.array([limited.update(float(t))["yaw"] for t in np.arange(0, 10.0, 0.02)])
+    # No step may exceed what the cap allows over one sample, with room for interpolation.
+    assert np.abs(np.diff(yaw)).max() <= (np.pi / 3) * 0.02 * 1.5
+
+
+def test_position_passes_through_untouched():
+    """Yaw is a free output; wrapping it must not disturb where the vehicle goes."""
+    raw = SpinningTrajectory()
+    limited = RateLimitedYaw(raw, yaw_rate_max=np.pi / 3)
+    for t in (0.0, 2.5, 7.5):
+        assert np.array_equal(limited.update(t)["x"], raw.update(t)["x"])
+        assert np.array_equal(limited.update(t)["x_dot"], raw.update(t)["x_dot"])
+
+
+def test_a_degenerate_trajectory_passes_straight_through():
+    """MinSnap leaves t_keyframes unset when a path collapses to one waypoint."""
+
+    class Degenerate:
+        null = True
+
+        def update(self, t):
+            return {"x": np.zeros(3), "yaw": 0.3, "yaw_dot": 0.0, "yaw_ddot": 0.0}
+
+    limited = RateLimitedYaw(Degenerate(), yaw_rate_max=np.pi / 3)
+    assert limited.update(1.0)["yaw"] == 0.3
+
+
+def test_attributes_delegate_to_the_wrapped_trajectory():
+    """Callers reach for t_keyframes and null straight through the wrapper."""
+    limited = RateLimitedYaw(SpinningTrajectory(duration=4.0), yaw_rate_max=np.pi / 3)
+    assert float(limited.t_keyframes[-1]) == 4.0
+    assert limited.null is False
+
+
+def test_the_profile_bounds_acceleration_as_well_as_rate():
+    """Rate alone would let yaw_dot step, handing the controller a jump to track."""
+    target = np.full(500, 3.0)  # a hard step from 0, as a corner does
+    _, rate, _ = rate_limited_profile(
+        target, step=0.01, rate_max=1.0, accel_max=2.0, gain=50.0
+    )
+    assert np.abs(rate).max() <= 1.0 + 1e-9
+    assert np.abs(np.diff(rate)).max() <= 2.0 * 0.01 + 1e-9
+
+
+def test_the_profile_turns_the_short_way_round():
+    """+pi and -pi are the same heading; chasing the raw difference is a full turn."""
+    target = np.full(2000, -np.pi + 0.05)
+    angle, _, _ = rate_limited_profile(
+        np.concatenate([[np.pi - 0.05], target]),
+        step=0.01,
+        rate_max=1.0,
+        accel_max=4.0,
+        gain=2.0,
+    )
+    # 0.1 rad apart across the wrap, so the turn is short whichever way it is unwrapped.
+    assert np.ptp(angle) < 0.5, f"turned {np.ptp(angle):.2f} rad to cover 0.1"
+
+
+def test_the_profile_settles_on_a_steady_target():
+    """A constant heading must be reached and held, not orbited."""
+    angle, rate, _ = rate_limited_profile(
+        np.full(3000, 1.0), step=0.01, rate_max=1.0, accel_max=4.0, gain=2.0
+    )
+    assert abs(angle[-1] - 1.0) < 1e-3
+    assert abs(rate[-1]) < 1e-3
