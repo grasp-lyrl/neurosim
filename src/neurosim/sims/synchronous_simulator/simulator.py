@@ -100,6 +100,9 @@ class SynchronousSimulator:
         self._init_visual_backend()
         self._init_visual_sensors()
 
+        # Optional safety checker (Habitat-backed; skipped if no pathfinder).
+        self._init_safety_checker()
+
         # Initialize dynamics, controller, trajectory
         self._init_dynamics()
         self._init_controller()
@@ -107,9 +110,6 @@ class SynchronousSimulator:
 
         # Initialize additional sensors like IMU and bind their executors
         self._init_additional_sensors()
-
-        # Optional safety checker (Habitat-backed; skipped if no pathfinder)
-        self._init_safety_checker()
 
         # Initialize visualizer
         self.visualizer = None
@@ -311,6 +311,8 @@ class SynchronousSimulator:
             traj_kwargs = traj_settings.copy()
             if hasattr(self.visual_backend, "_sim"):
                 traj_kwargs["pathfinder"] = self.visual_backend._sim.pathfinder
+                if self.safety is not None:
+                    traj_kwargs["indoors"] = self.safety.is_indoors
             traj_kwargs["coord_transform"] = self.coord_trans.inverse_transform_batch
             traj_kwargs["episode_duration"] = self.config.sim_time
             self.trajectory = create_trajectory(**traj_kwargs)
@@ -344,7 +346,10 @@ class SynchronousSimulator:
         safety_cfg = self.settings.get("safety", {})
         enable_navigable_check = bool(safety_cfg.get("enable_navigable_check", False))
         self.safety = HabitatSafetyChecker(
-            self, enable_navigable_check=enable_navigable_check
+            self,
+            enable_navigable_check=enable_navigable_check,
+            enable_sky_check=bool(safety_cfg.get("enable_sky_check", True)),
+            sky_probe_m=float(safety_cfg.get("sky_probe_m", 4.0)),
         )
         self._abort_out_of_bounds = bool(safety_cfg.get("abort_out_of_bounds", False))
 

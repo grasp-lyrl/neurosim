@@ -266,3 +266,69 @@ def test_check_obstacle_collision_with_spawned_obstacle():
         assert checker.has_obstacle_collision(far) is False
     finally:
         sim.close()
+
+
+# ---------------------------------------------------------------------------
+# The roof-and-ground check that keeps the drone out of the garden
+# ---------------------------------------------------------------------------
+def _checker_with_rays(hits_up: bool, hits_down: bool) -> HabitatSafetyChecker:
+    """A checker whose raycasts answer as told, so the logic is testable off-scene."""
+    checker = HabitatSafetyChecker.__new__(HabitatSafetyChecker)
+    checker._enable_sky = True
+    checker._sky_probe_m = 4.0
+
+    def cast_ray(ray, max_distance):
+        result = MagicMock()
+        # Habitat is Y up, so the sign of the ray's y component says which probe this is.
+        result.has_hits.return_value = hits_up if ray.direction.y > 0 else hits_down
+        return result
+
+    checker._sim = MagicMock()
+    checker._sim.cast_ray.side_effect = cast_ray
+
+    # Enough of the rest for check() to run: identity frames, roomy bounds, no obstacles.
+    checker._pos_transform = np.eye(3)
+    checker._lo_x = checker._lo_y = checker._lo_z = -10.0
+    checker._hi_x = checker._hi_y = checker._hi_z = 10.0
+    checker._enable_navigable = False
+    checker._dynamic_obstacles = None
+    return checker
+
+
+def test_a_point_with_roof_and_ground_is_indoors():
+    assert _checker_with_rays(hits_up=True, hits_down=True).is_indoors(np.zeros(3))
+
+
+def test_open_sky_overhead_is_not_indoors():
+    """A yard: floor underneath, nothing above."""
+    assert not _checker_with_rays(hits_up=False, hits_down=True).is_indoors(np.zeros(3))
+
+
+def test_nothing_underneath_is_not_indoors():
+    """A balcony edge or a ledge over a void."""
+    assert not _checker_with_rays(hits_up=True, hits_down=False).is_indoors(np.zeros(3))
+
+
+def test_the_sky_check_can_be_switched_off():
+    """Outdoor scenes should still be usable when someone asks for them."""
+    checker = _checker_with_rays(hits_up=False, hits_down=False)
+    checker._enable_sky = False
+    assert checker.is_indoors(np.zeros(3))
+
+
+def test_check_reports_open_sky_as_not_indoors():
+    """Its own reason, so a yard is distinguishable from leaving the scene."""
+    safe, reason = _checker_with_rays(hits_up=False, hits_down=True).check(np.zeros(3))
+    assert (safe, reason) == (False, "not_indoors")
+
+
+def test_check_still_reports_leaving_the_scene_as_out_of_bounds():
+    """The two must not be conflated: one is a garden, the other is off the map."""
+    checker = _checker_with_rays(hits_up=True, hits_down=True)
+    safe, reason = checker.check(np.array([999.0, 0.0, 0.0]))
+    assert (safe, reason) == (False, "out_of_bounds")
+
+
+def test_check_passes_a_point_indoors_and_in_bounds():
+    safe, reason = _checker_with_rays(hits_up=True, hits_down=True).check(np.zeros(3))
+    assert (safe, reason) == (True, "")

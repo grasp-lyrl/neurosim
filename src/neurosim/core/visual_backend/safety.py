@@ -3,6 +3,7 @@
 Safety policy in this module:
 - In-bounds check against full 3D pathfinder bounds.
 - Optional direct `pathfinder.is_navigable(point)` check.
+- Optional roof-and-ground check, since the navmesh covers yards and balconies too.
 - Optional sphere-sphere collision check against dynamic obstacles.
 """
 
@@ -17,10 +18,19 @@ class HabitatSafetyChecker:
     Args:
         sim: ``SynchronousSimulator`` instance (must have a loaded Habitat backend).
         enable_navigable_check: If False, skip direct navigability checks.
+        enable_sky_check: If False, skip the roof-and-ground check.
+        sky_probe_m: How far to look for a roof above and ground below (m).
     """
 
-    def __init__(self, sim: Any, enable_navigable_check: bool = True):
-        self._pathfinder = sim.visual_backend._sim.pathfinder
+    def __init__(
+        self,
+        sim: Any,
+        enable_navigable_check: bool = True,
+        enable_sky_check: bool = True,
+        sky_probe_m: float = 4.0,
+    ):
+        self._sim = sim.visual_backend._sim
+        self._pathfinder = self._sim.pathfinder
         if self._pathfinder is None or not self._pathfinder.is_loaded:
             raise RuntimeError(
                 "HabitatSafetyChecker requires a loaded Habitat pathfinder."
@@ -31,6 +41,8 @@ class HabitatSafetyChecker:
         )
         self._dynamic_obstacles = sim.visual_backend._dynamic_obstacles
         self._enable_navigable = enable_navigable_check
+        self._enable_sky = enable_sky_check
+        self._sky_probe_m = float(sky_probe_m)
 
         # Full 3D bounds in Habitat coordinates.
         lo, hi = self._pathfinder.get_bounds()
@@ -65,6 +77,25 @@ class HabitatSafetyChecker:
             self._pathfinder.is_navigable(np.asarray(habitat_pos, dtype=np.float64))
         )
 
+    def is_indoors(self, habitat_pos: np.ndarray) -> bool:
+        """Roof overhead and ground underneath; outdoors one of them is missing.
+
+        The navmesh covers yards, balconies and driveways as readily as rooms, because
+        it only asks whether a floor is walkable. Check if thats the case.
+        """
+        if not self._enable_sky:
+            return True
+
+        import habitat_sim
+        import magnum as mn
+
+        origin = mn.Vector3(*(float(v) for v in habitat_pos))
+        for direction in (mn.Vector3(0, 1, 0), mn.Vector3(0, -1, 0)):
+            ray = habitat_sim.geo.Ray(origin, direction)
+            if not self._sim.cast_ray(ray, max_distance=self._sky_probe_m).has_hits():
+                return False
+        return True
+
     def has_obstacle_collision(self, habitat_pos: np.ndarray) -> bool:
         """Check sphere-sphere collision with any active dynamic obstacle."""
         if self._dynamic_obstacles is None:
@@ -77,6 +108,8 @@ class HabitatSafetyChecker:
             return False, "out_of_bounds"
         if not self.is_navigable(hp):
             return False, "not_navigable"
+        if not self.is_indoors(hp):
+            return False, "not_indoors"
         if self.has_obstacle_collision(hp):
             return False, "obstacle_collision"
         return True, ""
