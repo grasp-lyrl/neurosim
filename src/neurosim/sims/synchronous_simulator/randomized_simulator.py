@@ -93,6 +93,8 @@ class DomainRandomizationConfig:
         sensors: Per-sensor-UUID dict of randomizable parameters. A key may list
             several UUIDs comma-separated (``"event_camera_1,depth_camera_1"``) to
             sample once and apply the same values to all of them.
+        visual_backend: Randomizable keys of the ``visual_backend`` block itself, for
+            what is not a sensor -- ``agent_height`` and friends.
         resample_every: Episodes between scene/sensor reconfigures (same meaning as
             the RL ``domain_randomization.resample_every``).
         trajectory: Optional per-param ``{range|choices}`` specs for the trajectory.
@@ -106,6 +108,7 @@ class DomainRandomizationConfig:
 
     scenes: list[dict[str, str]] = field(default_factory=list)
     sensors: dict[str, dict[str, Any]] = field(default_factory=dict)
+    visual_backend: dict[str, Any] = field(default_factory=dict)
     resample_every: int = 1
     trajectory: dict[str, Any] = field(default_factory=dict)
 
@@ -136,6 +139,7 @@ class DomainRandomizationConfig:
         return cls(
             scenes=scenes,
             sensors=sensors,
+            visual_backend=dict(data.get("visual_backend", {})),
             resample_every=max(1, int(data.get("resample_every", 1))),
             trajectory=dict(data.get("trajectory", {})),
         )
@@ -145,12 +149,18 @@ class DomainRandomizationConfig:
         base_settings: dict[str, Any],
         rng: np.random.Generator,
     ) -> dict[str, Any]:
-        """Return a new settings dict with scene + sensor randomization applied.
+        """Return a new settings dict with scene, backend and sensor randomization applied.
 
         The *base_settings* dict is deep-copied before mutation. (Trajectory is
         handled separately by :meth:`sample_trajectory` / ``renew_trajectory``.)
         """
         settings = copy.deepcopy(base_settings)
+
+        # First, so a scene or sensor draw below still has the last word.
+        if self.visual_backend:
+            _apply_randomization_layer(
+                settings.setdefault("visual_backend", {}), self.visual_backend, rng
+            )
 
         if self.scenes:
             scene = self.scenes[int(rng.integers(0, len(self.scenes)))]

@@ -463,3 +463,44 @@ def test_sims_package_exports_randomized_simulator():
 
     assert RandomizedSimulator is not None
     assert DomainRandomizationConfig is not None
+
+
+def test_visual_backend_keys_can_be_randomized():
+    """agent_height lives on the backend, not a sensor, and the navmesh is built from it."""
+    from neurosim.sims.synchronous_simulator.randomized_simulator import (
+        DomainRandomizationConfig,
+    )
+
+    cfg = DomainRandomizationConfig.from_dict(
+        {"visual_backend": {"agent_height": {"range": [1.0, 1.5]}}}
+    )
+    base = {"visual_backend": {"agent_height": 1.0, "agent_radius": 0.3, "sensors": {}}}
+    rng = np.random.default_rng(0)
+
+    drawn = {cfg.sample(base, rng)["visual_backend"]["agent_height"] for _ in range(50)}
+    assert len(drawn) > 1, "the draw should vary"
+    assert all(1.0 <= h <= 1.5 for h in drawn)
+    # The base dict is deep-copied, so repeated episodes never compound.
+    assert base["visual_backend"]["agent_height"] == 1.0
+    assert cfg.sample(base, rng)["visual_backend"]["agent_radius"] == 0.3
+
+
+def test_backend_randomization_leaves_scene_and_sensors_alone():
+    """The three blocks are independent; one must not clobber another."""
+    from neurosim.sims.synchronous_simulator.randomized_simulator import (
+        DomainRandomizationConfig,
+    )
+
+    cfg = DomainRandomizationConfig.from_dict(
+        {
+            "scenes": [{"name": "s", "path": "s.glb"}],
+            "visual_backend": {"agent_height": {"range": [1.0, 1.5]}},
+            "sensors": {"cam": {"hfov": {"range": [70, 110]}}},
+        }
+    )
+    base = {"visual_backend": {"agent_height": 1.0, "sensors": {"cam": {"hfov": 90}}}}
+    out = cfg.sample(base, np.random.default_rng(0))["visual_backend"]
+
+    assert out["scene"] == "s.glb"
+    assert 1.0 <= out["agent_height"] <= 1.5
+    assert 70 <= out["sensors"]["cam"]["hfov"] <= 110
