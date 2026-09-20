@@ -192,15 +192,18 @@ class SimulatorWorker:
         # every ``resample_every`` episodes (from the DR config) and rebuilds
         # the trajectory in-place every episode. (Dynamics DR stays RL-only.)
         self.rsim.randomize(self._rng)
-        scene = ""
+        scene, hfov = "", 0.0
         sampled = getattr(self.rsim, "last_sampled_settings", None)
         if sampled:
-            scene = sampled.get("visual_backend", {}).get("scene", "")
+            backend = sampled.get("visual_backend", {})
+            scene = backend.get("scene", "")
+            anchor = self.schema.anchor_uuids[0]
+            hfov = float(backend.get("sensors", {}).get(anchor, {}).get("hfov", 0.0))
 
         before = self.assembler.stats["emitted"]
         episode_id = SampleMeta.make_episode_id(self.worker_id, episode_idx)
         self.assembler.begin_episode(
-            episode_idx=episode_idx, scene=scene, seed=self.seed
+            episode_idx=episode_idx, scene=scene, seed=self.seed, hfov=hfov
         )
         self.sim.run(callback_hook_=self._on_sim_step)
         for sample in self.assembler.end_episode():

@@ -93,6 +93,7 @@ class BatchMeta:
     sample_uid: np.ndarray
     worker_id: np.ndarray
     spec_id: np.ndarray
+    hfov: np.ndarray
     scene: list
     anchor_uuids: tuple
 
@@ -109,6 +110,7 @@ class BatchMeta:
             sample_uid=col("sample_uid", np.int64),
             worker_id=col("worker_id", np.int64),
             spec_id=col("spec_id", np.int64),
+            hfov=col("hfov", np.float32),
             scene=[m.scene for m in metas],
             anchor_uuids=metas[0].anchor_uuids if metas else (),
         )

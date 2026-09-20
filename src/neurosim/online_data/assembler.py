@@ -178,6 +178,7 @@ class AnchorAssembler:
         scene: str = "",
         seed: int = 0,
         t_start_us: int = 0,
+        hfov: float = 0.0,
     ) -> None:
         """Reset accumulators for a new episode/trajectory."""
         for acc in self._streams.values():
@@ -186,6 +187,7 @@ class AnchorAssembler:
         self._episode_id = SampleMeta.make_episode_id(self.worker_id, episode_idx)
         self._scene = scene
         self._seed = seed
+        self._hfov = hfov
         self._step_idx = 0
         self._t_prev_us = int(t_start_us)
         self._pending = None
@@ -289,6 +291,7 @@ class AnchorAssembler:
             is_first=(self._step_idx == 0),
             is_last=False,
             sample_uid=self._uid,
+            hfov=self._hfov,
         )
         self._uid += 1
         self.stats["emitted"] += 1

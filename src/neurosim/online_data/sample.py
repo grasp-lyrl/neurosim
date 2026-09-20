@@ -30,6 +30,8 @@ class SampleMeta:
         is_first: True for the first sample of an episode (hidden-state reset).
         is_last: True for the final sample of an episode.
         sample_uid: Globally-monotonic id (dedup / sharding correctness checks).
+        hfov: Horizontal field of view of the anchor sensor, degrees; 0 if unknown.
+            Metric depth needs it: depth scales with focal length.
     """
 
     worker_id: int
@@ -44,6 +46,7 @@ class SampleMeta:
     is_first: bool
     is_last: bool
     sample_uid: int
+    hfov: float = 0.0
 
     @staticmethod
     def make_episode_id(worker_id: int, episode_idx: int) -> int:
