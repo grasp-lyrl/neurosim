@@ -118,6 +118,11 @@ def process_batch(batch, args, device):
     return ff_events, event_counts, disparity, color_images
 
 
-def usable_samples(valid_mask: Tensor) -> Tensor:
-    """Rows with at least half their depth pixels valid."""
-    return valid_mask.flatten(1).sum(1) * 2 >= valid_mask[0].numel()
+def valid_disparity(disparity: Tensor, args) -> Tensor:
+    """Pixels the loss may learn from: near enough to read, near enough to be real."""
+    return (disparity < args.max_disparity) & (disparity > args.min_disparity)
+
+
+def usable_samples(valid_mask: Tensor, min_valid_frac: float = 0.5) -> Tensor:
+    """Rows with at least ``min_valid_frac`` of their depth pixels valid."""
+    return valid_mask.flatten(1).sum(1) >= min_valid_frac * valid_mask[0].numel()

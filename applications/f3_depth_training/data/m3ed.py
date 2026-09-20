@@ -190,6 +190,9 @@ def evaluate_m3ed(
     for events, counts, disparity, mask in loader:
         events, counts = events.to(device), counts.to(device)
         disparity, mask = disparity.to(device), mask.to(device)
+        # Same far limit the trainer masks at, or validation scores a range training
+        # never fitted: LiDAR keeps returning past 20 m where the sim's depth is clamped.
+        mask = mask & (disparity > min_disparity)
 
         height, width = disparity.shape[1:]
         pred = predict(model, events, counts, height, width).float()
