@@ -5,7 +5,6 @@ from .online import (
     process_batch,
     usable_sample_filter,
     usable_samples,
-    valid_disparity,
 )
 
 __all__ = [
@@ -18,5 +17,4 @@ __all__ = [
     "process_batch",
     "usable_sample_filter",
     "usable_samples",
-    "valid_disparity",
 ]

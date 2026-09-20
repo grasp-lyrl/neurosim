@@ -25,6 +25,10 @@ INTERMEDIATE_LAYERS = {
     "vitl": [4, 11, 17, 23],
 }
 
+# What the emit conv's output means. `relu` and `exp` give a relative disparity, DAv2's
+# and DA3's parameterizations; `sigmoid` gives metric depth.
+HEADS = ("relu", "exp", "sigmoid")
+
 
 class ResidualConvUnit(nn.Module):
     """Two 3x3 convs on a pre-activated input, added back to it."""
@@ -75,10 +79,10 @@ def _make_scratch(in_shape: list[int], out_shape: int) -> nn.Module:
 
 
 class DPTHead(nn.Module):
-    """Four encoder taps -> one disparity map at 14x the token grid.
+    """Four encoder taps -> one map at 14x the token grid, in the units `head` fixes.
 
-    `head` is `relu` for DAv2's own parameterisation, or `exp` for DA3's: the last conv
-    then emits a log disparity, so the activation stays O(1) whatever the range.
+    `head` is `relu` for DAv2's own parameterisation, `exp` for DA3's (the last conv emits
+    a log disparity, so the activation stays O(1) whatever the range), or `sigmoid` for DAv2-metric.
     """
 
     def __init__(
@@ -89,6 +93,7 @@ class DPTHead(nn.Module):
         head: str = "relu",
     ):
         super().__init__()
+        self.head = head
         self.projects = nn.ModuleList(
             nn.Conv2d(in_channels, out_channel, kernel_size=1)
             for out_channel in out_channels
@@ -119,8 +124,6 @@ class DPTHead(nn.Module):
         self.scratch.output_conv1 = nn.Conv2d(
             features, features // 2, kernel_size=3, padding=1
         )
-        # The trailing ReLU would floor a log disparity at exp(0) = 1, so `exp` drops it.
-        # Both keep the weights at index 0 and 2, so the state dict is the same either way.
         # Construction order is load-bearing: it fixes which weights each conv draws.
         self.scratch.output_conv2 = nn.Sequential(
             nn.Conv2d(features // 2, 32, kernel_size=3, padding=1),
@@ -128,8 +131,8 @@ class DPTHead(nn.Module):
             nn.Conv2d(32, 1, kernel_size=1),
             *([nn.ReLU(True), nn.Identity()] if head == "relu" else []),
         )
-        if head == "exp":
-            reset_log_emit(self)
+        if head != "relu":
+            reset_emit(self)
 
     def forward(self, out_features: tuple, patch_h: int, patch_w: int) -> Tensor:
         out = []
@@ -154,14 +157,17 @@ class DPTHead(nn.Module):
         return self.scratch.output_conv2(out)
 
 
-def reset_log_emit(depth_head: "DPTHead") -> None:
-    """Small weights on the emit conv, so a log-disparity head starts near exp(0) = 1.
+def reset_emit(depth_head: "DPTHead") -> None:
+    """Restart the emit conv: zeros for a sigmoid head, so every pixel starts at max_depth / 2.
 
-    DAv2's pretrained values give disparity directly; exponentiating them overflows.
-    Call this again after loading a DAv2 checkpoint, which restores them.
+    Small random weights otherwise: a constant disparity has no spread for the SSI loss
+    to normalize by.
     """
     emit = depth_head.scratch.output_conv2[2]
-    nn.init.trunc_normal_(emit.weight, std=0.02)
+    if depth_head.head == "sigmoid":
+        nn.init.zeros_(emit.weight)
+    else:
+        nn.init.trunc_normal_(emit.weight, std=0.02)
     nn.init.zeros_(emit.bias)
 
 
@@ -176,7 +182,7 @@ class DepthAnythingV2(nn.Module):
         head: str = "relu",
     ):
         super().__init__()
-        assert head in ("relu", "exp"), f"unknown head {head!r}"
+        assert head in HEADS, f"unknown head {head!r}"
         self.encoder = encoder
         self.head = head
         self.pretrained = DINOv2(encoder)
@@ -184,10 +190,31 @@ class DepthAnythingV2(nn.Module):
             self.pretrained.embed_dim, features, out_channels, head
         )
 
-    def forward(self, x: Tensor) -> Tensor:
+    def emit(self, x: Tensor) -> Tensor:
+        """The head's output [B, 1, H, W] before its activation."""
         patch_h, patch_w = x.shape[-2] // 14, x.shape[-1] // 14
         features = self.pretrained.get_intermediate_layers(
             x, INTERMEDIATE_LAYERS[self.encoder]
         )
-        out = self.depth_head(features, patch_h, patch_w)
+        return self.depth_head(features, patch_h, patch_w)
+
+    def forward(self, x: Tensor) -> Tensor:
+        out = self.emit(x)
         return (torch.exp(out) if self.head == "exp" else F.relu(out)).squeeze(1)
+
+
+class MetricDepthAnythingV2(DepthAnythingV2):
+    """Feature field [B, C, H, W] -> depth [B, H, W] in (0, max_depth) metres, after DAv2-metric."""
+
+    def __init__(
+        self,
+        encoder: str = "vitl",
+        features: int = 256,
+        out_channels=None,
+        max_depth: float = 20.0,
+    ):
+        super().__init__(encoder, features, out_channels, head="sigmoid")
+        self.max_depth = max_depth
+
+    def forward(self, x: Tensor) -> Tensor:
+        return (torch.sigmoid(self.emit(x)) * self.max_depth).squeeze(1)

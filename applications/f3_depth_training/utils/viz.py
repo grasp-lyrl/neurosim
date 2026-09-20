@@ -14,6 +14,23 @@ def get_disparity_image(disparity: Tensor, mask: Tensor, cmap) -> np.ndarray:
     return coloured
 
 
+def get_depth_image(
+    depth: Tensor, mask: Tensor, cmap, near: float = 0.5, far: float = 20.0
+) -> np.ndarray:
+    """Depth [H, W] in metres -> RGB uint8 on a FIXED inverse-depth scale, near bright.
+
+    Unlike `get_disparity_image` the scale does not follow the frame, so absolute depth
+    and its drift between frames are visible.
+    """
+    inverse = 1.0 / depth.clamp(near, far)
+    normalized = (
+        ((inverse - 1.0 / far) / (1.0 / near - 1.0 / far)).squeeze().cpu().numpy()
+    )
+    coloured = (cmap(normalized)[:, :, :3] * 255).astype(np.uint8)
+    coloured[~mask.cpu().numpy()] = 0
+    return coloured
+
+
 def ev_to_frames_with_polarity(
     events: Tensor, counts: Tensor, w: int, h: int
 ) -> Tensor:

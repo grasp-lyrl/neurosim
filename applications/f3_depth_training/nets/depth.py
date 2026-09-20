@@ -10,8 +10,9 @@ import torch.nn.functional as F
 import yaml
 from torch import Tensor
 
-from .dav2 import MODEL_CONFIGS, DepthAnythingV2, reset_log_emit
+from .dav2 import MODEL_CONFIGS, DepthAnythingV2, MetricDepthAnythingV2, reset_emit
 from .f3 import HEAD_PREFIXES, F3, load_f3_weights
+from .memory import LatentMemory
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,23 @@ def load_depth_weights(
     assert not stray, f"checkpoint keys match no module: {stray}"
 
 
+def warm_start(model: "EventFFDepthAnythingV2", checkpoint: str | Path) -> bool:
+    """Load another run's weights; the emit conv is reset across the relative/metric boundary."""
+    # best/last carry optimizer and scheduler state too; mmap skips what is dropped.
+    state = torch.load(checkpoint, map_location="cpu", weights_only=False, mmap=True)
+    load_depth_weights(model, state["model"])
+    # f3-era checkpoints have no config beside them, and predate metric heads.
+    config = Path(checkpoint).parent / "depth_config.yml"
+    metric = (
+        config.exists()
+        and yaml.safe_load(config.read_text())["dav2_config"].get("head") == "sigmoid"
+    )
+    reset = metric != (model.dav2.head == "sigmoid")
+    if reset:
+        reset_emit(model.dav2.depth_head)
+    return reset
+
+
 def widen_patch_embed(dav2: DepthAnythingV2, in_chans: int) -> None:
     """Re-tile the RGB patch embedding over `in_chans` feature-field channels."""
     proj = dav2.pretrained.patch_embed.proj
@@ -84,19 +102,20 @@ class EventFFDepthAnythingV2(nn.Module):
         if not retrain:
             self.eventff.requires_grad_(False)
 
-        encoder = dav2_config["encoder"]
-        self.dav2 = DepthAnythingV2(
-            encoder=encoder,
-            head=dav2_config.get("head", "relu"),
-            **MODEL_CONFIGS[encoder],
-        )
+        encoder, head = dav2_config["encoder"], dav2_config.get("head", "relu")
+        if head == "sigmoid":
+            self.dav2 = MetricDepthAnythingV2(
+                encoder, max_depth=dav2_config["max_depth"], **MODEL_CONFIGS[encoder]
+            )
+        else:
+            self.dav2 = DepthAnythingV2(encoder, head=head, **MODEL_CONFIGS[encoder])
         if "ckpt" in dav2_config:
             self.dav2.load_state_dict(
                 torch.load(dav2_config["ckpt"], map_location="cpu", weights_only=True)
             )
             logger.info("Loaded DepthAnythingV2 ckpt from %s", dav2_config["ckpt"])
-            if self.dav2.head == "exp":
-                reset_log_emit(self.dav2.depth_head)
+            if self.dav2.head != "relu":
+                reset_emit(self.dav2.depth_head)
         widen_patch_embed(self.dav2, self.eventff.feature_size)
 
     def load_eventff_weights(self, checkpoint: str | Path) -> None:
@@ -151,3 +170,62 @@ class EventFFDepthAnythingV2(nn.Module):
         field = field[0, :, cparams[0] : cparams[2], cparams[1] : cparams[3]]
         pred = self.decode(field.unsqueeze(0), get_resize_shapes(h, w, self.size, 14))
         return pred[0], field
+
+
+class RecurrentEventFFDepthAnythingV2(EventFFDepthAnythingV2):
+    """The same model with a ConvGRU carried on F3's stride-16 latent.
+
+    The memory sits at the narrowest point, between `contract` and `expand`, so the state
+    is 10x smaller than the raw field and F3's conv stack can run without a graph when the
+    backbone is frozen. Parameter names outside `memory.` are unchanged, so a
+    non-recurrent checkpoint warm-starts it:
+    `load_depth_weights(model, state, fresh=("memory.",))`.
+
+    The decoder's skips and the final hash-field fusion still come from the current tick,
+    so only the coarse latent is remembered; fine detail is re-derived every tick.
+    """
+
+    def __init__(self, eventff_config: str, dav2_config: dict, retrain: bool = False):
+        super().__init__(eventff_config, dav2_config, retrain)
+        self.memory = LatentMemory(self.eventff.latent_channels)
+
+    def initial_state(self, batch_size: int, device, dtype=torch.float32) -> Tensor:
+        """Empty memory on the latent grid."""
+        f3 = self.eventff
+        stride = f3.latent_stride
+        return torch.zeros(
+            batch_size,
+            f3.latent_channels,
+            f3.w // stride,
+            f3.h // stride,
+            device=device,
+            dtype=dtype,
+        )
+
+    def remember(
+        self, events: Tensor, counts: Tensor, state: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """One tick: events [N, 4] and memory -> feature field [B, C, H, W], new memory."""
+        field = self.eventff.feature_field(events[:, :3], counts)
+        latent, skips = self.eventff.contract(field)
+        state = self.memory(latent, state)
+        return self.eventff.expand(state, skips, field).permute(0, 1, 3, 2), state
+
+    def forward(
+        self, events: Tensor, counts: Tensor, cparams: Tensor, state: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """One training step: disparity [B, h, w], the cropped field, and the new memory."""
+        field, state = self.remember(events, counts, state)
+        field = batch_cropper(field, cparams)
+        return self.decode(field, (self.size, self.size)), field, state
+
+    @torch.no_grad()
+    def infer_image(
+        self, events: Tensor, counts: Tensor, cparams: Tensor, state: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Whole-frame path with memory: aspect preserved, no square crop, one sample."""
+        h, w = int(cparams[2] - cparams[0]), int(cparams[3] - cparams[1])
+        field, state = self.remember(events, counts, state)
+        field = field[0, :, cparams[0] : cparams[2], cparams[1] : cparams[3]]
+        pred = self.decode(field.unsqueeze(0), get_resize_shapes(h, w, self.size, 14))
+        return pred[0], field, state

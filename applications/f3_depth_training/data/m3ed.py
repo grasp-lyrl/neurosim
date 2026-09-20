@@ -1,4 +1,4 @@
-"""M3ED sequences as a fixed real-data validation set: recorded events, LiDAR disparity.
+"""M3ED sequences as a fixed real-data validation set: recorded events, LiDAR depth.
 
 The simulator's validation redraws scenes every time, so its loss moves with the sample as
 much as with the model. These frames never change, and they are the sensor we deploy on.
@@ -14,19 +14,20 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from ..utils import eval_relative_depth
+from ..utils import mean_scores
 
 logger = logging.getLogger(__name__)
 
 # M3ED's left event camera, and the frame its LiDAR depth is already projected into.
 SENSOR_W, SENSOR_H = 1280, 720
 EVENTS, DEPTH = "prophesee/left", "depth/prophesee/left"
+# Focal length from calib_undist_left.txt; a centre crop does not change it.
+FOCAL_PX = 1033.13
 
 
 class DepthFrame(NamedTuple):
     events: Tensor  # [N, 4]  x/W, y/H, age/window, polarity
-    disparity: Tensor  # [H, W]  zero where invalid
-    mask: Tensor  # [H, W]  bool
+    depth: Tensor  # [H, W]  metres, zero where invalid
 
 
 class M3EDDepth(Dataset):
@@ -110,9 +111,7 @@ class M3EDDepth(Dataset):
         x0, y0, w, h = self.x0, self.y0, self.width, self.height
 
         depth = gt[DEPTH][frame, y0 : y0 + h, x0 : x0 + w]
-        mask = np.isfinite(depth)  # a beam that found nothing reads +inf
-        disparity = np.zeros_like(depth)
-        np.divide(1.0, depth, out=disparity, where=mask)
+        depth[~np.isfinite(depth)] = 0.0  # a beam that found nothing reads +inf
 
         ms_index = data[f"{EVENTS}/ms_map_idx"]
         i0 = int(ms_index[end_ms - self.window_ms])
@@ -130,20 +129,15 @@ class M3EDDepth(Dataset):
         )
         window[:, 3] = events["p"][i0:i1][inside]
 
-        return DepthFrame(
-            torch.from_numpy(window),
-            torch.from_numpy(disparity),
-            torch.from_numpy(mask),
-        )
+        return DepthFrame(torch.from_numpy(window), torch.from_numpy(depth))
 
 
-def collate_frames(frames: list[DepthFrame]) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+def collate_frames(frames: list[DepthFrame]) -> tuple[Tensor, Tensor, Tensor]:
     """Concatenate ragged event windows into the (events, counts) pair the model takes."""
     return (
         torch.cat([f.events for f in frames]),
         torch.tensor([len(f.events) for f in frames], dtype=torch.int32),
-        torch.stack([f.disparity for f in frames]),
-        torch.stack([f.mask for f in frames]),
+        torch.stack([f.depth for f in frames]),
     )
 
 
@@ -174,32 +168,19 @@ def build_m3ed_loader(
 
 @torch.no_grad()
 def evaluate_m3ed(
-    model,
-    loader: DataLoader,
-    predict: Callable[..., Tensor],
-    device,
-    min_disparity: float,
-    loss_fn,
+    model, loader: DataLoader, predict: Callable[..., Tensor], device, mode
 ) -> dict[str, float]:
-    """Aligned relative-depth metrics and the training loss, averaged over batches.
+    """The mode's metrics and loss averaged over batches, the same keys as the simulator's `validate`."""
+    batches = []
+    for events, counts, depth in loader:
+        events, counts, depth = events.to(device), counts.to(device), depth.to(device)
+        focal = torch.full((len(depth),), FOCAL_PX, device=device)
+        target, mask = mode.target(depth, focal)
 
-    Returns the same keys as the simulator's `validate`, so either can drive selection.
-    """
-    totals: dict[str, float] = {}
-    batches = 0
-    for events, counts, disparity, mask in loader:
-        events, counts = events.to(device), counts.to(device)
-        disparity, mask = disparity.to(device), mask.to(device)
-        # Same far limit the trainer masks at, or validation scores a range training
-        # never fitted: LiDAR keeps returning past 20 m where the sim's depth is clamped.
-        mask = mask & (disparity > min_disparity)
-
-        height, width = disparity.shape[1:]
+        height, width = depth.shape[1:]
         pred = predict(model, events, counts, height, width).float()
-        scores = eval_relative_depth(pred, disparity, mask, min_disparity)
-        scores[loss_fn.name] = loss_fn(pred, disparity, mask).item()
-        for name, value in scores.items():
-            totals[name] = totals.get(name, 0.0) + value
-        batches += 1
+        scores = mode.metrics(pred, target, mask, focal)
+        scores[mode.loss_fn.name] = mode.loss_fn(pred, target, mask).item()
+        batches.append(scores)
 
-    return {name: value / batches for name, value in totals.items()}
+    return mean_scores(batches)

@@ -1,12 +1,27 @@
-"""Relative-depth metrics: align out the gauge, then measure in metres."""
+"""Depth metrics in metres, the affine fit relative predictions need first, and best tracking."""
 
 import math
 
 import torch
 from torch import Tensor
 
-# Metrics a larger value is better for. Everything else here is an error.
-HIGHER_IS_BETTER = frozenset({"d1", "d2", "d3"})
+NEAR_FIELD = 5.0  # metres, the deployment brief's working range
+METRICS = (
+    "abs_rel",
+    "sq_rel",
+    "d1",
+    "d2",
+    "d3",
+    "rmse",
+    "rmse_log",
+    "log10",
+    "silog",
+    "abs_rel_near",
+    "d1_near",
+)
+HIGHER_IS_BETTER = frozenset(
+    {"d1", "d2", "d3", "d1_near", "d1_aligned", "d1_near_aligned"}
+)
 
 
 def align_least_squares(pred: Tensor, target: Tensor, mask: Tensor) -> Tensor:
@@ -27,32 +42,40 @@ def align_least_squares(pred: Tensor, target: Tensor, mask: Tensor) -> Tensor:
     return (scale * (p - mean_p) + mean_g).view_as(pred).to(pred.dtype)
 
 
-def eval_relative_depth(
-    pred: Tensor, target: Tensor, mask: Tensor, min_disparity: float = 0.05
-) -> dict[str, float]:
-    """The affine-invariant protocol: align disparity, invert, measure in metres."""
-    aligned = align_least_squares(pred, target, mask).clamp(min=min_disparity)
-    depth, truth = 1.0 / aligned, 1.0 / target.clamp(min=min_disparity)
-
+def depth_metrics(depth: Tensor, truth: Tensor, mask: Tensor) -> dict[str, float]:
+    """Per-image means over `mask`; `*_near` over truth under NEAR_FIELD. NaN when no image has a pixel."""
     ratio = torch.maximum(depth / truth, truth / depth)
     error, log_error = depth - truth, torch.log(depth) - torch.log(truth)
-    counts = mask.flatten(1).sum(1)
+    near = mask & (truth < NEAR_FIELD)
 
-    def per_image(values: Tensor) -> Tensor:
-        """Mean over each image's valid pixels, images without any dropped."""
+    def per_image(values: Tensor, mask: Tensor) -> Tensor:
+        counts = mask.flatten(1).sum(1)
         return ((values * mask).flatten(1).sum(1) / counts.clamp(min=1))[counts > 0]
 
-    mean_sq_log = per_image(log_error**2)
+    mean_sq_log = per_image(log_error**2, mask)
     per_metric = {
-        "abs_rel": per_image(error.abs() / truth),
-        "sq_rel": per_image(error**2 / truth),
-        **{f"d{i}": per_image((ratio < 1.25**i).float()) * 100 for i in (1, 2, 3)},
-        "rmse": per_image(error**2).sqrt(),
+        "abs_rel": per_image(error.abs() / truth, mask),
+        "sq_rel": per_image(error**2 / truth, mask),
+        **{
+            f"d{i}": per_image((ratio < 1.25**i).float(), mask) * 100 for i in (1, 2, 3)
+        },
+        "rmse": per_image(error**2, mask).sqrt(),
         "rmse_log": mean_sq_log.sqrt(),
-        "log10": per_image(log_error.abs()) / math.log(10),
-        "silog": (mean_sq_log - per_image(log_error) ** 2).clamp(min=0).sqrt() * 100,
+        "log10": per_image(log_error.abs(), mask) / math.log(10),
+        "silog": (mean_sq_log - per_image(log_error, mask) ** 2).clamp(min=0).sqrt()
+        * 100,
+        "abs_rel_near": per_image(error.abs() / truth, near),
+        "d1_near": per_image((ratio < 1.25).float(), near) * 100,
     }
     return {name: value.mean().item() for name, value in per_metric.items()}
+
+
+def mean_scores(batches: list[dict[str, float]]) -> dict[str, float]:
+    """Mean of each score over batches, skipping the batches where it was NaN."""
+    return {
+        k: torch.tensor([b[k] for b in batches], dtype=torch.float64).nanmean().item()
+        for k in batches[0]
+    }
 
 
 def improved(name: str, value: float, best: float) -> bool:

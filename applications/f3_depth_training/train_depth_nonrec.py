@@ -25,13 +25,13 @@ from .data import (
     process_batch,
     usable_sample_filter,
     usable_samples,
-    valid_disparity,
 )
 from .nets import (
     EventFFDepthAnythingV2,
     batch_cropper,
     get_resize_shapes,
     load_depth_weights,
+    warm_start,
 )
 from .utils.experiment import (
     log_dict,
@@ -43,24 +43,20 @@ from .utils.experiment import (
 )
 from .utils import (
     HIGHER_IS_BETTER,
-    ScaleAndShiftInvariantLoss,
+    build_mode,
     build_optimizer,
     build_scheduler,
     ev_to_frames_with_polarity,
-    eval_relative_depth,
     get_disparity_image,
     get_random_crop_params,
     improved,
+    mean_scores,
     set_best_results,
 )
 
 
-# Metrics from eval_relative_depth; the loss name is appended per run.
-METRICS = ("abs_rel", "sq_rel", "d1", "d2", "d3", "rmse", "rmse_log", "log10", "silog")
-
-
 def predict_full_frame(model, ff_events, event_counts, height, width):
-    """Whole-frame disparity, aspect preserved — a batched ``model.infer_image``.
+    """Whole-frame prediction, aspect preserved — a batched ``model.infer_image``.
 
     Training crops a random square, but every f3 eval path (``evaluate``,
     ``dsec_benchmark``, its own validator) runs ``infer_image``, which resizes the
@@ -83,7 +79,7 @@ def train_epoch(
     dataloader,
     optimizer,
     scheduler,
-    loss_fn,
+    mode,
     epoch,
     max_batches,
     iters_to_accumulate=1,
@@ -92,6 +88,10 @@ def train_epoch(
     model.train()
     train_loss = 0.0
     iter_loss = torch.zeros((), device=args.device)
+    # The loss is a data term plus `alpha` times a gradient term; which one dominates
+    # decides whether alpha is weighting edges the way it did in the other mode.
+    iter_parts = torch.zeros(2, device=args.device)
+    train_parts = [0.0, 0.0]
     idx = 0
 
     pbar = tqdm(enumerate(dataloader), desc=f"Epoch {epoch}", total=max_batches)
@@ -99,32 +99,35 @@ def train_epoch(
         if idx >= max_batches:
             break
 
-        ff_events, event_counts, disparity, _ = process_batch(batch, args, args.device)
+        ff_events, event_counts, depth, focal, _ = process_batch(
+            batch, args, args.device
+        )
 
-        B, H, W = disparity.shape
+        B, H, W = depth.shape
         cparams = get_random_crop_params((H, W), (H, H), batch_size=B).to(
             ff_events.device
         )
-        disparity = batch_cropper(disparity.unsqueeze(1), cparams).squeeze(1)
+        target, valid_mask = mode.target(
+            batch_cropper(depth.unsqueeze(1), cparams).squeeze(1), focal
+        )
 
         # Decided before the forward: an unusable batch should not cost one, and the
         # host sync this costs then waits only on the copy, not on the whole step.
-        disparity_valid_mask = valid_disparity(disparity, args)
-        keep = usable_samples(disparity_valid_mask, args.min_valid_depth_frac)
+        keep = usable_samples(valid_mask, args.min_valid_depth_frac)
         if not keep.any():
             continue
 
         with torch.autocast(device_type="cuda", enabled=args.amp, dtype=torch.bfloat16):
-            disparity_pred = model(ff_events, event_counts, cparams)[0]  # (B, H, W)
+            pred = model(ff_events, event_counts, cparams)[0]  # (B, H, W)
 
-        # The SSI loss normalizes by a per-sample MAD, so it runs in fp32 even
-        # under autocast; bf16 there would divide by an 8-bit-mantissa scale.
-        loss = loss_fn(
-            disparity_pred.float()[keep], disparity[keep], disparity_valid_mask[keep]
-        )
+        # The loss runs in fp32 even under autocast: a per-sample MAD or a log
+        # difference at an 8-bit mantissa is too coarse.
+        loss = mode.loss_fn(pred.float()[keep], target[keep], valid_mask[keep])
+        parts = mode.loss_fn.parts
         loss = loss / iters_to_accumulate
 
         loss.backward()
+        iter_parts += torch.stack([parts["data"], parts["grad"]]) / iters_to_accumulate
         # Summed on the device: reading it here would stall the host every batch and
         # leave the GPU idle through the next batch's copy and crop.
         iter_loss += loss.detach()
@@ -135,7 +138,9 @@ def train_epoch(
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             step_loss = iter_loss.item()
+            data_term, grad_term = iter_parts.tolist()
             train_loss += step_loss
+            train_parts = [train_parts[0] + data_term, train_parts[1] + grad_term]
             pbar.set_postfix(
                 {"loss": f"{step_loss:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"}
             )
@@ -143,24 +148,30 @@ def train_epoch(
                 args,
                 {
                     "train/iter_loss": step_loss,
+                    "train/data_term": data_term,
+                    "train/grad_term": grad_term,
                     "opt/lr": scheduler.get_last_lr()[0],
                     "opt/epoch": epoch,
                     "opt/iteration": idx,
                 },
             )
             iter_loss.zero_()
+            iter_parts.zero_()
 
     num_iters = max(1, (idx + 1) // iters_to_accumulate)
     train_loss /= num_iters
+    data_term, grad_term = (p / num_iters for p in train_parts)
 
     logger.info("#" * 50)
-    logger.info(f"Training: Epoch: {epoch}, Loss: {train_loss:.4f}")
+    logger.info(
+        f"Training: Epoch: {epoch}, Loss: {train_loss:.4f} "
+        f"(data {data_term:.4f}, grad {grad_term:.4f})"
+    )
     logger.info("#" * 50)
     return train_loss
 
 
-@torch.no_grad()
-def make_validator(args, logger, model, dataloader, loss_fn, data_cfg, frame):
+def make_validator(args, logger, model, mode, dataloader, data_cfg, frame):
     """Resolve `validation.source` once into the callable the training loop calls."""
     source = getattr(args, "validation", {}).get("source", "simulator")
 
@@ -170,12 +181,7 @@ def make_validator(args, logger, model, dataloader, loss_fn, data_cfg, frame):
 
         def run(epoch):
             results = evaluate_m3ed(
-                model,
-                loader,
-                predict_full_frame,
-                args.device,
-                args.min_disparity,
-                loss_fn,
+                model, loader, predict_full_frame, args.device, mode
             )
             logger.info("Validation (M3ED): Epoch: %d", epoch)
             log_dict(logger, results)
@@ -188,8 +194,8 @@ def make_validator(args, logger, model, dataloader, loss_fn, data_cfg, frame):
                 args,
                 logger,
                 model,
+                mode,
                 dataloader,
-                loss_fn,
                 epoch,
                 max_batches=args.batches_per_epoch // 2,
                 save_preds=(epoch + 1) % args.log_interval == 0,
@@ -201,58 +207,53 @@ def make_validator(args, logger, model, dataloader, loss_fn, data_cfg, frame):
     return run
 
 
+@torch.no_grad()
 def validate(
-    args, logger, model, dataloader, loss_fn, epoch, max_batches=50, save_preds=False
+    args, logger, model, mode, dataloader, epoch, max_batches=50, save_preds=False
 ):
     """Validate the model on ``max_batches`` batches, at inference framing."""
     model.eval()
     cmap = colormaps["magma"]
-
-    results = {k: torch.tensor([0.0]).cuda() for k in (*METRICS, loss_fn.name)}
-    nsamples = torch.tensor([0.0]).cuda()
+    batches = []
 
     for idx, batch in tqdm(enumerate(dataloader), total=max_batches, desc="Validation"):
         if idx >= max_batches:
             break
 
-        ff_events, event_counts, disparity, color_images = process_batch(
+        ff_events, event_counts, depth, focal, color_images = process_batch(
             batch, args, args.device
         )
-        B, H, W = disparity.shape
-        disparity_pred = predict_full_frame(
-            model, ff_events, event_counts, H, W
-        ).float()
-        valid_mask = valid_disparity(disparity, args)
+        B, H, W = depth.shape
+        pred = predict_full_frame(model, ff_events, event_counts, H, W).float()
+        target, valid_mask = mode.target(depth, focal)
         keep = usable_samples(valid_mask, args.min_valid_depth_frac)
         if not keep.any():
             continue
         kept_mask = valid_mask[keep]
 
-        cur_results = eval_relative_depth(
-            disparity_pred[keep], disparity[keep], kept_mask, args.min_disparity
-        )
-        for k in cur_results:
-            results[k] += cur_results[k]
-        results[loss_fn.name] += loss_fn(
-            disparity_pred[keep], disparity[keep], kept_mask
+        scores = mode.metrics(pred[keep], target[keep], kept_mask, focal[keep])
+        scores[mode.loss_fn.name] = mode.loss_fn(
+            pred[keep], target[keep], kept_mask
         ).item()
-        nsamples += 1
+        batches.append(scores)
 
         if idx % 10 == 0 and save_preds:
             base_path = f"outputs/monoculardepth/{args.name}"
+            truth_m = mode.to_metres(target, focal).clamp(min=mode.min_depth)
+            pred_m = mode.to_metres(pred, focal).clamp(min=mode.min_depth)
             event_frames = (
                 ev_to_frames_with_polarity(ff_events, event_counts, W, H).cpu().numpy()
             )
-            for i in range(disparity_pred.shape[0]):
+            for i in range(pred.shape[0]):
                 if not keep[i]:
                     continue
                 images = {
                     "training_events/disparity": get_disparity_image(
-                        disparity[i], valid_mask[i], cmap
+                        1.0 / truth_m[i], valid_mask[i], cmap
                     ),
                     "predictions/disparity_pred": get_disparity_image(
-                        disparity_pred[i],
-                        torch.ones_like(disparity_pred[i], dtype=torch.bool),
+                        1.0 / pred_m[i],
+                        torch.ones_like(pred[i], dtype=torch.bool),
                         cmap,
                     ),
                     "training_events/events": event_frames[i],
@@ -266,8 +267,7 @@ def validate(
                         cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
                     )
 
-    for k in results:
-        results[k] /= nsamples
+    results = mean_scores(batches)
 
     logger.info("#" * 50)
     logger.info(f"Validation: Epoch: {epoch}")
@@ -296,6 +296,11 @@ def get_args():
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument("--batches-per-epoch", type=int, default=100)
     parser.add_argument("--amp", action="store_true", help="Mixed precision (bf16)")
+    parser.add_argument(
+        "--metric",
+        action="store_true",
+        help="Metric depth in metres: sigmoid head, SiLog loss, unaligned metrics",
+    )
     return parser.parse_args()
 
 
@@ -308,6 +313,14 @@ def main():
             setattr(args, key, value)
         else:
             raise ValueError(f"Config key '{key}' overrides a command-line arg")
+
+    mode = build_mode(conf, args.metric)
+    if args.metric:
+        args.dav2_config |= {
+            "head": "sigmoid",
+            "max_depth": mode.head_max_depth,
+            "focal_canonical": mode.focal,
+        }
 
     data_cfg = conf["data"]
     # Sensor UUIDs come from the loader roles (anchor=depth, stream=events) so they
@@ -344,7 +357,8 @@ def main():
     model = model.to(args.device)
     if args.init is not None:
         logger.info(f"Loading initial weights from {args.init}")
-        load_depth_weights(model, torch.load(args.init)["model"])
+        if warm_start(model, args.init):
+            logger.info("Emit conv reset: the checkpoint was trained with another head")
         torch.cuda.empty_cache()
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Total trainable parameters: {trainable}")
@@ -361,12 +375,9 @@ def main():
         args.epochs,
     )
 
-    assert args.loss == "ssimae", (
-        "ScaleAndShiftInvariantLoss for monocular relative depth"
-    )
-    loss_fn = ScaleAndShiftInvariantLoss(alpha=args.alpha, scales=args.scales)
     best_results = {
-        k: 0.0 if k in HIGHER_IS_BETTER else 100.0 for k in (*METRICS, loss_fn.name)
+        k: 0.0 if k in HIGHER_IS_BETTER else 100.0
+        for k in (*mode.metric_names, mode.loss_fn.name)
     }
     start = 0
 
@@ -400,15 +411,15 @@ def main():
         sample_filter=usable_sample_filter(
             args.depth_sensor,
             args.event_sensor,
-            args.max_disparity,
+            mode.min_depth,
             int(data_cfg.get("min_events_per_sample", 10000)),
             args.min_valid_depth_frac,
         ),
     )
 
-    track_best = getattr(args, "validation", {}).get("track_best", [loss_fn.name])
+    track_best = getattr(args, "validation", {}).get("track_best", [mode.loss_fn.name])
     run_validation = make_validator(
-        args, logger, model, dataloader, loss_fn, data_cfg, (event_W, event_H, event_T)
+        args, logger, model, mode, dataloader, data_cfg, (event_W, event_H, event_T)
     )
 
     if args.wandb:
@@ -436,7 +447,7 @@ def main():
                 dataloader,
                 optimizer,
                 scheduler,
-                loss_fn,
+                mode,
                 epoch,
                 args.batches_per_epoch,
                 iters_to_accumulate,

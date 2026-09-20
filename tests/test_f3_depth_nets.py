@@ -1,5 +1,6 @@
 """Contracts for the in-house F3 + DepthAnythingV2 model code (no f3 dependency)."""
 
+import math
 import re
 from pathlib import Path
 
@@ -9,21 +10,32 @@ import yaml
 
 from applications.f3_depth_training.nets import (
     EventFFDepthAnythingV2,
+    LatentMemory,
+    RecurrentEventFFDepthAnythingV2,
     batch_cropper,
     get_resize_shapes,
     load_depth_weights,
     load_f3_weights,
+    reset_state,
+    warm_start,
 )
 from applications.f3_depth_training.utils import (
+    MetricDepth,
+    RelativeDepth,
     ScaleAndShiftInvariantLoss,
+    SiLogLoss,
     align_least_squares,
-    eval_relative_depth,
+    depth_metrics,
 )
 
 APP = Path(__file__).resolve().parents[1] / "applications" / "f3_depth_training"
 
 W, H, CHANNELS = 64, 48, 16
 DAV2_SIZE = 70
+RELATIVE = RelativeDepth(0.05, 1000.0, ScaleAndShiftInvariantLoss())
+METRIC = MetricDepth(0.2, 20.0, 686.0, 26.0, SiLogLoss())
+FOCAL = torch.full((2,), 686.0)  # the `disparity` fixture is a pair of images
+SIGMOID = {"size": DAV2_SIZE, "encoder": "vits", "head": "sigmoid", "max_depth": 20.0}
 
 # The real backbone at 1/10th the width: same stage structure, both hash levels (one
 # direct, one colliding), so shapes and index ranges are exercised at test speed.
@@ -83,6 +95,14 @@ def model(f3_config):
 @pytest.fixture(scope="module")
 def events():
     return make_events([80, 120])
+
+
+@pytest.fixture(scope="module")
+def recurrent(f3_config):
+    torch.manual_seed(0)
+    return RecurrentEventFFDepthAnythingV2(
+        f3_config, {"size": DAV2_SIZE, "encoder": "vits"}
+    )
 
 
 # ── shape and dtype contracts ────────────────────────────────────────────────
@@ -244,6 +264,157 @@ def test_the_application_no_longer_depends_on_f3():
     assert not offenders, f"still reaching into f3: {offenders}"
 
 
+# ── LatentMemory (ConvGRU on the stride-16 latent) ───────────────────────────
+PASSTHROUGH = torch.sigmoid(torch.tensor(6.0))  # the update gate's zero-init bias
+
+MEMORY_CHANNELS = 8
+
+
+def latent(batch=2, channels=MEMORY_CHANNELS, w=4, h=3, seed=0):
+    generator = torch.Generator().manual_seed(seed)
+    return torch.randn(batch, channels, w, h, generator=generator)
+
+
+def test_the_first_tick_passes_the_latent_through():
+    memory = LatentMemory(MEMORY_CHANNELS)
+    x = latent()
+    held = memory(x, torch.zeros_like(x))
+    assert torch.allclose(held, PASSTHROUGH * x, atol=1e-6), (
+        "an untrained memory must start as the non-recurrent model, up to sigmoid(6)"
+    )
+
+
+def test_the_carried_state_changes_the_output():
+    memory = LatentMemory(MEMORY_CHANNELS)
+    x = latent()
+    empty = memory(x, torch.zeros_like(x))
+    carried = memory(x, latent(seed=7))
+    assert not torch.allclose(empty, carried), "the state did not reach the output"
+
+
+def test_both_the_gate_and_the_candidate_train_on_the_first_step():
+    memory = LatentMemory(MEMORY_CHANNELS)
+    x = latent()
+    memory(x, torch.zeros_like(x)).square().mean().backward()
+    assert memory.gates.weight.grad.abs().sum() > 0
+    assert memory.candidate.weight.grad.abs().sum() > 0
+
+
+def test_a_later_tick_backpropagates_into_an_earlier_one():
+    memory = LatentMemory(MEMORY_CHANNELS)
+    first = latent()
+    first.requires_grad_(True)
+    state = memory(first, torch.zeros_like(first))
+    memory(latent(seed=2), state).square().mean().backward()
+    assert first.grad.abs().sum() > 0, "memory carried no gradient across ticks"
+
+
+def test_detaching_the_state_truncates_the_gradient():
+    memory = LatentMemory(MEMORY_CHANNELS)
+    first = latent()
+    first.requires_grad_(True)
+    state = memory(first, torch.zeros_like(first))
+    memory(latent(seed=2), state.detach()).square().mean().backward()
+    assert first.grad is None
+
+
+def test_reset_zeroes_only_the_rows_that_restart():
+    state = latent()
+    reset = reset_state(state, torch.tensor([True, False]))
+    assert torch.count_nonzero(reset[0]) == 0
+    assert torch.equal(reset[1], state[1])
+
+
+def test_the_state_survives_autocast_in_float32():
+    memory = LatentMemory(MEMORY_CHANNELS)
+    x, state = latent(), latent(seed=3)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        held = memory(x, state)
+    assert held.dtype is torch.float32, (
+        "a state carried over thousands of ticks must not be held at bf16 precision"
+    )
+
+
+# ── RecurrentEventFFDepthAnythingV2 ──────────────────────────────────────────
+def test_contract_then_expand_still_equals_encode(model, events):
+    """The split that makes room for the memory must not change F3's output."""
+    ff_events, counts = events
+    field = model.eventff.feature_field(ff_events[:, :3], counts)
+    bottleneck, skips = model.eventff.contract(field)
+    assert torch.equal(
+        model.eventff.expand(bottleneck, skips, field), model.eventff.encode(field)
+    )
+
+
+def test_a_step_returns_disparity_the_field_and_the_next_state(recurrent, events):
+    ff_events, counts = events
+    cparams = torch.tensor([[0, 0, H, H], [0, W - H, H, W]])
+    state = recurrent.initial_state(2, device="cpu")
+    pred, field, state = recurrent(ff_events, counts, cparams, state)
+    f3 = recurrent.eventff
+    assert pred.shape == (2, H, H)
+    assert field.shape == (2, CHANNELS, H, H)
+    assert state.shape == (
+        2,
+        f3.latent_channels,
+        W // f3.latent_stride,
+        H // f3.latent_stride,
+    )
+
+
+def test_a_non_recurrent_checkpoint_warm_starts_it(recurrent, f3_config):
+    plain = EventFFDepthAnythingV2(f3_config, {"size": DAV2_SIZE, "encoder": "vits"})
+    state = {k: v for k, v in recurrent.state_dict().items() if "memory." not in k}
+    with pytest.raises(AssertionError, match="no weights for"):
+        load_depth_weights(recurrent, state)
+    load_depth_weights(plain, state)
+    load_depth_weights(recurrent, state, fresh=("memory.",))
+
+
+def test_the_first_tick_predicts_what_the_non_recurrent_model_would(recurrent, events):
+    plain = EventFFDepthAnythingV2(
+        recurrent.eventff_config, {"size": DAV2_SIZE, "encoder": "vits"}
+    )
+    load_depth_weights(
+        plain, {k: v for k, v in recurrent.state_dict().items() if "memory." not in k}
+    )
+    ff_events, counts = events
+    cparams = torch.tensor([[0, 0, H, H], [0, W - H, H, W]])
+    with torch.no_grad():
+        want = plain(ff_events, counts, cparams)[0]
+        got = recurrent(ff_events, counts, cparams, recurrent.initial_state(2, "cpu"))[
+            0
+        ]
+    error = (got - want).abs().max() / want.abs().max()
+    assert error < 5e-3, f"warm start is not near the non-recurrent model: {error:.5f}"
+
+
+def test_the_carried_state_changes_a_later_prediction(recurrent, events):
+    ff_events, counts = events
+    cparams = torch.tensor([[0, 0, H, H], [0, W - H, H, W]])
+    with torch.no_grad():
+        empty = recurrent.initial_state(2, device="cpu")
+        _, _, carried = recurrent(ff_events, counts, cparams, empty)
+        fresh_pred = recurrent(ff_events, counts, cparams, empty)[0]
+        carried_pred = recurrent(ff_events, counts, cparams, carried)[0]
+    assert not torch.allclose(fresh_pred, carried_pred), "the memory changed nothing"
+
+
+def test_gradients_reach_the_memory_through_a_frozen_backbone(recurrent, events):
+    ff_events, counts = events
+    cparams = torch.tensor([[0, 0, H, H], [0, W - H, H, W]])
+    recurrent.zero_grad(set_to_none=True)
+    state = recurrent.initial_state(2, device="cpu")
+    loss = 0.0
+    for _ in range(2):
+        pred, _, state = recurrent(ff_events, counts, cparams, state)
+        loss = loss + pred.square().mean()
+    loss.backward()
+
+    assert all(p.grad is None for p in recurrent.eventff.parameters())
+    assert all(p.grad.abs().sum() > 0 for p in recurrent.memory.parameters())
+
+
 def test_load_f3_weights_takes_a_bare_state_dict_with_the_head(model, tmp_path):
     """f3's backbone weights are a plain state dict that still carries `pred.*`."""
     state = dict(model.eventff.state_dict())
@@ -303,13 +474,79 @@ def test_the_exp_head_starts_near_one(f3_config, events):
     )
 
 
-def test_both_heads_share_a_state_dict(f3_config):
+def test_all_heads_share_a_state_dict(f3_config):
     """Only the emit conv differs, and it is index 2 either way, so weights transfer."""
     relu = EventFFDepthAnythingV2(f3_config, {"size": DAV2_SIZE, "encoder": "vits"})
     exp = EventFFDepthAnythingV2(
         f3_config, {"size": DAV2_SIZE, "encoder": "vits", "head": "exp"}
     )
-    assert set(relu.state_dict()) == set(exp.state_dict())
+    sigmoid = EventFFDepthAnythingV2(f3_config, SIGMOID)
+    assert set(relu.state_dict()) == set(exp.state_dict()) == set(sigmoid.state_dict())
+
+
+# ── sigmoid head (DAv2-metric-style depth in metres) ─────────────────────────
+def test_the_sigmoid_head_emits_depth_within_max_depth(f3_config, events):
+    model = EventFFDepthAnythingV2(f3_config, SIGMOID)
+    ff_events, counts = events
+    cparams = torch.tensor([[0, 0, H, H], [0, W - H, H, W]])
+    pred = model(ff_events, counts, cparams)[0]
+    assert (pred > 0).all() and (pred < 20.0).all()
+    assert 5 < pred.median() < 15, "a reset emit conv starts mid-range"
+
+
+def test_warm_start_resets_only_the_emit_conv_across_the_metric_boundary(
+    f3_config, tmp_path
+):
+    exp = EventFFDepthAnythingV2(
+        f3_config, {"size": DAV2_SIZE, "encoder": "vits", "head": "exp"}
+    )
+    exp.save_configs(str(tmp_path))
+    torch.save({"model": exp.state_dict()}, tmp_path / "best.pth")
+
+    metric = EventFFDepthAnythingV2(f3_config, SIGMOID)
+    assert warm_start(metric, tmp_path / "best.pth")
+    emit_weight = "dav2.depth_head.scratch.output_conv2.2.weight"
+    for k, v in exp.state_dict().items():
+        copied = torch.equal(metric.state_dict()[k], v)
+        assert copied == (k != emit_weight), k
+
+    same_head = EventFFDepthAnythingV2(
+        f3_config, {"size": DAV2_SIZE, "encoder": "vits", "head": "exp"}
+    )
+    assert not warm_start(same_head, tmp_path / "best.pth")
+    assert torch.equal(
+        same_head.state_dict()[emit_weight], exp.state_dict()[emit_weight]
+    )
+
+
+# ── SiLog loss ───────────────────────────────────────────────────────────────
+def test_silog_matches_the_f3_reference_formula():
+    torch.manual_seed(0)
+    pred, target = torch.rand(2, 12, 12) * 9 + 1, torch.rand(2, 12, 12) * 9 + 1
+    mask = torch.rand(2, 12, 12) > 0.3
+    diff = torch.log(target[mask]) - torch.log(pred[mask] + 1e-6)
+    want = torch.sqrt((diff**2).mean() - 0.5 * diff.mean() ** 2)
+    assert SiLogLoss(lambd=0.5)(pred, target, mask) == pytest.approx(want.item())
+
+
+def test_silog_penalises_the_global_scale_the_ssi_loss_forgives():
+    """Why the metric mode exists: a 2x depth error is free under SSI."""
+    torch.manual_seed(0)
+    depth = torch.rand(2, 12, 12) * 9 + 1
+    mask = torch.ones_like(depth, dtype=torch.bool)
+    silog, ssi = SiLogLoss(lambd=0.5), ScaleAndShiftInvariantLoss()
+    assert silog(depth, depth, mask) == pytest.approx(0.0, abs=1e-3)
+    assert silog(2 * depth, depth, mask) == pytest.approx(math.log(2) / math.sqrt(2))
+    assert ssi(2 / depth, 1 / depth, mask) == pytest.approx(0.0, abs=1e-5)
+
+
+def test_silog_ignores_invalid_target_pixels():
+    torch.manual_seed(0)
+    depth = torch.rand(2, 12, 12) * 9 + 1
+    mask = torch.rand(2, 12, 12) > 0.3
+    target = depth.masked_fill(~mask, 0.0)  # the loader's convention
+    loss = SiLogLoss(lambd=0.5, alpha=0.5)(depth, target, mask)
+    assert torch.isfinite(loss) and loss == pytest.approx(0.0, abs=1e-3)
 
 
 def test_the_relu_head_is_still_the_default(f3_config):
@@ -350,29 +587,28 @@ def test_relative_depth_metrics_ignore_the_gauge(disparity):
     """The point of the protocol: an affine map of the prediction changes nothing."""
     target, mask = disparity
     pred = torch.rand_like(target) * 1.45 + 0.1
-    plain = eval_relative_depth(pred, target, mask)
-    walked = eval_relative_depth(pred * 1e14 + 5.0, target, mask)
+    plain = RELATIVE.metrics(pred, target, mask, FOCAL)
+    walked = RELATIVE.metrics(pred * 1e14 + 5.0, target, mask, FOCAL)
     for k, value in plain.items():
         assert walked[k] == pytest.approx(value, rel=1e-4), f"{k} moved with the gauge"
 
 
 def test_a_perfect_prediction_scores_perfectly(disparity):
     target, mask = disparity
-    results = eval_relative_depth(target, target, mask)
+    results = RELATIVE.metrics(target, target, mask, FOCAL)
     assert results["abs_rel"] == pytest.approx(0.0, abs=1e-6)
     assert results["d1"] == pytest.approx(100.0)
     assert results["silog"] == pytest.approx(0.0, abs=1e-3)
 
 
-def test_the_trainer_totals_every_metric_returned(disparity):
-    """METRICS keys the running totals, so a name it misses raises mid-validation."""
-    listed = re.search(
-        r"^METRICS = \((.*?)\)", (APP / "train_depth_nonrec.py").read_text(), re.M
-    )
+def test_metric_names_match_what_each_mode_returns(disparity):
+    """`metric_names` seeds the trainer's best-results table; a missing key raises mid-run."""
     target, mask = disparity
-    assert set(re.findall(r'"(\w+)"', listed.group(1))) == set(
-        eval_relative_depth(target, target, mask)
+    assert set(RELATIVE.metric_names) == set(
+        RELATIVE.metrics(target, target, mask, FOCAL)
     )
+    depth = 1.0 / target
+    assert set(METRIC.metric_names) == set(METRIC.metrics(depth, depth, mask, FOCAL))
 
 
 def test_masked_pixels_do_not_reach_the_metrics(disparity):
@@ -381,6 +617,144 @@ def test_masked_pixels_do_not_reach_the_metrics(disparity):
     mask[:, :, 4:] = False
     corrupted = target.clone()
     corrupted[:, :, 4:] = 1e6
-    assert eval_relative_depth(corrupted, target, mask) == pytest.approx(
-        eval_relative_depth(target, target, mask)
+    assert RELATIVE.metrics(corrupted, target, mask, FOCAL) == pytest.approx(
+        RELATIVE.metrics(target, target, mask, FOCAL)
+    )
+
+
+def test_metric_metrics_catch_the_scale_error_the_aligned_ones_forgive(disparity):
+    target, mask = disparity
+    depth = 1.0 / target
+    scores = METRIC.metrics(2 * depth, depth, mask, FOCAL)
+    assert scores["abs_rel"] == pytest.approx(1.0)
+    assert scores["d1"] == pytest.approx(0.0)
+    assert scores["abs_rel_aligned"] == pytest.approx(0.0, abs=1e-4)
+    assert scores["d1_aligned"] == pytest.approx(100.0)
+
+
+def test_near_field_metrics_count_only_truth_under_five_metres():
+    truth = torch.tensor([[[1.0, 2.0, 8.0, 12.0]]])
+    pred = truth.clone()
+    pred[..., 2:] *= 2  # only the far pixels are wrong
+    mask = torch.ones_like(truth, dtype=torch.bool)
+    scores = depth_metrics(pred, truth, mask)
+    assert scores["abs_rel"] == pytest.approx(0.5)
+    assert scores["abs_rel_near"] == 0.0 and scores["d1_near"] == 100.0
+
+
+def test_near_field_metrics_are_nan_without_a_near_pixel():
+    truth = torch.full((1, 2, 2), 8.0)
+    scores = depth_metrics(truth, truth, torch.ones_like(truth, dtype=torch.bool))
+    assert scores["d1"] == 100.0
+    assert math.isnan(scores["d1_near"]), "undefined, not zero, so the mean skips it"
+
+
+# --------------------------------------------------------------------------- #
+# Bilinear scatter in the feature field
+# --------------------------------------------------------------------------- #
+def scatter_field(model, coords, bilinear=True):
+    """feature_field for one sample of events at `coords` (normalized x, y)."""
+    events = torch.zeros(len(coords), 3)
+    events[:, 0] = torch.tensor([c[0] for c in coords])
+    events[:, 1] = torch.tensor([c[1] for c in coords])
+    counts = torch.tensor([len(coords)], dtype=torch.int32)
+    was, model.eventff.bilinear_splat = model.eventff.bilinear_splat, bilinear
+    try:
+        return model.eventff.feature_field(events, counts)
+    finally:
+        model.eventff.bilinear_splat = was
+
+
+def test_sensor_grid_events_land_in_one_cell(model):
+    """Integer pixels are the case every existing dataset is in: nothing may smear."""
+    cells = ((0, 0), (17, 9), (W - 1, H - 1))
+    field = scatter_field(model, [(px / W, py / H) for px, py in cells])
+
+    energy = field[0].abs().sum(0)  # [W, H]
+    occupied = (energy > 1e-6).nonzero()
+    assert len(occupied) == len(cells), f"one cell per event, got {len(occupied)}"
+    assert {tuple(c.tolist()) for c in occupied} == set(cells)
+
+
+def test_half_pixel_event_splits_between_neighbours(model):
+    """A coordinate exactly between two cells must share itself evenly."""
+    field = scatter_field(model, [((10 + 0.5) / W, 20 / H)])
+
+    energy = field[0].abs().sum(0)
+    assert energy[10, 20] > 0 and energy[11, 20] > 0
+    assert torch.allclose(energy[10, 20], energy[11, 20], rtol=1e-3)
+
+
+def test_scatter_conserves_event_weight(model):
+    """Splatting redistributes an event, it must not create or destroy any of it."""
+    coords = [(0.5, 0.5), (0.2379, 0.7512), (0.9993, 0.0007), (0.0, 1.0)]
+    field = scatter_field(model, coords)
+
+    events = torch.zeros(len(coords), 3)
+    events[:, 0] = torch.tensor([c[0] for c in coords])
+    events[:, 1] = torch.tensor([c[1] for c in coords])
+    encoded = model.eventff.multi_hash_encoder(events.unsqueeze(0)).squeeze(0)
+    assert torch.allclose(field.sum(), encoded.sum(), rtol=1e-4, atol=1e-6)
+
+
+def test_fractional_coordinates_leave_no_unreachable_cells(model):
+    """The point of the change: a resampled stream must still be able to fill the grid."""
+    # A stretch like undistortion: source pixels spread apart, so rounding alone would
+    # leave cells between them that no event can ever reach.
+    stretched = [
+        ((px * 1.7 + 0.35) / W, (py * 1.7 + 0.35) / H)
+        for px in range(12)
+        for py in range(12)
+    ]
+    inside = [(x, y) for x, y in stretched if x < 1 and y < 1]
+    field = scatter_field(model, inside)
+
+    reached = (field[0].abs().sum(0) > 1e-6).sum().item()
+    assert reached > len(inside), (
+        f"{len(inside)} events reached only {reached} cells; the splat is not spreading"
+    )
+
+
+def test_the_splat_is_off_by_default(model):
+    """Training never sees fractional coordinates, so it must not pay for the splat."""
+    assert model.eventff.bilinear_splat is False
+
+
+def test_rounding_and_splatting_agree_on_the_sensor_grid(model):
+    """The two paths must be interchangeable for every stream we train on."""
+    coords = [
+        (px / W, py / H) for px, py in ((0, 0), (17, 9), (31, 22), (W - 1, H - 1))
+    ]
+    rounded = scatter_field(model, coords, bilinear=False)
+    splatted = scatter_field(model, coords, bilinear=True)
+    assert torch.allclose(rounded, splatted, atol=1e-5)
+
+
+def test_warm_start_treats_a_checkpoint_without_a_config_as_relative(
+    f3_config, tmp_path
+):
+    """f3-era checkpoints have no depth_config.yml beside them and predate metric heads."""
+    relu = EventFFDepthAnythingV2(f3_config, {"size": DAV2_SIZE, "encoder": "vits"})
+    torch.save({"model": relu.state_dict()}, tmp_path / "f3.pth")
+    emit_weight = "dav2.depth_head.scratch.output_conv2.2.weight"
+
+    exp = EventFFDepthAnythingV2(
+        f3_config, {"size": DAV2_SIZE, "encoder": "vits", "head": "exp"}
+    )
+    assert not warm_start(exp, tmp_path / "f3.pth"), "relative to relative loads as is"
+    assert torch.equal(exp.state_dict()[emit_weight], relu.state_dict()[emit_weight])
+    assert warm_start(EventFFDepthAnythingV2(f3_config, SIGMOID), tmp_path / "f3.pth")
+
+
+def test_the_canonical_transform_leaves_scale_relative_metrics_alone(disparity):
+    """abs_rel and d1 are ratios, so the camera only moves rmse, which is in metres."""
+    target, mask = disparity
+    truth = 1.0 / target
+    pred = truth * 1.2
+    wide = METRIC.metrics(pred, truth, mask, torch.full((2,), 554.0))
+    narrow = METRIC.metrics(pred, truth, mask, torch.full((2,), 1116.0))
+    assert wide["d1"] == pytest.approx(narrow["d1"])
+    assert wide["abs_rel"] == pytest.approx(narrow["abs_rel"])
+    assert narrow["rmse"] > wide["rmse"], (
+        "a longer lens puts the same scene further away"
     )

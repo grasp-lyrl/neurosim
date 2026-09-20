@@ -1,4 +1,4 @@
-"""Scale- and shift-invariant relative disparity loss, after MiDaS (arXiv 1907.01341)."""
+"""Relative disparity loss after MiDaS (arXiv 1907.01341) and metric depth loss after DAv2."""
 
 import torch
 from torch import Tensor, nn
@@ -55,9 +55,33 @@ class ScaleAndShiftInvariantLoss(nn.Module):
         self.name = "SSIMAELoss"
         self.alpha = alpha
         self.scales = scales
+        self.parts = {}
 
     def forward(self, prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
         pred_hat, target_hat = normalize_scale_shift(prediction, target, mask)
         l_ssimae = nn.functional.l1_loss(pred_hat[mask], target_hat[mask])
         l_reg = multiscale_gradient_loss(pred_hat, target_hat, mask, self.scales)
+        self.parts = {"data": l_ssimae.detach(), "grad": (self.alpha * l_reg).detach()}
         return l_ssimae + self.alpha * l_reg
+
+
+class SiLogLoss(nn.Module):
+    """SiLog after f3's, plus `alpha` times the gradient term on log depth (f3 uses a pseudo-label; sim GT is dense)."""
+
+    def __init__(self, lambd: float = 0.5, alpha: float = 0.0, scales: int = 4):
+        super().__init__()
+        self.name = "SiLogGradLoss" if alpha else "SiLogLoss"
+        self.lambd = lambd
+        self.alpha = alpha
+        self.scales = scales
+        self.parts = {}
+
+    def forward(self, prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
+        # log(0) at invalid pixels would reach the gradient term as 0 * inf.
+        log_pred = torch.log(prediction + 1e-6)
+        log_target = torch.log(target.masked_fill(~mask, 1.0))
+        diff = (log_target - log_pred)[mask]
+        l_silog = torch.sqrt((diff**2).mean() - self.lambd * diff.mean() ** 2)
+        l_reg = multiscale_gradient_loss(log_pred, log_target, mask, self.scales)
+        self.parts = {"data": l_silog.detach(), "grad": (self.alpha * l_reg).detach()}
+        return l_silog + self.alpha * l_reg

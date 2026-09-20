@@ -9,11 +9,13 @@ from torch import Tensor
 
 from neurosim.online_data import OnlineDataLoader, TimeAlignedSample
 
+from ..utils import focal_px
+
 
 def usable_sample_filter(
     depth_uuid: str,
     event_sensor: str,
-    max_disparity: float,
+    min_depth: float,
     min_events: int,
     min_valid_frac: float = 0.5,
 ) -> Callable[[TimeAlignedSample], bool]:
@@ -23,7 +25,6 @@ def usable_sample_filter(
     packets too sparse for the backbone. Applied before batching, so a rejected sample
     costs a row rather than shrinking the batch.
     """
-    min_depth = 1.0 / max_disparity
 
     def keep(sample: TimeAlignedSample) -> bool:
         depth = sample.sensors[depth_uuid]
@@ -87,11 +88,13 @@ def cap_events(events: np.ndarray, counts: np.ndarray, cap: int):
 
 
 def process_batch(batch, args, device):
-    """One loader batch -> ``(events, counts, disparity, color_images)`` on `device`.
+    """One loader batch -> ``(events, counts, depth, focal, color_images)`` on `device`.
 
     ``batch[event_sensor]`` is ``(counts, events)`` with events raw as
     ``[x, y, t_anchor - t, p]`` in pixels and anchor-relative µs; the loader does not
-    normalize, so this divides by ``args.event_norm = (W, H, window_us)``.
+    normalize, so this divides by ``args.event_norm = (W, H, window_us)``. Depth is in
+    metres, 0 where invalid, and ``focal`` is the camera's focal length in pixels, which
+    metric depth is proportional to.
     """
     event_sensor, depth_sensor = args.event_sensor, args.depth_sensor
     assert event_sensor in batch, f"no '{event_sensor}' in batch: {list(batch)}"
@@ -105,9 +108,14 @@ def process_batch(batch, args, device):
         args.event_norm, device=device, dtype=torch.float32
     )
 
-    # Invalid depths read 0.0; clip before inverting to disparity.
     depth = torch.from_numpy(batch[depth_sensor]).to(device, torch.float32)
-    disparity = 1.0 / depth.clamp(0.5 / args.max_disparity, 1 / args.min_disparity)
+    hfov = batch.meta.hfov
+    assert (hfov > 0).all(), (
+        "the loader reported no hfov; metric depth needs the camera"
+    )
+    focal = focal_px(
+        torch.from_numpy(hfov).to(device, torch.float32), args.event_norm[0]
+    )
 
     color_sensor = args.color_sensor
     color_images = (
@@ -115,12 +123,7 @@ def process_batch(batch, args, device):
         if color_sensor and color_sensor in batch
         else None
     )
-    return ff_events, event_counts, disparity, color_images
-
-
-def valid_disparity(disparity: Tensor, args) -> Tensor:
-    """Pixels the loss may learn from: near enough to read, near enough to be real."""
-    return (disparity < args.max_disparity) & (disparity > args.min_disparity)
+    return ff_events, event_counts, depth, focal, color_images
 
 
 def usable_samples(valid_mask: Tensor, min_valid_frac: float = 0.5) -> Tensor:

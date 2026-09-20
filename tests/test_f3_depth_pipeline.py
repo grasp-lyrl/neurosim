@@ -10,15 +10,49 @@ import pytest
 import torch
 from torch import nn
 
-from applications.f3_depth_training.data import process_batch, usable_samples
+from applications.f3_depth_training.data import (
+    process_batch,
+    usable_sample_filter,
+    usable_samples,
+)
 from applications.f3_depth_training.data.m3ed import DepthFrame, collate_frames
 from applications.f3_depth_training.utils import (
+    MetricDepth,
+    RelativeDepth,
     ScaleAndShiftInvariantLoss,
+    build_mode,
     build_optimizer,
     build_scheduler,
+    focal_px,
+    mean_scores,
 )
 
 APP = Path(__file__).resolve().parents[1] / "applications" / "f3_depth_training"
+
+RELATIVE = RelativeDepth(0.05, 1000.0, ScaleAndShiftInvariantLoss())
+CONF = {
+    "loss": "ssimae",
+    "alpha": 0.5,
+    "scales": 4,
+    "lambd": 0.5,
+    "min_disparity": 0.05,
+    "max_disparity": 1000.0,
+    "min_depth": 0.2,
+    "max_depth": 20.0,
+    "focal_canonical": 686.0,
+    "head_max_depth": 26.0,
+}
+METRIC_CONF = CONF | {"loss": "siloggrad"}
+NO_FOCAL = torch.ones(1)  # relative mode ignores it
+
+
+class LoaderBatch(dict):
+    """A loader batch: sensor payloads, plus the per-row metadata the loader attaches."""
+
+    def __init__(self, sensors, hfov=90.0):
+        super().__init__(sensors)
+        rows = len(next(iter(sensors.values()))[0])
+        self.meta = types.SimpleNamespace(hfov=np.full(rows, hfov, np.float32))
 
 
 @pytest.fixture
@@ -29,8 +63,6 @@ def batch_args():
         color_sensor=None,
         event_norm=(640, 480, 20000),
         max_events=0,
-        max_disparity=1000.0,
-        min_disparity=0.05,
     )
 
 
@@ -39,11 +71,13 @@ def test_process_batch_normalizes_events_to_the_model_frame(batch_args):
     events = np.array(
         [[320.0, 240.0, 10000.0, 1.0], [640.0, 480.0, 20000.0, 0.0]], np.float32
     )
-    batch = {
-        "ev": (np.array([2], np.int32), events),
-        "dep": np.full((1, 4, 4), 5.0, np.float32),
-    }
-    ff_events, counts, _, _ = process_batch(batch, batch_args, torch.device("cpu"))
+    batch = LoaderBatch(
+        {
+            "ev": (np.array([2], np.int32), events),
+            "dep": np.full((1, 4, 4), 5.0, np.float32),
+        }
+    )
+    ff_events, counts, _, _, _ = process_batch(batch, batch_args, torch.device("cpu"))
 
     assert torch.allclose(ff_events[0, :3], torch.tensor([0.5, 0.5, 0.5]))
     assert torch.allclose(ff_events[1, :3], torch.tensor([1.0, 1.0, 1.0]))
@@ -51,14 +85,29 @@ def test_process_batch_normalizes_events_to_the_model_frame(batch_args):
     assert counts.tolist() == [2]
 
 
-def test_process_batch_converts_depth_to_inverse_depth(batch_args):
+def test_process_batch_keeps_depth_in_metres(batch_args):
     events = np.zeros((1, 4), np.float32)
-    batch = {
-        "ev": (np.array([1], np.int32), events),
-        "dep": np.full((1, 4, 4), 5.0, np.float32),
-    }
-    _, _, disparity, _ = process_batch(batch, batch_args, torch.device("cpu"))
-    assert torch.allclose(disparity, torch.full((1, 4, 4), 0.2)), "disparity is 1/depth"
+    depth = np.full((1, 4, 4), 5.0, np.float32)
+    depth[0, 0, 0] = 0.0  # an invalid read stays 0 for the mode to mask
+    batch = LoaderBatch(
+        {"ev": (np.array([1], np.int32), events), "dep": depth}, hfov=90.0
+    )
+    _, _, out, focal, _ = process_batch(batch, batch_args, torch.device("cpu"))
+    assert torch.equal(out, torch.from_numpy(depth)), (
+        "the mode converts, not the loader"
+    )
+    assert focal.item() == pytest.approx(320.0), "90 deg over 640 px is f = 320"
+
+
+def test_the_sample_filter_rejects_mostly_unread_depth():
+    keep = usable_sample_filter("dep", "ev", 0.2, min_events=1)
+    events = {"x": np.zeros(5)}
+    read = types.SimpleNamespace(sensors={"dep": np.full((4, 4), 5.0), "ev": events})
+    unread = types.SimpleNamespace(sensors={"dep": np.zeros((4, 4)), "ev": events})
+    assert keep(read)
+    assert not keep(unread), (
+        "0 m reads are the unusable ones; far pixels wait for the batch gate"
+    )
 
 
 def test_the_cap_thins_only_the_samples_over_budget():
@@ -103,18 +152,14 @@ def test_usable_samples_needs_half_the_depth_valid():
 # ── the recorded source ──────────────────────────────────────────────────────
 def test_collate_concatenates_ragged_event_windows():
     frames = [
-        DepthFrame(
-            torch.zeros(5, 4), torch.zeros(8, 8), torch.zeros(8, 8, dtype=torch.bool)
-        ),
-        DepthFrame(
-            torch.zeros(3, 4), torch.zeros(8, 8), torch.zeros(8, 8, dtype=torch.bool)
-        ),
+        DepthFrame(torch.zeros(5, 4), torch.zeros(8, 8)),
+        DepthFrame(torch.zeros(3, 4), torch.zeros(8, 8)),
     ]
-    events, counts, disparity, mask = collate_frames(frames)
+    events, counts, depth = collate_frames(frames)
     assert events.shape == (8, 4), "windows concatenate, they do not pad"
     assert counts.tolist() == [5, 3]
     assert counts.dtype == torch.int32
-    assert disparity.shape == mask.shape == (2, 8, 8)
+    assert depth.shape == (2, 8, 8)
 
 
 # ── optimizer and schedule ───────────────────────────────────────────────────
@@ -181,7 +226,6 @@ def make_args(validation):
     return types.SimpleNamespace(
         validation=validation,
         device=torch.device("cpu"),
-        min_disparity=0.05,
         batches_per_epoch=100,
         log_interval=10,
     )
@@ -195,8 +239,8 @@ def validator_for(validation, data_cfg=None):
         make_args(validation),
         logging.getLogger("test"),
         None,
+        RELATIVE,
         None,
-        ScaleAndShiftInvariantLoss(),
         data_cfg or {},
         (640, 480, 20),
     )
@@ -261,3 +305,126 @@ def test_the_data_sources_stay_free_of_training_only_imports():
         reached = imported_modules(path)
         assert "wandb" not in reached, f"{path.name} imports wandb"
         assert "experiment" not in reached, f"{path.name} imports run scaffolding"
+
+
+def test_a_full_post_warmup_cosine_needs_no_hold():
+    """cooldown = epochs - warmup leaves no flat stretch for the metrics to wander in."""
+    optimizer = build_optimizer(Named(), 1e-5)
+    scheduler = build_scheduler(
+        optimizer, epochs=400, warmup_epochs=10, cooldown_epochs=390
+    )
+    lrs = []
+    for _ in range(400):
+        lrs.append(scheduler.get_last_lr()[0])
+        optimizer.step()
+        scheduler.step()
+
+    assert lrs[10] == pytest.approx(max(lrs)), "the peak is the end of warmup"
+    assert lrs[10] > lrs[100] > lrs[200] > lrs[300] > lrs[399], "monotone decay after"
+    assert lrs[399] < 1e-3 * max(lrs), "anneals to ~zero"
+
+
+# --------------------------------------------------------------------------- #
+# The range the loss is allowed to see, in each mode
+# --------------------------------------------------------------------------- #
+def test_the_relative_target_excludes_both_the_unreadable_and_the_far():
+    """The depth clamp is two-sided, so a one-sided mask keeps a whole flat patch."""
+    depth = torch.tensor([[0.0, 0.5, 5.0, 20.0, 80.0]])  # 0 m reads are invalid
+    disparity, keep = RELATIVE.target(depth, NO_FOCAL)
+    assert torch.allclose(disparity[keep], 1.0 / depth[keep]), "disparity is 1/depth"
+    assert keep.tolist() == [[False, True, True, False, False]], (
+        "0 m must drop as unreadable, and both 20 m and 80 m as beyond the far limit"
+    )
+
+
+def test_the_far_limit_follows_min_disparity():
+    """min_disparity is the range knob: 0.05 is 20 m, 0.1 is 10 m."""
+    depth = torch.tensor([[5.0, 15.0]])
+    for min_disparity, expected in ((0.05, [[True, True]]), (0.1, [[True, False]])):
+        mode = RelativeDepth(min_disparity, 1000.0, ScaleAndShiftInvariantLoss())
+        assert mode.target(depth, NO_FOCAL)[1].tolist() == expected
+
+
+def test_the_metric_target_keeps_only_the_supervised_depth_range():
+    mode = build_mode(METRIC_CONF, metric=True)
+    depth = torch.tensor([[[0.0, 0.1, 0.5, 5.0, 20.0, 80.0]]])
+    _, keep = mode.target(depth, torch.tensor([686.0]))
+    assert keep.tolist() == [[[False, False, True, True, False, False]]]
+
+
+# ── the canonical camera ─────────────────────────────────────────────────────
+def test_canonical_depth_is_the_same_for_two_cameras_seeing_the_same_scene():
+    """The ambiguity the head cannot resolve: identical imagery at f and 2f is 2x the depth."""
+    mode = build_mode(METRIC_CONF, metric=True)
+    depth = torch.rand(1, 8, 8) * 9 + 1
+    pair = torch.cat([depth, depth * 2])
+    canonical, _ = mode.target(pair, torch.tensor([554.0, 1108.0]))
+    assert torch.allclose(canonical[0], canonical[1], atol=1e-5), (
+        "the same view still asks the head for two different numbers"
+    )
+
+
+def test_to_metres_undoes_the_canonical_transform():
+    mode = build_mode(METRIC_CONF, metric=True)
+    depth, focal = torch.rand(2, 8, 8) * 9 + 1, torch.tensor([554.0, 1116.0])
+    canonical, _ = mode.target(depth, focal)
+    assert torch.allclose(mode.to_metres(canonical, focal), depth, atol=1e-5)
+
+
+def test_the_supervised_range_does_not_move_with_the_camera():
+    """The mask is on real depth, so every camera is taught over the same 0.2-20 m."""
+    mode = build_mode(METRIC_CONF, metric=True)
+    depth = torch.tensor([[[0.1, 0.5, 5.0, 19.0, 25.0]]]).repeat(2, 1, 1)
+    _, mask = mode.target(depth, torch.tensor([554.0, 1116.0]))
+    assert torch.equal(mask[0], mask[1])
+
+
+def test_the_head_ceiling_covers_the_widest_camera_in_the_config():
+    """A cap under max_depth * focal_canonical / f_widest would clip the far field."""
+    import yaml
+
+    conf = yaml.safe_load(
+        (APP / "configs" / "depth_training_config_voltmeter_metric.yml").read_text()
+    )
+    mode = build_mode(conf, metric=True)
+    hfov = conf["data"]["online_data"]["randomization"]["sensors"][
+        "event_camera_1,depth_camera_1"
+    ]["hfov"]["range"]
+    widest = focal_px(torch.tensor([float(max(hfov))]), 640).item()
+    assert mode.head_max_depth >= mode.max_depth * mode.focal / widest
+
+
+def test_focal_px_matches_the_m3ed_calibration():
+    assert focal_px(torch.tensor([34.4]), 640).item() == pytest.approx(1033, rel=2e-3)
+
+
+def test_the_flag_and_the_loss_have_to_agree():
+    assert isinstance(build_mode(CONF, metric=False), RelativeDepth)
+    assert isinstance(build_mode(METRIC_CONF, metric=True), MetricDepth)
+    with pytest.raises(AssertionError, match="needs --metric"):
+        build_mode(METRIC_CONF, metric=False)
+    with pytest.raises(AssertionError, match="silog or siloggrad"):
+        build_mode(CONF, metric=True)
+
+
+def test_silog_without_the_gradient_term_is_alpha_zero():
+    plain = build_mode(CONF | {"loss": "silog"}, metric=True).loss_fn
+    grad = build_mode(METRIC_CONF, metric=True).loss_fn
+    assert (plain.alpha, plain.name) == (0.0, "SiLogLoss")
+    assert (grad.alpha, grad.name) == (0.5, "SiLogGradLoss")
+
+
+def test_mean_scores_skips_batches_where_a_metric_was_undefined():
+    batches = [{"d1": 50.0, "d1_near": float("nan")}, {"d1": 70.0, "d1_near": 80.0}]
+    assert mean_scores(batches) == {"d1": 60.0, "d1_near": 80.0}
+
+
+def test_usable_samples_honours_the_configured_fraction():
+    """The gate is a config knob, not the hardcoded half it used to be."""
+    valid = torch.zeros(3, 10, 10, dtype=torch.bool)
+    valid[0, :6] = True  # 60% valid
+    valid[1, :9] = True  # 90%
+    valid[2] = True  # 100%
+
+    assert usable_samples(valid, 0.5).tolist() == [True, True, True]
+    assert usable_samples(valid, 0.9).tolist() == [False, True, True]
