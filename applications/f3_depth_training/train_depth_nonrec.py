@@ -25,6 +25,7 @@ from .data import (
     process_batch,
     usable_sample_filter,
     usable_samples,
+    valid_disparity,
 )
 from .nets import (
     EventFFDepthAnythingV2,
@@ -52,19 +53,6 @@ from .utils import (
     improved,
     set_best_results,
 )
-
-
-def valid_disparity(disparity: torch.Tensor, args) -> torch.Tensor:
-    """Pixels the loss may learn from: near enough to read, far enough to be real.
-
-    Both bounds matter because the depth clamp that builds this disparity is two-sided.
-    Below ``min_disparity`` every pixel was pinned to exactly that value -- one flat
-    patch covering everything past the far limit, often most of the frame looking down a
-    corridor. A scale-and-shift-invariant loss fits scale and shift per frame, so that
-    patch pulls them around as its size changes, and the prediction has to flicker to
-    follow. Masking it out leaves the fit to the range the model is actually judged on.
-    """
-    return (disparity < args.max_disparity) & (disparity > args.min_disparity)
 
 
 # Metrics from eval_relative_depth; the loss name is appended per run.
@@ -122,7 +110,7 @@ def train_epoch(
         # Decided before the forward: an unusable batch should not cost one, and the
         # host sync this costs then waits only on the copy, not on the whole step.
         disparity_valid_mask = valid_disparity(disparity, args)
-        keep = usable_samples(disparity_valid_mask)
+        keep = usable_samples(disparity_valid_mask, args.min_valid_depth_frac)
         if not keep.any():
             continue
 
@@ -235,7 +223,7 @@ def validate(
             model, ff_events, event_counts, H, W
         ).float()
         valid_mask = valid_disparity(disparity, args)
-        keep = usable_samples(valid_mask)
+        keep = usable_samples(valid_mask, args.min_valid_depth_frac)
         if not keep.any():
             continue
         kept_mask = valid_mask[keep]
@@ -328,6 +316,8 @@ def main():
     args.depth_sensor = roles["anchor"][0]
     args.event_sensor = roles["stream"][0]
     args.color_sensor = data_cfg.get("color_sensor")
+    # What fraction of a depth frame has to be usable before the sample earns a step.
+    args.min_valid_depth_frac = float(data_cfg.get("min_valid_depth_frac", 0.5))
 
     setup_torch()
 
@@ -412,6 +402,7 @@ def main():
             args.event_sensor,
             args.max_disparity,
             int(data_cfg.get("min_events_per_sample", 10000)),
+            args.min_valid_depth_frac,
         ),
     )
 
