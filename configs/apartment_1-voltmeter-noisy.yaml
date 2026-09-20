@@ -1,0 +1,110 @@
+# apartment_1 with the DVS-Voltmeter event model at the leak we settled on.
+#
+# M3ED's pre-takeoff windows give 0.10-0.18 ev/px/s at 48% ON. This config is
+# The DVXplorer's own background is 3.6-4.2 ev/px/s, but 62% of it comes from 1% of
+# pixels: overhead light flicker and specular reflections, which we cannot render. Its
+# uniform floor is only ~0.12. This sits above that floor on purpose, as a stand-in for
+# the flicker, in the hope it buys robustness. hfov 55 deg, the deployment lens.
+simulator:
+  world_rate: 1000 # Hz
+  control_rate: 100 # Hz
+  sim_time: 120 # seconds
+  coord_transform: "rotorpy_to_hm3d"
+
+  additional_sensors:
+    imu_1:
+      type: "imu"
+      model: "rotorpy"
+      sampling_rate: 50 # Hz
+
+  sensor_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 1000 # Hz
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
+
+  viz_rates:
+    imu_1: 50 # Hz
+    event_camera_1: 20 # Hz
+    color_camera_1: 20 # Hz
+    depth_camera_1: 20 # Hz
+
+visual_backend:
+  gpu_id: 0
+  scene: "data/scene_datasets/habitat-test-scenes/apartment_1.glb"
+  scene_dataset_config_file: "default"
+  clear_color: [0.0, 0.0, 0.0, 1.0]
+  default_agent: 0
+
+  agent_height: 1.0
+  agent_radius: 0.3
+  agent_max_climb: 1.0
+  agent_max_slope: 90.0
+
+  enable_hbao: false
+  frustum_culling: true
+
+  seed: 324
+  physics_config_file: "data/default.physics_config.json"
+  enable_physics: true
+
+  sensors:
+    event_camera_1:
+      type: "event"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 55
+      zfar: 20.0
+      anti_aliasing: 8
+
+      # DVS-Voltmeter stochastic event model (Lin et al., ECCV 2022).
+      # Inputs are [0, 1] linear intensity; the factory passes
+      # input_normalized=True so the simulator rescales internally to the
+      # 0-255 scale that k1..k6 are calibrated against.
+      backend: "voltmeter"
+      leak_scale: 1.0            # k4/k5 are set directly below, so nothing is attenuated
+      randomize_phase: true      # desynchronises background ON sparkle
+      seed: 67
+      max_events_per_pixel: 16   # output buffer = W * H * this
+      # [k1, k2, k3, k4, k5, k6] with the background carried by k6, the diffusion term,
+      # Background on a static frame: 1.08 ev/px/s at 53% ON.
+      #   k1 signal gain, k2 brightness knee, k3 shot noise,
+      #   k4 thermal leak (0.10 ev/px/s alone), k5 photocurrent leak, k6 noise floor
+      k: [5.265, 20.0, 1.0e-4, 1.0e-7, 0.0, 1.0e-3]
+
+    color_camera_1:
+      type: "color"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 55
+      zfar: 20.0
+      anti_aliasing: 8
+
+    depth_camera_1:
+      type: "depth"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 55
+      zfar: 10.0
+
+controller:
+  model: "rotorpy_se3"
+  vehicle: "crazyflie"
+
+dynamics:
+  model: "rotorpy_multirotor_euler"
+  vehicle: "crazyflie"
+
+trajectory:
+  model: "habitat_random_minsnap"
+  seed: 42
+  target_length: 30.0
+  min_waypoint_distance: 2.0
+  max_waypoints: 100
+  v_avg: 1.0

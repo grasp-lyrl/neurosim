@@ -9,10 +9,10 @@ validation:
 
 # Training options
 lr: 5.0e-6 # Learning rate (DAv2 pseudo-label stage: encoder 5e-6, decoder 10x)
-warmup_epochs: 10 # Linear ramp up to lr; 0 disables
-cooldown_epochs: 30 # Cosine anneal to 0 over the final epochs; 0 disables
+warmup_epochs: 20 # Linear ramp up to lr; 0 disables
+cooldown_epochs: 150 # Cosine anneal to 0 over the final epochs; 0 disables
 clip_grad: 0 # Gradient clipping (0 = disabled)
-epochs: 300 # Number of epochs
+epochs: 400 # Number of epochs
 log_interval: 10 # Save checkpoint interval in epochs
 val_interval: 10 # Validation interval in epochs
 
@@ -27,7 +27,7 @@ train:
 # Loss options
 loss: ssimae # Loss function: 'ssimae', 'silog', 'siloggrad'
 scales: 4 # Number of scales for gradient matching loss
-alpha: 0.3 # Weight for gradient matching loss
+alpha: 0.5 # Weight for gradient matching loss, the MiDaS value
 min_disparity: 0.05 # Minimum disparity for max depth 20.0 m
 max_disparity: 1000.0 # Maximum disparity for min depth 0.001 m
 
@@ -50,6 +50,7 @@ eventff:
 data:
   trainer_gpu: 1 # trainer GPU (producers run on online_data.gpu_ids)
   min_events_per_sample: 500 # drop sparser samples before they reach a batch
+  min_valid_depth_frac: 0.70 # fraction of the depth frame that must be valid to train on it
 
   # Recorded M3ED flights scored against LiDAR
   m3ed:
@@ -74,21 +75,24 @@ data:
     randomization:
       resample_every: 1 # reload scene+sensors every N episodes; trajectory every episode
       scenes_glob: data/hm3d/*/*.basis.glb
+      visual_backend:
+        agent_height: {range: [1.0, 1.5]}
       sensors:
         # DVS-Voltmeter has no contrast threshold; k1..k6 are the calibrated
         # process parameters
         event_camera_1:
-          leak_scale: {range: [0.25, 1.0]} # 1.0 is the calibration; above it is unphysical
+          leak_scale: 1.0
           k:
             - {range: [4.739, 5.792]} # k1, the rate knob
             - {range: [17.0, 23.0]} # k2, spanning both camera presets
             - 1.0e-4 # k3
-            - 1.0e-7 # k4 thermal leakage
-            - {range: [5.0e-9, 5.0e-8]} # k5 photocurrent leakage, DVS346 -> DVS240
-            - 1.0e-5 # k6 noise floor
+            - {range: [3.0e-8, 3.0e-7]} # k4 thermal leak, 0.04-0.30 ev/px/s, ON only
+            - {range: [0.0, 5.0e-9]} # k5 photocurrent leak, adds 0-0.50 at L=80, ON only
+            - {range: [1.0e-5, 1.2e-3]} # k6 noise floor, 0.10-1.55 ev/px/s
         # One shared draw:  both frusta must match.
         "event_camera_1,depth_camera_1":
-          hfov: {range: [40, 90]}
+          hfov: {range: [45, 65]}
+          position: [0.0, {range: [-0.1, 0.1]}, 0.0]
       trajectory:
         v_avg: {range: [0.2, 1.5]}
         hovers: {choices: [0, 1, 2, 3]} # a count, so `choices`; `range` samples a float
