@@ -405,7 +405,7 @@ class RateLimitedYaw:
     def __init__(
         self,
         traj,
-        yaw_rate_max: float = np.pi / 3,
+        yaw_rate_max: float = np.pi / 2,
         yaw_accel_max: float | None = None,
         gain: float = 2.0,
         dt: float = 0.01,
@@ -502,7 +502,7 @@ def generate_interesting_traj(
     hovers: int = 0,
     hover_s: float = 2.5,
     max_height: float | None = None,
-    yaw_rate_max: float = np.pi / 3,
+    yaw_rate_max: float = np.pi / 2,
     max_attempts: int = 5,
 ) -> RateLimitedYaw:
     """Generate a longer trajectory by sampling distant waypoints and connecting them.
