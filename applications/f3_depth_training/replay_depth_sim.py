@@ -157,7 +157,7 @@ def main():
                     model, events, counts, *disparity.shape[1:]
                 ).float()
 
-            valid = disparity < args.max_disparity
+            valid = (disparity < args.max_disparity) & (disparity > args.min_disparity)
             scores = eval_relative_depth(
                 prediction, disparity, valid, args.min_disparity
             )
