@@ -1,0 +1,106 @@
+# One episode in the exact depth-training configuration: voltmeter events, the
+# calibrated k, hfov mid-range and the 60 deg/s yaw cap. For test_sim.py --display.
+simulator:
+  world_rate: 1000
+  control_rate: 100
+  sim_time: 30.0
+  coord_transform: rotorpy_to_hm3d
+  sensor_rates:
+    event_camera_1: 1000
+    depth_camera_1: 50
+    color_camera_1: 20
+  viz_rates:
+    event_camera_1: 20
+    depth_camera_1: 20
+    color_camera_1: 20
+visual_backend:
+  gpu_id: 0
+  scene: data/hm3d/00042-qDjhFcNqFPi/qDjhFcNqFPi.basis.glb
+  scene_dataset_config_file: default
+  clear_color:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  default_agent: 0
+  agent_height: 1.0
+  agent_radius: 0.3
+  agent_max_climb: 2.0
+  agent_max_slope: 90.0
+  enable_hbao: false
+  frustum_culling: true
+  seed: 324
+  physics_config_file: data/default.physics_config.json
+  enable_physics: true
+  sensors:
+    event_camera_1:
+      type: event
+      position:
+      - 0.0
+      - 0.0
+      - 0.05
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      width: 640
+      height: 480
+      hfov: 57
+      zfar: 40.0
+      backend: voltmeter
+      camera_type: DVS346
+      leak_scale: 1.0
+      randomize_phase: true
+      anti_aliasing: 8
+      k:
+      - 5.265
+      - 20.0
+      - 0.0001
+      - 1.0e-07
+      - 2.5e-09
+      - 0.0004
+    depth_camera_1:
+      type: depth
+      position:
+      - 0.0
+      - 0.0
+      - 0.05
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      width: 640
+      height: 480
+      hfov: 57
+      zfar: 1000.0
+    color_camera_1:
+      type: color
+      position:
+      - 0.0
+      - 0.0
+      - 0.05
+      orientation:
+      - 0.0
+      - 0.0
+      - 0.0
+      width: 640
+      height: 480
+      hfov: 57
+      zfar: 40.0
+      anti_aliasing: 8
+controller:
+  model: rotorpy_se3
+  vehicle: crazyflie
+dynamics:
+  model: rotorpy_multirotor_euler
+  vehicle: crazyflie
+trajectory:
+  model: habitat_random_minsnap
+  seed: 42
+  target_length: 30.0
+  min_waypoint_distance: 0.5
+  max_waypoints: 100
+  v_avg: 1.0
+  yaw_rate_max: 1.0472
+safety:
+  abort_out_of_bounds: true
