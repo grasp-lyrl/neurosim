@@ -79,7 +79,7 @@ data:
           contrast_threshold_neg: {range: [0.1, 0.4]}
         # One shared draw:  both frusta must match.
         "event_camera_1,depth_camera_1":
-          hfov: {range: [40, 90]}
+          hfov: {range: [50, 65]}
       trajectory:
         v_avg: {range: [0.2, 1.5]}
         hovers: {choices: [0, 1, 2, 3]} # a count, so `choices`; `range` samples a float

@@ -91,7 +91,7 @@ data:
             - {range: [1.0e-5, 1.2e-3]} # k6 noise floor, 0.10-1.55 ev/px/s
         # One shared draw:  both frusta must match.
         "event_camera_1,depth_camera_1":
-          hfov: {range: [45, 65]}
+          hfov: {range: [50, 65]}
           position: [0.0, {range: [-0.1, 0.1]}, 0.0]
       trajectory:
         v_avg: {range: [0.2, 1.5]}

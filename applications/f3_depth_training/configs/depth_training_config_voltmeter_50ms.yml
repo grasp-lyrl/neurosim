@@ -90,7 +90,7 @@ data:
             - 1.0e-5 # k6 noise floor
         # One shared draw:  both frusta must match.
         "event_camera_1,depth_camera_1":
-          hfov: {range: [40, 100]}
+          hfov: {range: [50, 65]}
       trajectory:
         v_avg: {range: [0.2, 1.5]}
         hovers: {choices: [0, 1, 2, 3]} # a count, so `choices`; `range` samples a float

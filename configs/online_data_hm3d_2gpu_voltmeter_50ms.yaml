@@ -72,6 +72,7 @@ trajectory:
   min_waypoint_distance: 0.5
   max_waypoints: 100
   v_avg: 1.0
+  yaw_rate_max: 1.0472 # rad/s = 60 deg/s; RateLimitedYaw enforces it after the solve
 
 safety:
   # End the episode when the drone leaves the scene
