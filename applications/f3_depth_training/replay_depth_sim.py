@@ -169,16 +169,16 @@ def main():
         for index, batch in enumerate(loader):
             if index >= args.frames:
                 break
-            events, counts, depth, focal, _ = process_batch(batch, args, device)
+            events, counts, depth, _ = process_batch(batch, args, device)
             with torch.no_grad():
                 prediction = predict_full_frame(
                     model, events, counts, *depth.shape[1:]
                 ).float()
 
-            target, valid = mode.target(depth, focal)
-            scores = mode.metrics(prediction, target, valid, focal)
-            truth_m = mode.to_metres(target, focal)
-            pred_m = mode.to_metres(prediction, focal)
+            target, valid = mode.target(depth)
+            scores = mode.metrics(prediction, target, valid)
+            truth_m = mode.to_metres(target)
+            pred_m = mode.to_metres(prediction)
             depths = truth_m[0][valid[0]]
             ratio = (pred_m[0][valid[0]] / depths).median().item()
             meta = batch.meta

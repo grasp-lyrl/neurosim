@@ -21,8 +21,6 @@ logger = logging.getLogger(__name__)
 # M3ED's left event camera, and the frame its LiDAR depth is already projected into.
 SENSOR_W, SENSOR_H = 1280, 720
 EVENTS, DEPTH = "prophesee/left", "depth/prophesee/left"
-# Focal length from calib_undist_left.txt; a centre crop does not change it.
-FOCAL_PX = 1033.13
 
 
 class DepthFrame(NamedTuple):
@@ -174,12 +172,11 @@ def evaluate_m3ed(
     batches = []
     for events, counts, depth in loader:
         events, counts, depth = events.to(device), counts.to(device), depth.to(device)
-        focal = torch.full((len(depth),), FOCAL_PX, device=device)
-        target, mask = mode.target(depth, focal)
+        target, mask = mode.target(depth)
 
         height, width = depth.shape[1:]
         pred = predict(model, events, counts, height, width).float()
-        scores = mode.metrics(pred, target, mask, focal)
+        scores = mode.metrics(pred, target, mask)
         scores[mode.loss_fn.name] = mode.loss_fn(pred, target, mask).item()
         batches.append(scores)
 

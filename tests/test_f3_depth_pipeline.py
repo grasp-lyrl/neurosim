@@ -23,7 +23,6 @@ from applications.f3_depth_training.utils import (
     build_mode,
     build_optimizer,
     build_scheduler,
-    focal_px,
     mean_scores,
 )
 
@@ -39,11 +38,9 @@ CONF = {
     "max_disparity": 1000.0,
     "min_depth": 0.2,
     "max_depth": 20.0,
-    "focal_canonical": 686.0,
     "head_max_depth": 26.0,
 }
 METRIC_CONF = CONF | {"loss": "siloggrad"}
-NO_FOCAL = torch.ones(1)  # relative mode ignores it
 
 
 class LoaderBatch(dict):
@@ -77,7 +74,7 @@ def test_process_batch_normalizes_events_to_the_model_frame(batch_args):
             "dep": np.full((1, 4, 4), 5.0, np.float32),
         }
     )
-    ff_events, counts, _, _, _ = process_batch(batch, batch_args, torch.device("cpu"))
+    ff_events, counts, _, _ = process_batch(batch, batch_args, torch.device("cpu"))
 
     assert torch.allclose(ff_events[0, :3], torch.tensor([0.5, 0.5, 0.5]))
     assert torch.allclose(ff_events[1, :3], torch.tensor([1.0, 1.0, 1.0]))
@@ -92,11 +89,10 @@ def test_process_batch_keeps_depth_in_metres(batch_args):
     batch = LoaderBatch(
         {"ev": (np.array([1], np.int32), events), "dep": depth}, hfov=90.0
     )
-    _, _, out, focal, _ = process_batch(batch, batch_args, torch.device("cpu"))
+    _, _, out, _ = process_batch(batch, batch_args, torch.device("cpu"))
     assert torch.equal(out, torch.from_numpy(depth)), (
         "the mode converts, not the loader"
     )
-    assert focal.item() == pytest.approx(320.0), "90 deg over 640 px is f = 320"
 
 
 def test_the_sample_filter_rejects_mostly_unread_depth():
@@ -330,7 +326,7 @@ def test_a_full_post_warmup_cosine_needs_no_hold():
 def test_the_relative_target_excludes_both_the_unreadable_and_the_far():
     """The depth clamp is two-sided, so a one-sided mask keeps a whole flat patch."""
     depth = torch.tensor([[0.0, 0.5, 5.0, 20.0, 80.0]])  # 0 m reads are invalid
-    disparity, keep = RELATIVE.target(depth, NO_FOCAL)
+    disparity, keep = RELATIVE.target(depth)
     assert torch.allclose(disparity[keep], 1.0 / depth[keep]), "disparity is 1/depth"
     assert keep.tolist() == [[False, True, True, False, False]], (
         "0 m must drop as unreadable, and both 20 m and 80 m as beyond the far limit"
@@ -342,60 +338,34 @@ def test_the_far_limit_follows_min_disparity():
     depth = torch.tensor([[5.0, 15.0]])
     for min_disparity, expected in ((0.05, [[True, True]]), (0.1, [[True, False]])):
         mode = RelativeDepth(min_disparity, 1000.0, ScaleAndShiftInvariantLoss())
-        assert mode.target(depth, NO_FOCAL)[1].tolist() == expected
+        assert mode.target(depth)[1].tolist() == expected
 
 
 def test_the_metric_target_keeps_only_the_supervised_depth_range():
     mode = build_mode(METRIC_CONF, metric=True)
     depth = torch.tensor([[[0.0, 0.1, 0.5, 5.0, 20.0, 80.0]]])
-    _, keep = mode.target(depth, torch.tensor([686.0]))
+    _, keep = mode.target(depth)
     assert keep.tolist() == [[[False, False, True, True, False, False]]]
 
 
-# ── the canonical camera ─────────────────────────────────────────────────────
-def test_canonical_depth_is_the_same_for_two_cameras_seeing_the_same_scene():
-    """The ambiguity the head cannot resolve: identical imagery at f and 2f is 2x the depth."""
+def test_the_metric_target_passes_depth_through_unchanged():
+    """The head emits metres, so the target is the depth itself over the supervised range."""
     mode = build_mode(METRIC_CONF, metric=True)
-    depth = torch.rand(1, 8, 8) * 9 + 1
-    pair = torch.cat([depth, depth * 2])
-    canonical, _ = mode.target(pair, torch.tensor([554.0, 1108.0]))
-    assert torch.allclose(canonical[0], canonical[1], atol=1e-5), (
-        "the same view still asks the head for two different numbers"
-    )
+    depth = torch.rand(2, 8, 8) * 9 + 1
+    target, _ = mode.target(depth)
+    assert torch.equal(target, depth)
+    assert torch.equal(mode.to_metres(target), depth)
 
 
-def test_to_metres_undoes_the_canonical_transform():
-    mode = build_mode(METRIC_CONF, metric=True)
-    depth, focal = torch.rand(2, 8, 8) * 9 + 1, torch.tensor([554.0, 1116.0])
-    canonical, _ = mode.target(depth, focal)
-    assert torch.allclose(mode.to_metres(canonical, focal), depth, atol=1e-5)
-
-
-def test_the_supervised_range_does_not_move_with_the_camera():
-    """The mask is on real depth, so every camera is taught over the same 0.2-20 m."""
-    mode = build_mode(METRIC_CONF, metric=True)
-    depth = torch.tensor([[[0.1, 0.5, 5.0, 19.0, 25.0]]]).repeat(2, 1, 1)
-    _, mask = mode.target(depth, torch.tensor([554.0, 1116.0]))
-    assert torch.equal(mask[0], mask[1])
-
-
-def test_the_head_ceiling_covers_the_widest_camera_in_the_config():
-    """A cap under max_depth * focal_canonical / f_widest would clip the far field."""
+def test_the_head_ceiling_clears_the_supervised_range():
+    """A sigmoid cap under max_depth would clip the far field."""
     import yaml
 
     conf = yaml.safe_load(
         (APP / "configs" / "depth_training_config_voltmeter_metric.yml").read_text()
     )
     mode = build_mode(conf, metric=True)
-    hfov = conf["data"]["online_data"]["randomization"]["sensors"][
-        "event_camera_1,depth_camera_1"
-    ]["hfov"]["range"]
-    widest = focal_px(torch.tensor([float(max(hfov))]), 640).item()
-    assert mode.head_max_depth >= mode.max_depth * mode.focal / widest
-
-
-def test_focal_px_matches_the_m3ed_calibration():
-    assert focal_px(torch.tensor([34.4]), 640).item() == pytest.approx(1033, rel=2e-3)
+    assert mode.head_max_depth >= mode.max_depth
 
 
 def test_the_flag_and_the_loss_have_to_agree():

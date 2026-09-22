@@ -99,16 +99,14 @@ def train_epoch(
         if idx >= max_batches:
             break
 
-        ff_events, event_counts, depth, focal, _ = process_batch(
-            batch, args, args.device
-        )
+        ff_events, event_counts, depth, _ = process_batch(batch, args, args.device)
 
         B, H, W = depth.shape
         cparams = get_random_crop_params((H, W), (H, H), batch_size=B).to(
             ff_events.device
         )
         target, valid_mask = mode.target(
-            batch_cropper(depth.unsqueeze(1), cparams).squeeze(1), focal
+            batch_cropper(depth.unsqueeze(1), cparams).squeeze(1)
         )
 
         # Decided before the forward: an unusable batch should not cost one, and the
@@ -220,18 +218,18 @@ def validate(
         if idx >= max_batches:
             break
 
-        ff_events, event_counts, depth, focal, color_images = process_batch(
+        ff_events, event_counts, depth, color_images = process_batch(
             batch, args, args.device
         )
         B, H, W = depth.shape
         pred = predict_full_frame(model, ff_events, event_counts, H, W).float()
-        target, valid_mask = mode.target(depth, focal)
+        target, valid_mask = mode.target(depth)
         keep = usable_samples(valid_mask, args.min_valid_depth_frac)
         if not keep.any():
             continue
         kept_mask = valid_mask[keep]
 
-        scores = mode.metrics(pred[keep], target[keep], kept_mask, focal[keep])
+        scores = mode.metrics(pred[keep], target[keep], kept_mask)
         scores[mode.loss_fn.name] = mode.loss_fn(
             pred[keep], target[keep], kept_mask
         ).item()
@@ -239,8 +237,8 @@ def validate(
 
         if idx % 10 == 0 and save_preds:
             base_path = f"outputs/monoculardepth/{args.name}"
-            truth_m = mode.to_metres(target, focal).clamp(min=mode.min_depth)
-            pred_m = mode.to_metres(pred, focal).clamp(min=mode.min_depth)
+            truth_m = mode.to_metres(target).clamp(min=mode.min_depth)
+            pred_m = mode.to_metres(pred).clamp(min=mode.min_depth)
             event_frames = (
                 ev_to_frames_with_polarity(ff_events, event_counts, W, H).cpu().numpy()
             )
@@ -319,7 +317,6 @@ def main():
         args.dav2_config |= {
             "head": "sigmoid",
             "max_depth": mode.head_max_depth,
-            "focal_canonical": mode.focal,
         }
 
     data_cfg = conf["data"]

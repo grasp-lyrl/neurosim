@@ -32,11 +32,7 @@ alpha: 0.5 # Weight for gradient matching loss, the MiDaS value
 lambd: 0.5 # SiLog: 1 forgives a global scale error entirely, 0 is a plain log RMSE
 min_depth: 0.2 # Nearest supervised depth, real m
 max_depth: 20.0 # Farthest supervised depth, real m
-focal_canonical: 686.0 # px at 640 wide = 50 deg hfov, the deployment camera. The head predicts
-  # depth as THIS camera would see it; inference scales by the real focal length. Without
-  # it the randomized FOV leaves metric depth ambiguous by the focal ratio (2x over the DR).
-head_max_depth: 26.0 # Sigmoid ceiling, canonical m. Must exceed max_depth * focal_canonical
-  # / f(widest hfov) = 20 * 686/554 = 24.8, or the far field clips.
+head_max_depth: 26.0 # Sigmoid ceiling, m. Must exceed max_depth or the far field clips.
 
 # DepthAnythingV2 config
 dav2_config:

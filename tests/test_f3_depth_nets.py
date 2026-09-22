@@ -33,8 +33,7 @@ APP = Path(__file__).resolve().parents[1] / "applications" / "f3_depth_training"
 W, H, CHANNELS = 64, 48, 16
 DAV2_SIZE = 70
 RELATIVE = RelativeDepth(0.05, 1000.0, ScaleAndShiftInvariantLoss())
-METRIC = MetricDepth(0.2, 20.0, 686.0, 26.0, SiLogLoss())
-FOCAL = torch.full((2,), 686.0)  # the `disparity` fixture is a pair of images
+METRIC = MetricDepth(0.2, 20.0, 26.0, SiLogLoss())
 SIGMOID = {"size": DAV2_SIZE, "encoder": "vits", "head": "sigmoid", "max_depth": 20.0}
 
 # The real backbone at 1/10th the width: same stage structure, both hash levels (one
@@ -587,15 +586,15 @@ def test_relative_depth_metrics_ignore_the_gauge(disparity):
     """The point of the protocol: an affine map of the prediction changes nothing."""
     target, mask = disparity
     pred = torch.rand_like(target) * 1.45 + 0.1
-    plain = RELATIVE.metrics(pred, target, mask, FOCAL)
-    walked = RELATIVE.metrics(pred * 1e14 + 5.0, target, mask, FOCAL)
+    plain = RELATIVE.metrics(pred, target, mask)
+    walked = RELATIVE.metrics(pred * 1e14 + 5.0, target, mask)
     for k, value in plain.items():
         assert walked[k] == pytest.approx(value, rel=1e-4), f"{k} moved with the gauge"
 
 
 def test_a_perfect_prediction_scores_perfectly(disparity):
     target, mask = disparity
-    results = RELATIVE.metrics(target, target, mask, FOCAL)
+    results = RELATIVE.metrics(target, target, mask)
     assert results["abs_rel"] == pytest.approx(0.0, abs=1e-6)
     assert results["d1"] == pytest.approx(100.0)
     assert results["silog"] == pytest.approx(0.0, abs=1e-3)
@@ -605,10 +604,10 @@ def test_metric_names_match_what_each_mode_returns(disparity):
     """`metric_names` seeds the trainer's best-results table; a missing key raises mid-run."""
     target, mask = disparity
     assert set(RELATIVE.metric_names) == set(
-        RELATIVE.metrics(target, target, mask, FOCAL)
+        RELATIVE.metrics(target, target, mask)
     )
     depth = 1.0 / target
-    assert set(METRIC.metric_names) == set(METRIC.metrics(depth, depth, mask, FOCAL))
+    assert set(METRIC.metric_names) == set(METRIC.metrics(depth, depth, mask))
 
 
 def test_masked_pixels_do_not_reach_the_metrics(disparity):
@@ -617,15 +616,15 @@ def test_masked_pixels_do_not_reach_the_metrics(disparity):
     mask[:, :, 4:] = False
     corrupted = target.clone()
     corrupted[:, :, 4:] = 1e6
-    assert RELATIVE.metrics(corrupted, target, mask, FOCAL) == pytest.approx(
-        RELATIVE.metrics(target, target, mask, FOCAL)
+    assert RELATIVE.metrics(corrupted, target, mask) == pytest.approx(
+        RELATIVE.metrics(target, target, mask)
     )
 
 
 def test_metric_metrics_catch_the_scale_error_the_aligned_ones_forgive(disparity):
     target, mask = disparity
     depth = 1.0 / target
-    scores = METRIC.metrics(2 * depth, depth, mask, FOCAL)
+    scores = METRIC.metrics(2 * depth, depth, mask)
     assert scores["abs_rel"] == pytest.approx(1.0)
     assert scores["d1"] == pytest.approx(0.0)
     assert scores["abs_rel_aligned"] == pytest.approx(0.0, abs=1e-4)
@@ -746,15 +745,12 @@ def test_warm_start_treats_a_checkpoint_without_a_config_as_relative(
     assert warm_start(EventFFDepthAnythingV2(f3_config, SIGMOID), tmp_path / "f3.pth")
 
 
-def test_the_canonical_transform_leaves_scale_relative_metrics_alone(disparity):
-    """abs_rel and d1 are ratios, so the camera only moves rmse, which is in metres."""
+def test_metric_scores_a_constant_overprediction_by_its_ratio(disparity):
+    """abs_rel and d1 are ratios, so a uniform 1.2x reads the same at any depth."""
     target, mask = disparity
     truth = 1.0 / target
-    pred = truth * 1.2
-    wide = METRIC.metrics(pred, truth, mask, torch.full((2,), 554.0))
-    narrow = METRIC.metrics(pred, truth, mask, torch.full((2,), 1116.0))
-    assert wide["d1"] == pytest.approx(narrow["d1"])
-    assert wide["abs_rel"] == pytest.approx(narrow["abs_rel"])
-    assert narrow["rmse"] > wide["rmse"], (
-        "a longer lens puts the same scene further away"
-    )
+    near = METRIC.metrics(truth * 1.2, truth, mask)
+    far = METRIC.metrics(2.0 * truth * 1.2, 2.0 * truth, mask)
+    assert near["d1"] == pytest.approx(far["d1"])
+    assert near["abs_rel"] == pytest.approx(far["abs_rel"])
+    assert far["rmse"] > near["rmse"], "rmse is in metres, so it doubles with the scene"

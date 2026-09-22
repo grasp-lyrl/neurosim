@@ -179,12 +179,6 @@ def parse_args():
     parser.add_argument("--video", help="Write an mp4 instead of opening a window")
     parser.add_argument("--frames", type=int, default=200, help="Frames for --video")
     parser.add_argument(
-        "--focal",
-        type=float,
-        default=1033.13,
-        help="Sensor focal length in px, M3ED's by default; metric runs scale by it",
-    )
-    parser.add_argument(
         "--depth-range",
         default="0.5,20",
         help="near,far metres of the fixed colour scale (metric runs only)",
@@ -217,9 +211,7 @@ def main():
     # so unlike training there is no square crop and the prediction covers the input.
     cparams = torch.tensor([0, 0, model_h, model_w], dtype=torch.int32, device=device)
     cmap = colormaps["magma"]
-    # A metric head emits canonical depth; the real thing scales with the focal length.
     metric = model.dav2.head == "sigmoid"
-    scale = args.focal / model.dav2_config["focal_canonical"] if metric else 1.0
     near, far = (float(v) for v in args.depth_range.split(","))
 
     lut = None
@@ -268,7 +260,7 @@ def main():
             full = torch.ones_like(out, dtype=torch.bool)
             # get_*_image returns matplotlib RGB; cv2 wants BGR.
             pred = cv2.cvtColor(
-                get_depth_image(out * scale, full, cmap, near, far)
+                get_depth_image(out, full, cmap, near, far)
                 if metric
                 else get_disparity_image(out, full, cmap),
                 cv2.COLOR_RGB2BGR,

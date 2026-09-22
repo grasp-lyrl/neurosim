@@ -9,8 +9,6 @@ from torch import Tensor
 
 from neurosim.online_data import OnlineDataLoader, TimeAlignedSample
 
-from ..utils import focal_px
-
 
 def usable_sample_filter(
     depth_uuid: str,
@@ -88,13 +86,12 @@ def cap_events(events: np.ndarray, counts: np.ndarray, cap: int):
 
 
 def process_batch(batch, args, device):
-    """One loader batch -> ``(events, counts, depth, focal, color_images)`` on `device`.
+    """One loader batch -> ``(events, counts, depth, color_images)`` on `device`.
 
     ``batch[event_sensor]`` is ``(counts, events)`` with events raw as
     ``[x, y, t_anchor - t, p]`` in pixels and anchor-relative µs; the loader does not
     normalize, so this divides by ``args.event_norm = (W, H, window_us)``. Depth is in
-    metres, 0 where invalid, and ``focal`` is the camera's focal length in pixels, which
-    metric depth is proportional to.
+    metres, 0 where invalid.
     """
     event_sensor, depth_sensor = args.event_sensor, args.depth_sensor
     assert event_sensor in batch, f"no '{event_sensor}' in batch: {list(batch)}"
@@ -109,13 +106,6 @@ def process_batch(batch, args, device):
     )
 
     depth = torch.from_numpy(batch[depth_sensor]).to(device, torch.float32)
-    hfov = batch.meta.hfov
-    assert (hfov > 0).all(), (
-        "the loader reported no hfov; metric depth needs the camera"
-    )
-    focal = focal_px(
-        torch.from_numpy(hfov).to(device, torch.float32), args.event_norm[0]
-    )
 
     color_sensor = args.color_sensor
     color_images = (
@@ -123,7 +113,7 @@ def process_batch(batch, args, device):
         if color_sensor and color_sensor in batch
         else None
     )
-    return ff_events, event_counts, depth, focal, color_images
+    return ff_events, event_counts, depth, color_images
 
 
 def usable_samples(valid_mask: Tensor, min_valid_frac: float = 0.5) -> Tensor:

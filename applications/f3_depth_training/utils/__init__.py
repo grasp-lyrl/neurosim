@@ -9,7 +9,7 @@ from .metrics import (
     mean_scores,
     set_best_results,
 )
-from .modes import MetricDepth, RelativeDepth, build_mode, focal_px
+from .modes import MetricDepth, RelativeDepth, build_mode
 from .optim import build_optimizer, build_scheduler
 from .viz import ev_to_frames_with_polarity, get_depth_image, get_disparity_image
 
@@ -23,7 +23,6 @@ __all__ = [
     "align_least_squares",
     "build_mode",
     "build_optimizer",
-    "focal_px",
     "build_scheduler",
     "depth_metrics",
     "ev_to_frames_with_polarity",
