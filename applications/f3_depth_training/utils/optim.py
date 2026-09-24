@@ -4,16 +4,16 @@ import torch
 
 
 def build_optimizer(model, lr: float) -> torch.optim.Optimizer:
-    """AdamW with DAv2's encoder at `lr`, the F3 backbone at half, the head at 10x.
+    """AdamW at `lr`, 10x for the two parts that retarget: DAv2's head and the age table.
 
-    Grouped by (scale, decay) rather than one group per parameter, so AdamW's foreach
-    path can batch them. Norms, biases and the re-initialised patch embed skip decay.
+    Everything else is a loaded backbone being fine-tuned. Grouped by (scale, decay)
+    rather than one group per parameter, so AdamW's foreach path can batch them. Norms,
+    biases and the re-initialised patch embed skip decay.
     """
 
     def lr_scale(name: str) -> float:
-        if "pretrained" in name:
-            return 1.0
-        return 0.5 if "eventff" in name else 10.0
+        retargets = "depth_head" in name or "multi_hash_encoder.table" in name
+        return 10.0 if retargets else 1.0
 
     def decays(name: str, param) -> bool:
         return param.ndim > 1 and "patch_embed.proj" not in name
@@ -30,10 +30,11 @@ def build_optimizer(model, lr: float) -> torch.optim.Optimizer:
 
 
 def build_scheduler(optimizer, epochs: int, warmup_epochs: int, cooldown_epochs: int):
-    """Warm up, hold, then cosine to zero, stepped once per epoch.
+    """Warm up, hold, then cosine to `lr`/1000, stepped once per epoch.
 
     Held flat rather than decayed throughout because the data never repeats: there is no
-    overfitting to decay away, and the loss is still falling well past the midpoint.
+    overfitting to decay away, and the loss is still falling well past the midpoint. The
+    floor is one absolute LR, so the faster groups land proportionally further down.
     """
     phases = [
         torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0, total_iters=epochs)
@@ -52,7 +53,11 @@ def build_scheduler(optimizer, epochs: int, warmup_epochs: int, cooldown_epochs:
         milestones.append(warmup_epochs)
     if cooldown_epochs:
         phases.append(
-            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cooldown_epochs)
+            torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=cooldown_epochs,
+                eta_min=optimizer.defaults["lr"] / 1000,
+            )
         )
         milestones.append(epochs - cooldown_epochs)
 

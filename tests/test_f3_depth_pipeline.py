@@ -166,14 +166,44 @@ class Named(nn.Module):
         super().__init__()
         self.pretrained = nn.Linear(4, 4)
         self.eventff = nn.Linear(4, 4)
-        self.head = nn.Linear(4, 4)
+        self.depth_head = nn.Linear(4, 4)
         self.patch_embed = nn.Sequential()
         self.patch_embed.add_module("proj", nn.Conv2d(1, 1, 1))
 
 
+class NamedWithEncoders(Named):
+    """Both encoders under `eventff`: the age table is new, the 3-D hashmap is pretrained."""
+
+    def __init__(self):
+        super().__init__()
+        self.eventff = nn.Module()
+        self.eventff.stages = nn.Linear(4, 4)
+        self.eventff.multi_hash_encoder = nn.Module()
+        self.eventff.multi_hash_encoder.table = nn.Parameter(torch.zeros(4, 9, 2))
+        self.eventff.multi_hash_encoder.hashmap = nn.Parameter(torch.zeros(4, 16, 2))
+
+
 def test_the_optimizer_scales_the_backbone_and_head_apart():
     optimizer = build_optimizer(Named(), 1e-5)
-    assert sorted({g["lr"] for g in optimizer.param_groups}) == [5e-6, 1e-5, 1e-4]
+    assert sorted({g["lr"] for g in optimizer.param_groups}) == [1e-5, 1e-4]
+
+
+def test_each_group_trains_at_the_rate_its_state_earns():
+    """Only the parts that retarget get 10x; every loaded backbone rides on `lr`."""
+    model = NamedWithEncoders()
+    lr_of = {
+        id(p): g["lr"]
+        for g in build_optimizer(model, 1e-5).param_groups
+        for p in g["params"]
+    }
+    enc = model.eventff.multi_hash_encoder
+    assert lr_of[id(model.depth_head.weight)] == 1e-4, (
+        "the head retargets DAv2 to events"
+    )
+    assert lr_of[id(enc.table)] == 1e-4, "the age table is new under temporal_hash"
+    assert lr_of[id(enc.hashmap)] == 1e-5, "the 3-D hashmap is loaded, so it fine-tunes"
+    assert lr_of[id(model.eventff.stages.weight)] == 1e-5
+    assert lr_of[id(model.pretrained.weight)] == 1e-5
 
 
 def test_the_patch_embed_and_one_dimensional_tensors_skip_decay():
@@ -202,7 +232,8 @@ def test_the_schedule_warms_up_holds_then_anneals():
     assert lrs[10] == pytest.approx(max(lrs)), "the hold sits at the peak"
     assert lrs[10] == pytest.approx(lrs[69]), "the middle is flat"
     assert lrs[70] == pytest.approx(max(lrs)), "the cooldown starts at the peak"
-    assert lrs[99] < lrs[85] < lrs[70], "the cooldown anneals toward zero"
+    assert lrs[99] < lrs[85] < lrs[70], "the cooldown anneals downward"
+    assert min(lrs) >= 1e-5 / 1000, "the floor is lr/1000, approached from above, not 0"
 
 
 def test_no_schedule_phases_leaves_a_constant_rate():
@@ -317,7 +348,10 @@ def test_a_full_post_warmup_cosine_needs_no_hold():
 
     assert lrs[10] == pytest.approx(max(lrs)), "the peak is the end of warmup"
     assert lrs[10] > lrs[100] > lrs[200] > lrs[300] > lrs[399], "monotone decay after"
-    assert lrs[399] < 1e-3 * max(lrs), "anneals to ~zero"
+    assert lrs[399] < 1e-2 * max(lrs), "anneals to the floor"
+    assert min(lrs) >= 1e-5 / 1000, (
+        "the floor is lr/1000, so training never fully stops"
+    )
 
 
 # --------------------------------------------------------------------------- #
