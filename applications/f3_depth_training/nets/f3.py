@@ -9,10 +9,32 @@ import yaml
 from torch import Tensor
 
 from .blocks import Block, LayerNorm, PixelShuffleUpsample
-from .hash_encoder import MultiResolutionHashEncoder
+from .hash_encoder import MultiResolutionHashEncoder, TemporalHashEncoder
 
 # The event-prediction head. Present in the released checkpoint, never built here.
 HEAD_PREFIXES = ("pred.",)
+
+# The per-event encoder. `temporal_hash` replaces it, so a released checkpoint's `hashmap`
+# has nowhere to land and the age table starts fresh; every conv outside it still loads.
+ENCODER_PREFIX = "multi_hash_encoder."
+
+
+def build_hash_encoder(conf: dict) -> nn.Module:
+    """The per-event encoder the config asks for: the 3-D hash, or `temporal_hash` on age.
+
+    The age-only table takes its resolutions from the same `multi_hash_encoder` block's t
+    axis, and its bucket count from `frame_sizes[2]`, so one config describes either.
+    """
+    encoder = conf["multi_hash_encoder"]
+    if not conf.get("temporal_hash", False):
+        return MultiResolutionHashEncoder(**encoder)
+    return TemporalHashEncoder(
+        encoder["coarsest_resolution"][2],
+        encoder["finest_resolution"][2],
+        encoder["levels"],
+        encoder["feature_size"],
+        conf["frame_sizes"][2],
+    )
 
 
 def batch_index(counts: Tensor, n: int) -> Tensor:
@@ -55,7 +77,7 @@ class F3(nn.Module):
 
     def __init__(
         self,
-        hash_encoder: MultiResolutionHashEncoder,
+        hash_encoder: MultiResolutionHashEncoder | TemporalHashEncoder,
         frame_sizes: list[int],
         dims: list[int],
         convkernels: list[int],
@@ -158,7 +180,7 @@ class F3(nn.Module):
         conf = yaml.safe_load(Path(config).read_text())
         assert conf["use_upsampling"], "the depth model reads F3's upsampled field"
         return cls(
-            hash_encoder=MultiResolutionHashEncoder(**conf["multi_hash_encoder"]),
+            hash_encoder=build_hash_encoder(conf),
             frame_sizes=conf["frame_sizes"],
             dims=conf["dims"],
             convkernels=conf["convkernels"],
@@ -242,10 +264,19 @@ class F3(nn.Module):
         return self.encode(self.feature_field(events, counts))
 
 
-def load_f3_weights(model: F3, checkpoint: str | Path) -> None:
-    """Load f3 weights, dropping the event-prediction head."""
+def load_f3_weights(
+    model: F3, checkpoint: str | Path, fresh: tuple[str, ...] = ()
+) -> None:
+    """Load f3 weights, dropping the event-prediction head.
+
+    Args:
+        fresh: key prefixes this run initialises itself, so the checkpoint neither has to
+            cover them nor may be trusted on them. `(ENCODER_PREFIX,)` warm-starts a
+            `temporal_hash` model's conv stack off a released 3-D hash checkpoint.
+    """
     state = torch.load(checkpoint, weights_only=True, map_location="cpu")
     missing, unexpected = model.load_state_dict(state, strict=False)
-    assert not missing, f"checkpoint has no weights for {missing}"
-    stray = [k for k in unexpected if not k.startswith(HEAD_PREFIXES)]
+    unfilled = [k for k in missing if not k.startswith(fresh)]
+    assert not unfilled, f"checkpoint has no weights for {unfilled}"
+    stray = [k for k in unexpected if not k.startswith((*HEAD_PREFIXES, *fresh))]
     assert not stray, f"checkpoint keys match no module and are not head keys: {stray}"

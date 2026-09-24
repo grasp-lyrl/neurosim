@@ -11,7 +11,8 @@ import yaml
 from torch import Tensor
 
 from .dav2 import MODEL_CONFIGS, DepthAnythingV2, MetricDepthAnythingV2, reset_emit
-from .f3 import HEAD_PREFIXES, F3, load_f3_weights
+from .f3 import ENCODER_PREFIX, HEAD_PREFIXES, F3, load_f3_weights
+from .hash_encoder import TemporalHashEncoder
 from .memory import LatentMemory
 
 logger = logging.getLogger(__name__)
@@ -119,8 +120,14 @@ class EventFFDepthAnythingV2(nn.Module):
         widen_patch_embed(self.dav2, self.eventff.feature_size)
 
     def load_eventff_weights(self, checkpoint: str | Path) -> None:
-        load_f3_weights(self.eventff, checkpoint)
-        logger.info("Loaded F3 ckpt from %s", checkpoint)
+        """Load an f3 checkpoint; a `temporal_hash` run takes the conv stack only."""
+        swapped = isinstance(self.eventff.multi_hash_encoder, TemporalHashEncoder)
+        load_f3_weights(self.eventff, checkpoint, (ENCODER_PREFIX,) if swapped else ())
+        logger.info(
+            "Loaded F3 ckpt from %s%s",
+            checkpoint,
+            " (conv stack only; the age table starts random)" if swapped else "",
+        )
 
     def save_configs(self, path: str) -> None:
         with open(f"{path}/depth_config.yml", "w") as f:

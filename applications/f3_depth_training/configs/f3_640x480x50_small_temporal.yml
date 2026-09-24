@@ -1,0 +1,28 @@
+# F3 backbone shape for a 50 ms window with the age-only hash encoder (`critical`).
+#
+# `temporal_hash` drops the 3-D hash's learned absolute-position code and reads event age
+# alone, which compiles to one [50, 8] table plus a gather per event: F3 goes from 4.05 ms
+# to 1.84 ms at 2 M events on a 4090, and flat in the event count. No released checkpoint
+# fits it -- the encoder's weights are new -- so it only makes sense under `--retrain-f3`.
+model: EventPatchFF
+T: 50
+temporal_hash: true
+convbtlncks: [2, 2, 2]
+convdepths: [2, 2, 2]
+convdilations: [1, 1, 1]
+convkernels: [5, 5, 5]
+dims: [96, 160, 192]
+dskernels: [5, 3, 3]
+dsstrides: [4, 2, 2]
+use_upsampling: true
+upsampling_dims: 16
+frame_sizes: [640, 480, 50]
+multi_hash_encoder:
+  coarsest_resolution: [8, 8, 1]
+  feature_size: 2
+  finest_resolution: [320, 180, 8]
+  levels: 4
+  log2_entries_per_level: 19
+patch_size: 1
+use_decoder_block: false
+variable_mode: true

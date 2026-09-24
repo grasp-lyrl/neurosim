@@ -603,9 +603,7 @@ def test_a_perfect_prediction_scores_perfectly(disparity):
 def test_metric_names_match_what_each_mode_returns(disparity):
     """`metric_names` seeds the trainer's best-results table; a missing key raises mid-run."""
     target, mask = disparity
-    assert set(RELATIVE.metric_names) == set(
-        RELATIVE.metrics(target, target, mask)
-    )
+    assert set(RELATIVE.metric_names) == set(RELATIVE.metrics(target, target, mask))
     depth = 1.0 / target
     assert set(METRIC.metric_names) == set(METRIC.metrics(depth, depth, mask))
 
@@ -754,3 +752,146 @@ def test_metric_scores_a_constant_overprediction_by_its_ratio(disparity):
     assert near["d1"] == pytest.approx(far["d1"])
     assert near["abs_rel"] == pytest.approx(far["abs_rel"])
     assert far["rmse"] > near["rmse"], "rmse is in metres, so it doubles with the scene"
+
+
+# ── age-only hash encoder (`temporal_hash`) ──────────────────────────────────
+TEMPORAL_CONFIG = {**F3_CONFIG, "temporal_hash": True}
+SIGMOID_FREE = {"size": DAV2_SIZE, "encoder": "vits"}
+
+
+def f3_config_path(tmp_path):
+    """The baseline 3-D hash config, written where a test can point at it."""
+    path = tmp_path / "f3_3d.yml"
+    path.write_text(yaml.safe_dump(F3_CONFIG))
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def temporal_config(tmp_path_factory):
+    path = tmp_path_factory.mktemp("nets") / "f3_tiny_temporal.yml"
+    path.write_text(yaml.safe_dump(TEMPORAL_CONFIG))
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def temporal(temporal_config):
+    torch.manual_seed(0)
+    return EventFFDepthAnythingV2(
+        temporal_config, {"size": DAV2_SIZE, "encoder": "vits"}
+    )
+
+
+def test_temporal_hash_emits_the_same_channels_as_the_3d_one(temporal, model):
+    """The swap is only a drop-in if `downsample_layers[0]` sees the same width."""
+    swapped, original = temporal.eventff, model.eventff
+    assert swapped.feature_size == original.feature_size
+    encoders = (swapped.multi_hash_encoder, original.multi_hash_encoder)
+    assert len({e.levels * e.feature_size for e in encoders}) == 1
+
+
+def test_temporal_hash_still_upsamples_back_to_full_resolution(temporal, events):
+    ff_events, counts = events
+    assert temporal.eventff(ff_events[:, :3], counts).shape == (2, CHANNELS, W, H)
+
+
+def test_temporal_hash_reads_age_and_ignores_position(temporal):
+    """The point of the encoder: two events of equal age encode identically anywhere."""
+    encoder = temporal.eventff.multi_hash_encoder
+    same_age = torch.tensor([[0.1, 0.2, 7 / 20], [0.9, 0.8, 7 / 20]])
+    encoded = encoder(same_age.unsqueeze(0)).squeeze(0)
+    assert torch.equal(encoded[0], encoded[1])
+
+
+def test_temporal_hash_distinguishes_ages(temporal):
+    encoder = temporal.eventff.multi_hash_encoder
+    ages = torch.tensor([[0.5, 0.5, 0.0], [0.5, 0.5, 9 / 20]])
+    encoded = encoder(ages.unsqueeze(0)).squeeze(0)
+    assert not torch.allclose(encoded[0], encoded[1])
+
+
+def test_the_age_table_is_one_row_per_bucket(temporal):
+    """`forward` must index a prebuilt [buckets, L*F] table, not interpolate per event."""
+    encoder = temporal.eventff.multi_hash_encoder
+    buckets = TEMPORAL_CONFIG["frame_sizes"][2]
+    table = encoder.interpolate(encoder.ages)
+    assert encoder.buckets == buckets
+    assert table.shape == (buckets, encoder.levels * encoder.feature_size)
+
+
+def test_every_bucket_reads_the_row_the_table_holds(temporal):
+    """Quantizing in `forward` has to land on the same row `interpolate` built."""
+    encoder = temporal.eventff.multi_hash_encoder
+    table = encoder.interpolate(encoder.ages)
+    ages = encoder.ages.unsqueeze(-1).expand(-1, 3).clone()
+    assert torch.equal(encoder(ages.unsqueeze(0)).squeeze(0), table)
+
+
+def test_age_past_the_last_bucket_clamps_rather_than_reading_off_the_table(temporal):
+    encoder = temporal.eventff.multi_hash_encoder
+    beyond = torch.tensor([[0.5, 0.5, 1.0]])
+    table = encoder.interpolate(encoder.ages)
+    assert torch.equal(encoder(beyond.unsqueeze(0)).squeeze(0)[0], table[-1])
+
+
+def test_the_age_table_trains(temporal_config, events):
+    """`--retrain-f3` is the only way to use this, so gradients must reach the table."""
+    torch.manual_seed(0)
+    model = EventFFDepthAnythingV2(
+        temporal_config, {"size": DAV2_SIZE, "encoder": "vits"}, retrain=True
+    )
+    ff_events, counts = events
+    model.eventff(ff_events[:, :3], counts).sum().backward()
+    table = model.eventff.multi_hash_encoder.table
+    assert table.grad is not None and table.grad.abs().sum() > 0
+
+
+def test_the_temporal_frontend_exports(temporal, events):
+    """Deployment is AOTI or TRT off `torch.export`, with the event count dynamic."""
+    ff_events, counts = events
+    exported = torch.export.export(
+        temporal.eventff,
+        (ff_events[:, :3], counts),
+        dynamic_shapes={
+            "events": {0: torch.export.Dim("n_events", min=2)},
+            "counts": None,
+        },
+    )
+    fewer = make_events([30, 40], seed=1)
+    assert torch.allclose(
+        exported.module()(fewer[0][:, :3], fewer[1]),
+        temporal.eventff(fewer[0][:, :3], fewer[1]),
+        atol=1e-5,
+    )
+
+
+def test_a_3d_hash_checkpoint_warm_starts_the_conv_stack(temporal_config, tmp_path):
+    """The released weights are the only F3 we have: the convs must still be usable."""
+    torch.manual_seed(0)
+    released = EventFFDepthAnythingV2(f3_config_path(tmp_path), SIGMOID_FREE)
+    state = {k: v for k, v in released.eventff.state_dict().items()}
+    path = tmp_path / "f3_3d.pth"
+    torch.save(state, path)
+
+    torch.manual_seed(1)
+    swapped = EventFFDepthAnythingV2(temporal_config, SIGMOID_FREE)
+    before = swapped.eventff.multi_hash_encoder.table.clone()
+    swapped.load_eventff_weights(path)
+
+    convs = [k for k in state if not k.startswith("multi_hash_encoder.")]
+    assert convs, "nothing outside the encoder to warm-start"
+    loaded = swapped.eventff.state_dict()
+    assert all(torch.equal(loaded[k], state[k]) for k in convs)
+    # The hashmap has nowhere to land, so the age table is still this run's own init.
+    assert torch.equal(swapped.eventff.multi_hash_encoder.table, before)
+
+
+def test_a_3d_hash_checkpoint_is_still_rejected_by_a_3d_model(f3_config, tmp_path):
+    """The allowance is for the encoder swap only: a truncated checkpoint must still fail."""
+    torch.manual_seed(0)
+    model = EventFFDepthAnythingV2(f3_config, SIGMOID_FREE)
+    state = model.eventff.state_dict()
+    path = tmp_path / "f3_partial.pth"
+    torch.save({k: v for k, v in state.items() if "downsample_layers.0" not in k}, path)
+
+    with pytest.raises(AssertionError, match="no weights for"):
+        model.load_eventff_weights(path)

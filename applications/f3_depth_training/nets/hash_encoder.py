@@ -1,4 +1,4 @@
-"""Instant-NGP style multi-resolution hash encoding of raw events."""
+"""Instant-NGP style multi-resolution hash encoding of raw events, and an age-only table."""
 
 import torch
 import torch.nn as nn
@@ -94,3 +94,53 @@ class MultiResolutionHashEncoder(nn.Module):
         # flatten, not reshape(B, N, -1): a tick can hold no events at all, and then the -1 is
         # ambiguous rather than zero.
         return (weights.unsqueeze(-1) * feats).sum(-2).flatten(2)
+
+
+class TemporalHashEncoder(nn.Module):
+    """Per-event lookup on age alone: (x, y, t) in [0,1]^3 -> [L*F], reading only t."""
+
+    def __init__(
+        self,
+        coarsest_resolution: int,
+        finest_resolution: int,
+        levels: int,
+        feature_size: int,
+        buckets: int,
+    ):
+        super().__init__()
+        self.levels = levels
+        self.feature_size = feature_size
+        self.buckets = buckets
+
+        coarsest = torch.tensor(float(coarsest_resolution))
+        finest = torch.tensor(float(finest_resolution))
+        ratio = (finest.log() - coarsest.log()) / (levels - 1)
+        resolutions = torch.exp(coarsest.log() + torch.arange(levels) * ratio).int()
+        table = torch.empty(levels, int(resolutions.max()) + 1, feature_size)
+        self.table = nn.Parameter(table.uniform_(-1e-4, 1e-4))
+
+        # Non-persistent: `.to(device)` must carry these, but they are not checkpoint state.
+        self.register_buffer("resolutions", resolutions, persistent=False)
+        self.register_buffer("level", torch.arange(levels), persistent=False)
+        ages = torch.arange(buckets).float() / buckets
+        self.register_buffer("ages", ages, persistent=False)
+
+    def interpolate(self, age: Tensor) -> Tensor:
+        """Ages [...] in [0,1] -> interpolated features [..., L*F]."""
+        scaled = age.unsqueeze(-1) * self.resolutions
+        floor = scaled.floor()
+        low = floor.int()
+        # An age of at most (buckets - 1) / buckets cannot reach the last entry, but clamp
+        # anyway: an out-of-range read is a device-side assert rather than an error.
+        high = torch.min(low + 1, self.resolutions)
+        weight = (scaled - floor).unsqueeze(-1)
+        low_feats = self.table[self.level, low]
+        high_feats = self.table[self.level, high]
+        return ((1 - weight) * low_feats + weight * high_feats).flatten(-2)
+
+    def forward(self, events: Tensor) -> Tensor:
+        """Events [B, N, 3] normalized to [0,1] -> features [B, N, L*F], reading only t."""
+        index = (
+            (events[..., 2] * self.buckets).round().long().clamp(0, self.buckets - 1)
+        )
+        return self.interpolate(self.ages)[index]
