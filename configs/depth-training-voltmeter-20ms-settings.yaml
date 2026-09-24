@@ -1,10 +1,11 @@
-# Multi-GPU OnlineDataLoader over the FULL hm3d scene set, across 2 GPUs.
-# Self-contained: simulator settings + the `online_data` block (roles, DR, knobs).
-# Tuned for a 2x RTX 4090 (24 GB) box. Run with:
-#   conda run -n neurosim python scripts/online_data_multigpu_demo.py \
-#       --conf configs/online_data_hm3d_2gpu.yaml --batches 20
-
-# ── Simulator settings (base_settings) ──────────────────────────────────────
+# Simulator settings for depth training: an event camera + a depth camera on a crazyflie
+# flying random min-snap paths indoors, 20 ms event context (50 Hz depth anchor).
+#
+# This is the *simulator*, and nothing else -- the same schema test_sim.py and the offline
+# recorder read. A training config names it as `base_settings` and brings the other half:
+# which scenes, what to randomize per episode, how many producers, and the batch layout.
+# Check a trajectory against it with:
+#   python scripts/check_trajectories.py --config configs/depth-training-voltmeter-20ms-settings.yaml --seed 0
 simulator:
   world_rate: 1000 # Hz
   control_rate: 100 # Hz
@@ -13,11 +14,13 @@ simulator:
 
   sensor_rates:
     event_camera_1: 1000 # Hz - high-frequency event accumulation
-    depth_camera_1: 20 # Hz - anchor rate, and so a 50 ms event window
+    depth_camera_1: 50 # Hz - anchor rate
 
 visual_backend:
-  gpu_id: 0 # overridden per-producer by online_data.gpu_ids
-  scene: "" # bootstrapped from randomization.scenes_glob[0]; DR picks a scene per episode
+  # Both are placeholders under a trainer: it cycles producers over its `gpu_ids`,
+  # and the first scene of its pool boots the sim before DR draws one per episode.
+  gpu_id: 0
+  scene: ""
   scene_dataset_config_file: "default"
   clear_color: [0.0, 0.0, 0.0, 1.0]
   default_agent: 0
@@ -77,26 +80,3 @@ trajectory:
 safety:
   # End the episode when the drone leaves the scene
   abort_out_of_bounds: true
-
-# ── OnlineDataLoader configuration ──────────────────────────────────────────
-online_data:
-  batch_size: 16
-  num_producers: 8 # 8 simulators total ...
-  gpu_ids: [0, 1] # ... cycled across the two 4090s -> 4 sims per GPU
-  base_seed: 0
-  bus_maxsize: 256
-
-  roles:
-    anchor: [depth_camera_1] # depth tick defines the sample boundary
-    stream: [event_camera_1] # events accumulate within each depth window
-
-  randomization:
-    resample_every: 20 # reload scene every N episodes (scene reload is expensive)
-    # Use EVERY hm3d scene on disk — no need to enumerate 800 paths by hand.
-    scenes_glob: data/hm3d/*/*.basis.glb
-    sensors:
-      event_camera_1:
-        contrast_threshold_pos: {range: [0.1, 0.3]}
-        contrast_threshold_neg: {range: [0.1, 0.3]}
-    trajectory:
-      v_avg: {range: [0.8, 1.5]}

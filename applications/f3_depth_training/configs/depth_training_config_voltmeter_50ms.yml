@@ -52,6 +52,7 @@ data:
   trainer_gpu: 1 # trainer GPU (producers run on online_data.gpu_ids)
   min_events_per_sample: 500 # drop sparser samples before they reach a batch
   max_events_per_sample: 800000 # thin a sample to this many events; 0 disables
+  min_valid_depth_frac: 0.70 # fraction of the depth frame that must be valid to train on it
 
   # Recorded M3ED flights scored against LiDAR
   m3ed:
@@ -65,7 +66,7 @@ data:
       - data/m3ed/falcon_indoor_flight_3
 
   online_data:
-    base_settings: configs/online_data_hm3d_2gpu_voltmeter_50ms.yaml # sensors, dynamics, controller, trajectory
+    base_settings: configs/depth-training-voltmeter-50ms-settings.yaml # sensors, dynamics, controller, trajectory
     num_producers: 8 # 8 simulators ...
     gpu_ids: [0] # ... all on gpu0
     base_seed: 0
@@ -76,21 +77,24 @@ data:
     randomization:
       resample_every: 1 # reload scene+sensors every N episodes; trajectory every episode
       scenes_glob: data/hm3d/*/*.basis.glb
+      visual_backend:
+        agent_height: {range: [0.75, 1.5]} # camera height above the floor, not flight height
       sensors:
         # DVS-Voltmeter has no contrast threshold; k1..k6 are the calibrated
         # process parameters
         event_camera_1:
-          leak_scale: {range: [0.75, 1.0]} # 1.0 is the calibration; above it is unphysical
+          leak_scale: 1.0
           k:
-            - {range: [4.739, 5.792]} # k1, the event-rate knob, +/-10% about DVS346
+            - {range: [4.739, 5.792]} # k1, the rate knob
             - {range: [17.0, 23.0]} # k2, spanning both camera presets
             - 1.0e-4 # k3
-            - 1.0e-7 # k4 thermal leakage
-            - {range: [5.0e-9, 5.0e-8]} # k5 photocurrent leakage, DVS346 -> DVS240
-            - 1.0e-5 # k6 noise floor
+            - {range: [3.0e-8, 3.0e-7]} # k4 thermal leak, 0.04-0.30 ev/px/s, ON only
+            - {range: [0.0, 5.0e-9]} # k5 photocurrent leak, adds 0-0.50 at L=80, ON only
+            - {range: [1.0e-5, 1.2e-3]} # k6 noise floor, 0.10-1.55 ev/px/s
         # One shared draw:  both frusta must match.
         "event_camera_1,depth_camera_1":
           hfov: {range: [50, 65]}
+          position: [0.0, {range: [-0.1, 0.1]}, 0.0]
       trajectory:
         v_avg: {range: [0.2, 1.5]}
         hovers: {choices: [0, 1, 2, 3]} # a count, so `choices`; `range` samples a float
