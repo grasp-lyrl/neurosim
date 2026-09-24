@@ -12,6 +12,7 @@ The randomization config uses an explicit ``range`` / ``choices`` syntax.
 """
 
 import copy
+import glob
 import yaml
 import logging
 import numpy as np
@@ -90,6 +91,7 @@ class DomainRandomizationConfig:
 
     Attributes:
         scenes: List of ``{"name": ..., "path": ...}`` dicts; one chosen per :meth:`sample`.
+        scene_p: Per-scene draw probability, or ``None`` for uniform.
         sensors: Per-sensor-UUID dict of randomizable parameters. A key may list
             several UUIDs comma-separated (``"event_camera_1,depth_camera_1"``) to
             sample once and apply the same values to all of them.
@@ -104,9 +106,15 @@ class DomainRandomizationConfig:
     a whole scene dataset can be referenced without enumerating paths. Because the
     expansion lives here, **every** consumer of a randomization dict — the online
     loader, the offline recorder, and direct ``RandomizedSimulator`` use — gets it.
+
+    ``scenes_glob`` may instead be a ``{pattern: share}`` mapping, where *share* is the
+    probability of drawing from that group and the group's scenes split it evenly — so a
+    mix is set by dataset rather than by how many files each dataset happens to have.
+    Shares are normalized, so ``2/1/1`` and ``0.5/0.25/0.25`` mean the same thing.
     """
 
     scenes: list[dict[str, str]] = field(default_factory=list)
+    scene_p: np.ndarray | None = None
     sensors: dict[str, dict[str, Any]] = field(default_factory=dict)
     visual_backend: dict[str, Any] = field(default_factory=dict)
     resample_every: int = 1
@@ -115,15 +123,19 @@ class DomainRandomizationConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DomainRandomizationConfig":
         scenes = list(data.get("scenes", []))
-        pattern = data.get("scenes_glob")
-        if pattern:
-            import glob
-
+        weights = [1.0] * len(scenes)
+        globs = data.get("scenes_glob") or {}
+        if isinstance(globs, str):
+            globs = {globs: None}
+        for pattern, share in globs.items():
             matched = sorted(glob.glob(pattern))
             if not matched:
                 logger.warning("scenes_glob %r matched no files", pattern)
+                continue
             scenes += [{"name": Path(p).stem.split(".")[0], "path": p} for p in matched]
+            weights += [1.0 if share is None else share / len(matched)] * len(matched)
             logger.info("scenes_glob %r -> %d scene(s)", pattern, len(matched))
+        weighted = any(share is not None for share in globs.values())
         # Two keys writing the same sensor param would silently last-writer-win
         sensors = dict(data.get("sensors", {}))
         owner: dict[tuple[str, str], str] = {}
@@ -138,6 +150,7 @@ class DomainRandomizationConfig:
                         )
         return cls(
             scenes=scenes,
+            scene_p=np.array(weights) / sum(weights) if weighted else None,
             sensors=sensors,
             visual_backend=dict(data.get("visual_backend", {})),
             resample_every=max(1, int(data.get("resample_every", 1))),
@@ -163,8 +176,16 @@ class DomainRandomizationConfig:
             )
 
         if self.scenes:
-            scene = self.scenes[int(rng.integers(0, len(self.scenes)))]
-            settings.setdefault("visual_backend", {})["scene"] = scene["path"]
+            # `integers` when unweighted, so an existing config's scene sequence for a
+            # given seed is exactly what it was before weights existed.
+            idx = (
+                rng.integers(0, len(self.scenes))
+                if self.scene_p is None
+                else rng.choice(len(self.scenes), p=self.scene_p)
+            )
+            settings.setdefault("visual_backend", {})["scene"] = self.scenes[int(idx)][
+                "path"
+            ]
 
         if self.sensors:
             vb_sensors = settings.setdefault("visual_backend", {}).setdefault(
