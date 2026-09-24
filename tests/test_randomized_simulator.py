@@ -137,8 +137,6 @@ class TestDomainRandomizationConfigSample:
         assert names == ["X", "explicit"]
 
     def test_weighted_globs_draw_each_group_at_its_share(self, tmp_path):
-        # Shares are per *group*, not per file: `few` has one scene against `many`'s 20
-        # and still wins half the draws.
         (tmp_path / "few").mkdir()
         (tmp_path / "many").mkdir()
         (tmp_path / "few" / "a.glb").write_text("")
@@ -162,8 +160,6 @@ class TestDomainRandomizationConfigSample:
         )
 
     def test_shares_normalize_to_a_probability(self, tmp_path):
-        # Shares are proportional, not absolute: 2/1/1 is the same mix as 0.5/0.25/0.25,
-        # and either way the per-scene probabilities are a distribution.
         for group, n in (("a", 3), ("b", 7), ("c", 1)):
             (tmp_path / group).mkdir()
             for i in range(n):
@@ -182,12 +178,10 @@ class TestDomainRandomizationConfigSample:
         halves, doubled = probs([0.5, 0.25, 0.25]), probs([2, 1, 1])
         assert np.isclose(halves.sum(), 1.0)
         assert np.allclose(halves, doubled)
-        # Group `a`'s 3 scenes hold half the mass between them, `c`'s lone scene a quarter.
         assert np.isclose(halves[:3].sum(), 0.5)
         assert np.isclose(halves[-1], 0.25)
 
     def test_unweighted_glob_keeps_the_uniform_draw(self, tmp_path):
-        # No share anywhere -> scene_p stays None, so a seed picks what it always picked.
         for i in range(8):
             (tmp_path / f"s{i}.basis.glb").write_text("")
         cfg = DomainRandomizationConfig.from_dict(

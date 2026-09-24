@@ -1,11 +1,4 @@
-# Simulator settings for depth training: an event camera + a depth camera on a crazyflie
-# flying random min-snap paths indoors, 50 ms event context (20 Hz depth anchor).
-#
-# This is the *simulator*, and nothing else -- the same schema test_sim.py and the offline
-# recorder read. A training config names it as `base_settings` and brings the other half:
-# which scenes, what to randomize per episode, how many producers, and the batch layout.
-# Check a trajectory against it with:
-#   python scripts/check_trajectories.py --config configs/depth-training-voltmeter-50ms-settings.yaml --seed 0
+# Simulator settings for depth training, 50 ms event context.
 simulator:
   world_rate: 1000 # Hz
   control_rate: 100 # Hz
@@ -24,11 +17,7 @@ visual_backend:
   default_agent: 0
   agent_height: 1.0
   agent_radius: 0.3
-  # Habitat never evicts a loaded scene, so the only way to give one back is to rebuild
-  # the Simulator, and a rebuild is not cheap. 2 against the measured per-producer peak:
-  # a UASTC SceneSmith House costs 2.2 GB here, so 8 producers all drawing Houses at once
-  # is 18.0 GB of the 24 GB card. At 4 it would be 29.4 GB.
-  scene_cache_limit: 2
+  scene_cache_limit: 2 # Habitat frees a scene only when the sim is rebuilt
   agent_max_climb: 2.0
   agent_max_slope: 90.0
   enable_hbao: false

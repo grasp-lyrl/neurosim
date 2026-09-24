@@ -4,12 +4,7 @@ import torch
 
 
 def build_optimizer(model, lr: float) -> torch.optim.Optimizer:
-    """AdamW at `lr`, 10x for the two parts that retarget: DAv2's head and the age table.
-
-    Everything else is a loaded backbone being fine-tuned. Grouped by (scale, decay)
-    rather than one group per parameter, so AdamW's foreach path can batch them. Norms,
-    biases and the re-initialised patch embed skip decay.
-    """
+    """AdamW at `lr`, 10x for DAv2's head and the age table."""
 
     def lr_scale(name: str) -> float:
         retargets = "depth_head" in name or "multi_hash_encoder.table" in name
@@ -30,12 +25,7 @@ def build_optimizer(model, lr: float) -> torch.optim.Optimizer:
 
 
 def build_scheduler(optimizer, epochs: int, warmup_epochs: int, cooldown_epochs: int):
-    """Warm up, hold, then cosine to `lr`/1000, stepped once per epoch.
-
-    Held flat rather than decayed throughout because the data never repeats: there is no
-    overfitting to decay away, and the loss is still falling well past the midpoint. The
-    floor is one absolute LR, so the faster groups land proportionally further down.
-    """
+    """Warm up, hold, then cosine to `lr`/1000, stepped once per epoch."""
     phases = [
         torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0, total_iters=epochs)
     ]

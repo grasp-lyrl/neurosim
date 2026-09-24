@@ -1,11 +1,4 @@
-# Simulator settings for depth training: an event camera + a depth camera on a crazyflie
-# flying random min-snap paths indoors, 20 ms event context (50 Hz depth anchor).
-#
-# This is the *simulator*, and nothing else -- the same schema test_sim.py and the offline
-# recorder read. A training config names it as `base_settings` and brings the other half:
-# which scenes, what to randomize per episode, how many producers, and the batch layout.
-# Check a trajectory against it with:
-#   python scripts/check_trajectories.py --config configs/depth-training-voltmeter-20ms-settings.yaml --seed 0
+# Simulator settings for depth training, 20 ms event context.
 simulator:
   world_rate: 1000 # Hz
   control_rate: 100 # Hz
@@ -17,10 +10,8 @@ simulator:
     depth_camera_1: 50 # Hz - anchor rate
 
 visual_backend:
-  # Both are placeholders under a trainer: it cycles producers over its `gpu_ids`,
-  # and the first scene of its pool boots the sim before DR draws one per episode.
-  gpu_id: 0
-  scene: ""
+  gpu_id: 0 # overridden per-producer by online_data.gpu_ids
+  scene: "" # bootstrapped from randomization.scenes_glob[0]; DR picks a scene per episode
   scene_dataset_config_file: "default"
   clear_color: [0.0, 0.0, 0.0, 1.0]
   default_agent: 0

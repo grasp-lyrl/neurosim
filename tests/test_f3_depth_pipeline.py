@@ -160,8 +160,6 @@ def test_collate_concatenates_ragged_event_windows():
 
 # ── optimizer and schedule ───────────────────────────────────────────────────
 class Named(nn.Module):
-    """The three name patterns build_optimizer scales by, plus the undecayed embed."""
-
     def __init__(self):
         super().__init__()
         self.pretrained = nn.Linear(4, 4)
@@ -172,8 +170,6 @@ class Named(nn.Module):
 
 
 class NamedWithEncoders(Named):
-    """Both encoders under `eventff`: the age table is new, the 3-D hashmap is pretrained."""
-
     def __init__(self):
         super().__init__()
         self.eventff = nn.Module()
@@ -189,7 +185,6 @@ def test_the_optimizer_scales_the_backbone_and_head_apart():
 
 
 def test_each_group_trains_at_the_rate_its_state_earns():
-    """Only the parts that retarget get 10x; every loaded backbone rides on `lr`."""
     model = NamedWithEncoders()
     lr_of = {
         id(p): g["lr"]

@@ -1,5 +1,4 @@
 # Monocular Depth Training Configuration, DVS-Voltmeter, 50 ms, hm3d + SceneSmith.
-# Differs from depth_training_config_voltmeter_50ms.yml only in the scene mix.
 # Reference: https://github.com/grasp-lyrl/fast-feature-fields/blob/main/confs/monocular_depth/dav2b_fullttairv2indoor_pseudo_308x308x20.yml
 
 # Which validation drives the metrics and checkpoint selection.
@@ -38,10 +37,8 @@ dav2_config:
   head: exp # 'relu' emits disparity, 'exp' a log disparity that cannot overflow
   ckpt: applications/f3_depth_training/models/depth_anything_v2_vitb.pth # Path to DAv2 checkpoint
 
-# EventFF (F3) config - the feature backbone.
-# `temporal_hash`: the age-only encoder, 4.05 -> 1.84 ms at 2 M events. The 20 ms
-# checkpoint still warm-starts the conv stack; only the age table starts random, so this
-# REQUIRES `--retrain-f3` -- frozen, that table stays at its init and F3 emits noise.
+# EventFF (F3) config - the feature backbone
+# temporal_hash starts the age table random: train with --retrain-f3
 eventff:
   config: applications/f3_depth_training/configs/f3_640x480x50_small_temporal.yml
   ckpt: applications/f3_depth_training/models/640x480x20_patchff_ds1_small_v1_uncompiled.pth # Path to EventFF weights
@@ -69,7 +66,7 @@ data:
 
   online_data:
     base_settings: configs/depth-training-voltmeter-50ms-settings.yaml # sensors, dynamics, controller, trajectory
-    num_producers: 8 # 8 x 2.25 GB (all-House worst case) = 18.0 GB, fits gpu0 under any draw
+    num_producers: 8 # 8 simulators ...
     gpu_ids: [0] # ... all on gpu0
     base_seed: 0
     bus_maxsize: 2048 # backpressure bound
@@ -78,10 +75,6 @@ data:
       stream: [event_camera_1] # events accumulate within each depth window
     randomization:
       resample_every: 1 # reload scene+sensors every N episodes; trajectory every episode
-      # Shares per group, not per file: hm3d has 800 scenes to SceneSmith's 195, so
-      # globbing both unweighted would give SceneSmith 19.6% and Houses 1.8%.
-      # The SceneSmith trees are the UASTC-compressed bakes: 2.4x less VRAM than the raw
-      # GLBs, which is what lets this run 8 producers instead of 5.
       scenes_glob:
         data/hm3d/*/*.basis.glb: 0.55
         data/scenesmith-uastc/Room/*.glb: 0.20

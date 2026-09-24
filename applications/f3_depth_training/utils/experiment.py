@@ -46,8 +46,7 @@ def setup_experiment(args, base_path: str, models_path: str):
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    # `args.device` is a torch.device, which yaml.dump writes as a Python-tagged object
-    # that the safe_load above cannot read back -- so a resume would die on its own config.
+    # safe_load cannot read back a torch.device
     saved = {
         k: str(v) if isinstance(v, torch.device) else v for k, v in vars(args).items()
     }

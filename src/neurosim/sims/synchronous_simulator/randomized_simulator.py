@@ -106,11 +106,7 @@ class DomainRandomizationConfig:
     a whole scene dataset can be referenced without enumerating paths. Because the
     expansion lives here, **every** consumer of a randomization dict — the online
     loader, the offline recorder, and direct ``RandomizedSimulator`` use — gets it.
-
-    ``scenes_glob`` may instead be a ``{pattern: share}`` mapping, where *share* is the
-    probability of drawing from that group and the group's scenes split it evenly — so a
-    mix is set by dataset rather than by how many files each dataset happens to have.
-    Shares are normalized, so ``2/1/1`` and ``0.5/0.25/0.25`` mean the same thing.
+    It may also be a ``{pattern: share}`` mapping.
     """
 
     scenes: list[dict[str, str]] = field(default_factory=list)
@@ -176,8 +172,7 @@ class DomainRandomizationConfig:
             )
 
         if self.scenes:
-            # `integers` when unweighted, so an existing config's scene sequence for a
-            # given seed is exactly what it was before weights existed.
+            # integers when unweighted, so existing seeds keep their scene sequences
             idx = (
                 rng.integers(0, len(self.scenes))
                 if self.scene_p is None
