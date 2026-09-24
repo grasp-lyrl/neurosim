@@ -3,15 +3,6 @@
     CUDA_HOME=/usr/local/cuda-12.8 python -m scripts.export_f3_aoti \
         --conf applications/f3_depth_training/configs/depth_training_config_voltmeter_50ms.yml \
         --ckpt outputs/<run>/models/best_weights.pth --out /tmp/depth.pt2
-
-Three things a hand-rolled export gets wrong. The bf16 autocast has to sit inside `forward`,
-or tracing captures it only partially and the artifact runs fp32 -- slower, and not the
-precision you asked for. Compile-time autotuning has to be off, because it benchmarks kernels
-on random values for every input and the scatter's indices have real preconditions. And the
-event count has to be marked dynamic, since a tick holds anywhere from 50 k to 2 M events.
-
-`CUDA_HOME` must point at the toolkit matching torch's build (12.8 on asimov); the default
-`nvcc` on PATH is older and AOTI's C++ codegen fails on a missing `cuda_fp8.h`.
 """
 
 import argparse
