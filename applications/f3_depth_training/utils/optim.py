@@ -56,3 +56,16 @@ def build_scheduler(optimizer, epochs: int, warmup_epochs: int, cooldown_epochs:
     return torch.optim.lr_scheduler.SequentialLR(
         optimizer, phases, milestones=milestones
     )
+
+
+def build_finetune_optimizer(model, lr: float) -> torch.optim.Optimizer:
+    """AdamW at one `lr` for every parameter: a trained model has nothing to retarget."""
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        keeps_decay = param.ndim > 1 and "patch_embed.proj" not in name
+        (decay if keeps_decay else no_decay).append(param)
+    groups = [
+        {"params": decay, "weight_decay": 0.01},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+    return torch.optim.AdamW(groups, lr=lr, betas=(0.9, 0.999))

@@ -10,7 +10,11 @@ from .metrics import (
     set_best_results,
 )
 from .modes import MetricDepth, RelativeDepth, build_mode
-from .optim import build_optimizer, build_scheduler
+from .optim import (
+    build_finetune_optimizer,
+    build_optimizer,
+    build_scheduler,
+)
 from .viz import ev_to_frames_with_polarity, get_depth_image, get_disparity_image
 
 __all__ = [
@@ -21,6 +25,7 @@ __all__ = [
     "ScaleAndShiftInvariantLoss",
     "SiLogLoss",
     "align_least_squares",
+    "build_finetune_optimizer",
     "build_mode",
     "build_optimizer",
     "build_scheduler",

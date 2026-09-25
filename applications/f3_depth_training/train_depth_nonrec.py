@@ -43,6 +43,7 @@ from .utils.experiment import (
 )
 from .utils import (
     HIGHER_IS_BETTER,
+    build_finetune_optimizer,
     build_mode,
     build_optimizer,
     build_scheduler,
@@ -360,7 +361,10 @@ def main():
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Total trainable parameters: {trainable}")
 
-    optimizer = build_optimizer(model, args.lr)
+    if getattr(args, "finetune", False):
+        optimizer = build_finetune_optimizer(model, args.lr)
+    else:
+        optimizer = build_optimizer(model, args.lr)
     scheduler = build_scheduler(
         optimizer, args.epochs, args.warmup_epochs, args.cooldown_epochs
     )

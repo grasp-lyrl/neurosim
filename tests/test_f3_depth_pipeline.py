@@ -20,6 +20,7 @@ from applications.f3_depth_training.utils import (
     MetricDepth,
     RelativeDepth,
     ScaleAndShiftInvariantLoss,
+    build_finetune_optimizer,
     build_mode,
     build_optimizer,
     build_scheduler,
@@ -241,6 +242,11 @@ def test_no_schedule_phases_leaves_a_constant_rate():
         optimizer.step()
         scheduler.step()
     assert scheduler.get_last_lr()[0] == pytest.approx(start)
+
+
+def test_finetune_trains_every_parameter_at_one_rate():
+    optimizer = build_finetune_optimizer(NamedWithEncoders(), 1e-5)
+    assert {g["lr"] for g in optimizer.param_groups} == {1e-5}
 
 
 # ── validation routing ───────────────────────────────────────────────────────
