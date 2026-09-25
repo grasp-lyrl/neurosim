@@ -313,6 +313,41 @@ class TestSharedSensorGroups:
         assert s["event_camera_1"]["hfov"] == s["depth_camera_1"]["hfov"]
         assert 0.1 <= s["event_camera_1"]["contrast_threshold_pos"] <= 0.4
 
+    def test_group_choices_apply_one_whole_set_to_every_sensor(self):
+        lens = {"hfov": {"range": [47, 51]}, "distortion": [-0.5, 0.2, 0.0, 0.0, 0.0]}
+        cfg = DomainRandomizationConfig.from_dict(
+            {
+                "sensors": {
+                    "event_camera_1,depth_camera_1": {
+                        "choices": [{"hfov": {"range": [50, 65]}}, lens]
+                    }
+                }
+            }
+        )
+        rng = np.random.default_rng(0)
+        lensed = 0
+        for _ in range(200):
+            s = cfg.sample(_two_camera_settings(), rng)["visual_backend"]["sensors"]
+            ev, dp = s["event_camera_1"], s["depth_camera_1"]
+            assert ev["hfov"] == dp["hfov"], "the group must share one draw"
+            assert ev.get("distortion") == dp.get("distortion")
+            if "distortion" in ev:
+                lensed += 1
+                assert 47 <= ev["hfov"] <= 51, "a set's params come from that set"
+            else:
+                assert 50 <= ev["hfov"] <= 65, "a set's params come from that set"
+        assert 0 < lensed < 200, "both parameter sets must be drawn"
+
+    def test_group_choices_count_every_set_toward_param_ownership(self):
+        sensors = {
+            "depth_camera_1": {"distortion": [0.0] * 5},
+            "event_camera_1,depth_camera_1": {
+                "choices": [{"hfov": 60}, {"hfov": 49, "distortion": [0.1] * 5}]
+            },
+        }
+        with pytest.raises(ValueError, match="distortion.*depth_camera_1"):
+            DomainRandomizationConfig.from_dict({"sensors": sensors})
+
 
 class TestRandomizedSimulatorMocked:
     """Avoid Habitat by mocking SynchronousSimulator construction."""

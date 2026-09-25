@@ -291,6 +291,8 @@ trajectory:                 # re-sampled EVERY episode (cheap; rebuilt in-place)
 
 - **`{range: [lo, hi]}`** → uniform float; **`{choices: [...]}`** → uniform pick;
   a plain value → fixed override.
+- A sensors key can hold **`{choices: [set_a, set_b]}`** instead of params: each sample
+  applies one whole parameter set, picked uniformly, to every sensor in the key.
 - **Cadence:** scene + sensors change every `resample_every` episodes (expensive);
   the **trajectory is re-seeded every episode** so each clip flies a new path. The
   per-episode trajectory seed is derived deterministically from `(seed, episode)`.

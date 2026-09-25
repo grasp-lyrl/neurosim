@@ -136,8 +136,9 @@ class DomainRandomizationConfig:
         sensors = dict(data.get("sensors", {}))
         owner: dict[tuple[str, str], str] = {}
         for key, params in sensors.items():
+            names = set().union(*params["choices"]) if "choices" in params else params
             for uuid in (u.strip() for u in key.split(",")):
-                for param in params:
+                for param in names:
                     prev = owner.setdefault((uuid, param), key)
                     if prev != key:
                         raise ValueError(
@@ -191,6 +192,10 @@ class DomainRandomizationConfig:
                 # comma-separated key ("a,b") -- for params that must agree across
                 # sensors, e.g. a shared hfov keeping depth labels pixel-aligned
                 # with the events. A plain single-UUID key is the 1-element case.
+                # A group-level `choices` picks one whole parameter set per sample.
+                if "choices" in param_specs:
+                    options = param_specs["choices"]
+                    param_specs = options[int(rng.integers(0, len(options)))]
                 resolved: dict[str, Any] = {}
                 _apply_randomization_layer(resolved, param_specs, rng)
                 for uuid in (u.strip() for u in key.split(",")):
