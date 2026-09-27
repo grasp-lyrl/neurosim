@@ -171,7 +171,9 @@ class HabitatWrapper(VisualBackendProtocol):
                 )
             )
         self._sim.set_light_setup(lights, hsim.gfx.DEFAULT_LIGHTING_KEY)
-        logger.info("applied %d Habitat lights (intensity %.2f)", len(lights), intensity)
+        logger.info(
+            "applied %d Habitat lights (intensity %.2f)", len(lights), intensity
+        )
 
     def _set_seed(self, seed: int) -> None:
         """Set the random seed for the simulator and numpy.
