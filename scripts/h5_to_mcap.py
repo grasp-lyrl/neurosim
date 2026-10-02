@@ -54,6 +54,8 @@ class Entry(NamedTuple):
     ros2_topic: str
     frame_id: str
     child_frame_id: str  # odometry only
+    width: int  # events_image only: the sensor
+    height: int
 
 
 class Recording(NamedTuple):
@@ -74,6 +76,8 @@ def parse_entry(entry: dict) -> Entry:
         ros2_topic=entry["ros2_topic"],
         frame_id=entry.get("frame_id", ""),
         child_frame_id=entry.get("child_frame_id", ""),
+        width=entry.get("width", 0),
+        height=entry.get("height", 0),
     )
 
 
@@ -222,6 +226,23 @@ def events_messages(entry: Entry, rec: Recording) -> Messages:
         yield ns, entry.ros2_topic, msg
 
 
+def events_image_messages(entry: Entry, rec: Recording) -> Messages:
+    """Each events packet drawn on black, ON blue and OFF red, as decoders.cpp draws it."""
+    events = rec.h5[entry.uuid]
+    for ns, rows in rec.schedules[entry.uuid]:
+        image = np.zeros((entry.height, entry.width, 3), np.uint8)
+        image[events["y"][rows], events["x"][rows], 2 * events["p"][rows]] = 255
+        msg = Image(
+            header=header(ns, entry.frame_id),
+            height=entry.height,
+            width=entry.width,
+            encoding="rgb8",
+            step=entry.width * 3,
+            data=array.array("B", image.tobytes()),
+        )
+        yield ns, entry.ros2_topic, msg
+
+
 def camera_info_messages(entry: Entry, rec: Recording) -> Messages:
     """The camera's CameraInfo with each of its images or events packets."""
     info = camera_info(camera_calibration(rec.settings, entry.uuid))
@@ -239,6 +260,7 @@ PAYLOADS = {
     "color_image": Payload("sensor_msgs/msg/Image", image_messages),
     "depth_image": Payload("sensor_msgs/msg/Image", image_messages),
     "events": Payload("neurosim_ros2_bridge/msg/Events", events_messages),
+    "events_image": Payload("sensor_msgs/msg/Image", events_image_messages),
     "camera_info": Payload("sensor_msgs/msg/CameraInfo", camera_info_messages),
 }
 

@@ -12,6 +12,8 @@ import h5py
 import numpy as np
 from tqdm import tqdm
 
+CHUNK_EVENTS = 5_000_000
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -26,8 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--chunk-events",
         type=int,
-        default=5_000_000,
-        help="How many timestamps to process per chunk (default: 5000000)",
+        default=CHUNK_EVENTS,
+        help="How many timestamps to process per chunk (default: %(default)s)",
     )
     parser.add_argument(
         "--overwrite",
@@ -62,7 +64,7 @@ def build_ms_to_idx(t_ds: h5py.Dataset, chunk_events: int) -> np.ndarray:
             chunk_last_t = int(t_chunk[-1])
 
             while next_ms <= max_ms and next_ms * 1000 <= chunk_last_t:
-                target_t = next_ms * 1000
+                target_t = t_chunk.dtype.type(next_ms * 1000)
                 local_idx = int(np.searchsorted(t_chunk, target_t, side="left"))
                 ms_to_idx[next_ms] = start + local_idx
                 next_ms += 1
@@ -74,6 +76,18 @@ def build_ms_to_idx(t_ds: h5py.Dataset, chunk_events: int) -> np.ndarray:
         ms_to_idx[next_ms:] = total_events
 
     return ms_to_idx
+
+
+def write_ms_to_idx(grp: h5py.Group, chunk_events: int = CHUNK_EVENTS) -> None:
+    ms_to_idx = build_ms_to_idx(grp["t"], chunk_events)
+    grp.create_dataset(
+        "ms_to_idx",
+        data=ms_to_idx,
+        dtype=np.int64,
+        compression="lzf",
+        chunks=(min(1_000_000, ms_to_idx.shape[0]),),
+    )
+    print(f"Wrote {grp.name}/ms_to_idx with length {ms_to_idx.shape[0]}")
 
 
 def main() -> None:
@@ -101,18 +115,7 @@ def main() -> None:
                 )
             del grp["ms_to_idx"]
 
-        t_ds = grp["t"]
-        ms_to_idx = build_ms_to_idx(t_ds, args.chunk_events)
-
-        grp.create_dataset(
-            "ms_to_idx",
-            data=ms_to_idx,
-            dtype=np.int64,
-            compression="lzf",
-            chunks=(min(1_000_000, ms_to_idx.shape[0]),),
-        )
-
-        print(f"Wrote {args.sensor}/ms_to_idx with length {ms_to_idx.shape[0]}")
+        write_ms_to_idx(grp, args.chunk_events)
 
 
 if __name__ == "__main__":

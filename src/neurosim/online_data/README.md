@@ -273,12 +273,12 @@ unique and worker `i` uses `seed = base_seed + i`.
 
 ### Viewing recorded events
 
-The visualizer needs a per-millisecond index first:
-
 ```bash
-python scripts/build_ms_to_idx.py <out_dir>/episode_000000.h5 --sensor event_camera_1
-python scripts/visualize_h5_events.py <out_dir>/episode_000000.h5 --sensor event_camera_1
+python scripts/visualize_h5_events.py <out_dir>/episode_000000.h5 [--out episode.mp4]
 ```
+
+Plays rgb | depth | events in a window, or writes them to an mp4. The first run adds an
+`event_camera_1/ms_to_idx` index to the file.
 
 ---
 
