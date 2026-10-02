@@ -162,7 +162,7 @@ class SynchronousSimulator:
             def executor():
                 # Minimize function call depth - call provider inline
                 return render_events(
-                    uuid=uuid, time=int(time_provider() * 1e6), to_numpy=False
+                    uuid=uuid, time=round(time_provider() * 1e6), to_numpy=False
                 )
 
         elif sensor_type == "color":
@@ -470,6 +470,7 @@ class SynchronousSimulator:
                 deepcopy_data=False,  # Use zero-copy for speed
                 compression=None,  # Disable compression for speed (can enable 'lzf' for smaller files)
                 verbose=True,
+                settings=self.settings,
             )
 
         # Run simulation loop
