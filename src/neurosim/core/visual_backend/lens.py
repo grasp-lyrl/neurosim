@@ -6,6 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
+from neurosim.core.coord_trans.calibration import camera_matrix, distortion_coefficients
 from neurosim.core.utils import color2intensity
 
 TAPS = 3
@@ -28,10 +29,8 @@ class Radtan:
 
     def __init__(self, cfg: dict, device: str, readout: str):
         w, h = cfg["width"], cfg["height"]
-        f = w / 2 / np.tan(np.radians(cfg["hfov"]) / 2)
-        cx, cy = cfg.get("principal_point", ((w - 1) / 2, (h - 1) / 2))
-        k = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1]])
-        dist = np.asarray(cfg["distortion"], float) * cfg.get("distortion_scale", 1.0)
+        k, dist = camera_matrix(cfg), distortion_coefficients(cfg)
+        f = k[0, 0]
 
         taps = 1 if readout == "nearest" else TAPS
         o = (np.arange(taps) + 0.5) / taps - 0.5
@@ -89,6 +88,10 @@ class Radtan:
 
 def create_lens(cfg: dict, device: str, readout: str) -> Pinhole | Radtan:
     """The camera's radial-tangential lens if its config gives a distortion, else its pinhole."""
+    if "principal_point" in cfg and "distortion" not in cfg:
+        raise ValueError(
+            "a principal_point needs a distortion: Habitat's pinhole is centred"
+        )
     return (
         Radtan(cfg, device, readout) if "distortion" in cfg else Pinhole(cfg, readout)
     )
