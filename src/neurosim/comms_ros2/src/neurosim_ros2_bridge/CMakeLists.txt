@@ -18,6 +18,10 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(rosgraph_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
@@ -53,6 +57,10 @@ ament_target_dependencies(neurosim_ros2_bridge_component PUBLIC
   std_msgs
   sensor_msgs
   geometry_msgs
+  nav_msgs
+  rosgraph_msgs
+  tf2
+  tf2_ros
   builtin_interfaces
 )
 
@@ -78,9 +86,11 @@ install(TARGETS neurosim_ros2_bridge_component
 
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
 
 ament_export_dependencies(
-  rclcpp rclcpp_components std_msgs sensor_msgs geometry_msgs builtin_interfaces
+  rclcpp rclcpp_components std_msgs sensor_msgs geometry_msgs nav_msgs rosgraph_msgs tf2 tf2_ros
+  builtin_interfaces
   rosidl_default_runtime)
 
 ament_package()

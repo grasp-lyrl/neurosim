@@ -1,5 +1,10 @@
 #include "neurosim_ros2_bridge/decoders.hpp"
 
+#include <tf2/LinearMath/Quaternion.h>
+
+#include <cmath>
+#include <string>
+
 namespace neurosim_ros2_bridge::decoders
 {
 
@@ -99,12 +104,26 @@ ArrayView<T> array_message_view(
     std::move(shape)};
 }
 
-void stamp_header(
-  std_msgs::msg::Header & h, const cortex_wire::MessageHeader & wire,
-  const std::string & frame_id)
+// Headers carry the simulation time the sample was taken at, not the wall clock
+// cortex stamps at publish. Array messages pack it into their cortex frame_id as
+// "uuid|seconds|simsteps" (cortex_io.sensor_frame_id).
+double frame_id_seconds(const msgpack::object & frame_id)
 {
-  h.stamp.sec = static_cast<std::int32_t>(wire.timestamp_ns / 1'000'000'000ULL);
-  h.stamp.nanosec = static_cast<std::uint32_t>(wire.timestamp_ns % 1'000'000'000ULL);
+  const auto s = as_str(frame_id);
+  const auto first = s.find('|');
+  const auto second = s.find('|', first + 1);
+  if (first == std::string_view::npos || second == std::string_view::npos) {
+    throw WireDecodeError("frame_id is not uuid|seconds|simsteps: " + std::string(s));
+  }
+  return std::stod(std::string(s.substr(first + 1, second - first - 1)));
+}
+
+void stamp_header(
+  std_msgs::msg::Header & h, const double sim_seconds, const std::string & frame_id)
+{
+  const auto ns = std::llround(sim_seconds * 1e9);
+  h.stamp.sec = static_cast<std::int32_t>(ns / 1'000'000'000LL);
+  h.stamp.nanosec = static_cast<std::uint32_t>(ns % 1'000'000'000LL);
   h.frame_id = frame_id;
 }
 
@@ -144,6 +163,37 @@ void copy_into_vector(const OobBuffer<T> & view, std::vector<T> & out)
   std::memcpy(out.data(), view.data(), view.size_bytes());
 }
 
+struct EventViews
+{
+  OobBuffer<std::uint16_t> x;
+  OobBuffer<std::uint16_t> y;
+  OobBuffer<std::uint64_t> t;
+  OobBuffer<std::uint8_t> p;
+};
+
+// dtype contract is fixed by the simulator's EventBuffer; we enforce it
+// here so a mismatch is loud instead of silently misinterpreted bytes.
+EventViews event_views(const Inbound & in)
+{
+  if (in.metadata.field_count() != 2) {
+    throw WireDecodeError("events: expected 2 metadata fields");
+  }
+  const auto & arrays = in.metadata.field(0);
+  if (arrays.type != msgpack::type::MAP) {
+    throw WireDecodeError("events: arrays field is not a map");
+  }
+  EventViews ev{
+    map_oob_view<std::uint16_t>(arrays, "x", in.oob_frames, "<u2"),
+    map_oob_view<std::uint16_t>(arrays, "y", in.oob_frames, "<u2"),
+    map_oob_view<std::uint64_t>(arrays, "t", in.oob_frames, "<u8"),
+    map_oob_view<std::uint8_t>(arrays, "p", in.oob_frames, "|u1")};
+  const std::size_t n = ev.x.size();
+  if (ev.y.size() != n || ev.t.size() != n || ev.p.size() != n) {
+    throw WireDecodeError("events: array lengths mismatch");
+  }
+  return ev;
+}
+
 }  // namespace
 
 // ---- State ----------------------------------------------------------------
@@ -165,8 +215,8 @@ std::unique_ptr<msg::State> decode_state(const Inbound & in)
   read_doubles(map_require(data, "w"), w);
 
   auto out = std::make_unique<msg::State>();
-  stamp_header(out->header, in.header, in.frame_id);
-  if (auto * t = map_get(data, "timestamp")) {out->timestamp = as_double(*t);}
+  out->timestamp = as_double(map_require(data, "timestamp"));
+  stamp_header(out->header, out->timestamp, in.frame_id);
   if (auto * s = map_get(data, "simsteps")) {out->simsteps = as_uint(*s);}
   set_vec3(out->x, x);
   out->q.x = q[0];
@@ -176,6 +226,41 @@ std::unique_ptr<msg::State> decode_state(const Inbound & in)
   set_vec3(out->v, v);
   set_vec3(out->w, w);
   return out;
+}
+
+std::unique_ptr<nav_msgs::msg::Odometry> decode_odometry(
+  const Inbound & in, const std::string & child_frame_id)
+{
+  const auto state = decode_state(in);
+  auto out = std::make_unique<nav_msgs::msg::Odometry>();
+  out->header = state->header;
+  out->child_frame_id = child_frame_id;
+  out->pose.pose.position.x = state->x.x;
+  out->pose.pose.position.y = state->x.y;
+  out->pose.pose.position.z = state->x.z;
+  out->pose.pose.orientation = state->q;
+  // State.v is in the world frame; Odometry's twist is in the child frame.
+  const tf2::Quaternion q(state->q.x, state->q.y, state->q.z, state->q.w);
+  const auto v_body = tf2::quatRotate(
+    q.inverse(), tf2::Vector3(state->v.x, state->v.y, state->v.z));
+  out->twist.twist.linear.x = v_body.x();
+  out->twist.twist.linear.y = v_body.y();
+  out->twist.twist.linear.z = v_body.z();
+  out->twist.twist.angular = state->w;
+  return out;
+}
+
+geometry_msgs::msg::TransformStamped transform_from_odometry(
+  const nav_msgs::msg::Odometry & odom)
+{
+  geometry_msgs::msg::TransformStamped t;
+  t.header = odom.header;
+  t.child_frame_id = odom.child_frame_id;
+  t.transform.translation.x = odom.pose.pose.position.x;
+  t.transform.translation.y = odom.pose.pose.position.y;
+  t.transform.translation.z = odom.pose.pose.position.z;
+  t.transform.rotation = odom.pose.pose.orientation;
+  return t;
 }
 
 // ---- IMU ------------------------------------------------------------------
@@ -199,8 +284,8 @@ std::unique_ptr<msg::Imu> decode_imu(const Inbound & in)
   }
 
   auto out = std::make_unique<msg::Imu>();
-  stamp_header(out->header, in.header, in.frame_id);
-  if (auto * t = map_get(data, "timestamp")) {out->timestamp = as_double(*t);}
+  out->timestamp = as_double(map_require(data, "timestamp"));
+  stamp_header(out->header, out->timestamp, in.frame_id);
   if (auto * s = map_get(data, "simsteps")) {out->simsteps = as_uint(*s);}
   if (auto * u = map_get(data, "uuid"); u && u->type == msgpack::type::STR) {
     out->uuid.assign(u->via.str.ptr, u->via.str.size);
@@ -210,36 +295,50 @@ std::unique_ptr<msg::Imu> decode_imu(const Inbound & in)
   return out;
 }
 
+std::unique_ptr<sensor_msgs::msg::Imu> decode_sensor_imu(const Inbound & in)
+{
+  const auto imu = decode_imu(in);
+  auto out = std::make_unique<sensor_msgs::msg::Imu>();
+  out->header = imu->header;
+  out->orientation_covariance[0] = -1.0;
+  out->angular_velocity = imu->gyro;
+  out->linear_acceleration = imu->accel;
+  return out;
+}
+
 // ---- Events ---------------------------------------------------------------
 
 std::unique_ptr<msg::Events> decode_events(const Inbound & in)
 {
-  if (in.metadata.field_count() != 2) {
-    throw WireDecodeError("events: expected 2 metadata fields");
-  }
-  const auto & arrays = in.metadata.field(0);
-  if (arrays.type != msgpack::type::MAP) {
-    throw WireDecodeError("events: arrays field is not a map");
-  }
-
-  // dtype contract is fixed by the simulator's EventBuffer; we enforce it
-  // here so a mismatch is loud instead of silently misinterpreted bytes.
-  auto xv = map_oob_view<std::uint16_t>(arrays, "x", in.oob_frames, "<u2");
-  auto yv = map_oob_view<std::uint16_t>(arrays, "y", in.oob_frames, "<u2");
-  auto tv = map_oob_view<std::uint64_t>(arrays, "t", in.oob_frames, "<u8");
-  auto pv = map_oob_view<std::uint8_t>(arrays, "p", in.oob_frames, "|u1");
-
-  const std::size_t n = xv.size();
-  if (yv.size() != n || tv.size() != n || pv.size() != n) {
-    throw WireDecodeError("events: array lengths mismatch");
-  }
-
+  const auto ev = event_views(in);
   auto out = std::make_unique<msg::Events>();
-  stamp_header(out->header, in.header, in.frame_id);
-  copy_into_vector(xv, out->x);
-  copy_into_vector(yv, out->y);
-  copy_into_vector(tv, out->t);
-  copy_into_vector(pv, out->p);
+  stamp_header(out->header, frame_id_seconds(in.metadata.field(1)), in.frame_id);
+  copy_into_vector(ev.x, out->x);
+  copy_into_vector(ev.y, out->y);
+  copy_into_vector(ev.t, out->t);
+  copy_into_vector(ev.p, out->p);
+  return out;
+}
+
+std::unique_ptr<sensor_msgs::msg::Image> decode_events_image(
+  const Inbound & in, std::uint32_t width, std::uint32_t height)
+{
+  const auto ev = event_views(in);
+  auto out = std::make_unique<sensor_msgs::msg::Image>();
+  stamp_header(out->header, frame_id_seconds(in.metadata.field(1)), in.frame_id);
+  out->height = height;
+  out->width = width;
+  out->encoding = "rgb8";
+  out->is_bigendian = 0;
+  out->step = width * 3;
+  out->data.assign(static_cast<std::size_t>(out->step) * height, 0);
+  for (std::size_t i = 0; i < ev.x.size(); ++i) {
+    if (ev.x[i] >= width || ev.y[i] >= height) {
+      throw WireDecodeError("events_image: event outside the configured width x height");
+    }
+    out->data[static_cast<std::size_t>(ev.y[i]) * out->step + ev.x[i] * 3u +
+      (ev.p[i] ? 2u : 0u)] = 255;
+  }
   return out;
 }
 
@@ -255,7 +354,7 @@ std::unique_ptr<sensor_msgs::msg::Image> decode_color_image(const Inbound & in)
   const auto width = static_cast<std::uint32_t>(av.shape[1]);
 
   auto out = std::make_unique<sensor_msgs::msg::Image>();
-  stamp_header(out->header, in.header, in.frame_id);
+  stamp_header(out->header, frame_id_seconds(in.metadata.field(2)), in.frame_id);
   out->height = height;
   out->width = width;
   out->encoding = "rgb8";
@@ -280,7 +379,7 @@ std::unique_ptr<sensor_msgs::msg::Image> decode_depth_image(const Inbound & in)
   }
 
   auto out = std::make_unique<sensor_msgs::msg::Image>();
-  stamp_header(out->header, in.header, in.frame_id);
+  stamp_header(out->header, frame_id_seconds(in.metadata.field(2)), in.frame_id);
   out->height = height;
   out->width = width;
   out->encoding = "32FC1";
@@ -290,6 +389,33 @@ std::unique_ptr<sensor_msgs::msg::Image> decode_depth_image(const Inbound & in)
   // memcpy. Single contiguous copy of H*W*4 bytes.
   out->data.resize(av.data.size_bytes());
   std::memcpy(out->data.data(), av.data.data(), av.data.size_bytes());
+  return out;
+}
+
+// ---- CameraInfo / Clock ---------------------------------------------------
+
+std::unique_ptr<sensor_msgs::msg::CameraInfo> decode_camera_info(const Inbound & in)
+{
+  if (in.metadata.field_count() != 1) {
+    throw WireDecodeError("camera_info: expected 1 metadata field");
+  }
+  const auto & data = in.metadata.field(0);
+  auto out = std::make_unique<sensor_msgs::msg::CameraInfo>();
+  stamp_header(out->header, as_double(map_require(data, "timestamp")), in.frame_id);
+  out->width = static_cast<std::uint32_t>(as_uint(map_require(data, "width")));
+  out->height = static_cast<std::uint32_t>(as_uint(map_require(data, "height")));
+  out->distortion_model = std::string(as_str(map_require(data, "distortion_model")));
+  out->d = read_double_vector(map_require(data, "d"));
+  read_doubles(map_require(data, "k"), out->k);
+  read_doubles(map_require(data, "r"), out->r);
+  read_doubles(map_require(data, "p"), out->p);
+  return out;
+}
+
+std::unique_ptr<rosgraph_msgs::msg::Clock> decode_clock(const Inbound & in)
+{
+  auto out = std::make_unique<rosgraph_msgs::msg::Clock>();
+  out->clock = decode_state(in)->header.stamp;
   return out;
 }
 

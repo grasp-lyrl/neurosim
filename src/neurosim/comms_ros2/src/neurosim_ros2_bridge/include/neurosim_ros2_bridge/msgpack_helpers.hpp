@@ -8,10 +8,14 @@
 #include <cortex_wire/header.hpp>       // WireDecodeError
 #include <msgpack.hpp>
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace neurosim_ros2_bridge
 {
@@ -85,6 +89,28 @@ void read_doubles(const msgpack::object & o, double (&out)[N])
   for (std::size_t i = 0; i < N; ++i) {
     out[i] = as_double(o.via.array.ptr[i]);
   }
+}
+
+// ARRAY of exactly N numbers into a std::array, the shape of sensor_msgs' matrices.
+template<std::size_t N>
+void read_doubles(const msgpack::object & o, std::array<double, N> & out)
+{
+  double values[N];
+  read_doubles(o, values);
+  std::copy(std::begin(values), std::end(values), out.begin());
+}
+
+// ARRAY of any length into a vector of doubles.
+inline std::vector<double> read_double_vector(const msgpack::object & o)
+{
+  if (o.type != msgpack::type::ARRAY) {
+    throw cortex_wire::WireDecodeError("expected an array");
+  }
+  std::vector<double> out(o.via.array.size);
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    out[i] = as_double(o.via.array.ptr[i]);
+  }
+  return out;
 }
 
 }  // namespace neurosim_ros2_bridge

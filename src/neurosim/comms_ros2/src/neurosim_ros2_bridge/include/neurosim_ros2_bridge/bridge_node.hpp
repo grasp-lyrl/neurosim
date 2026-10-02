@@ -14,6 +14,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 
 #include <memory>
 #include <vector>

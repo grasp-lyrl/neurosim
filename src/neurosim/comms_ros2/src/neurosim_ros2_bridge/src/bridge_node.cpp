@@ -177,6 +177,21 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
           };
         break;
       }
+    case Payload::Odometry: {
+        auto pub = create_publisher<nav_msgs::msg::Odometry>(e.ros2_topic, make_qos(e));
+        auto tf = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
+        const auto frame = e.frame_id;
+        const auto child = e.child_frame_id;
+        dispatch = [pub, tf, frame, child](
+          const cortex_wire::MessageHeader & h,
+          const cortex_wire::DecodedMetadata & m,
+          const std::vector<cortex_wire::ZmqFramePtr> & o) {
+            auto odom = decoders::decode_odometry({h, m, o, frame}, child);
+            tf->sendTransform(decoders::transform_from_odometry(*odom));
+            pub->publish(std::move(odom));
+          };
+        break;
+      }
     case Payload::Imu: {
         auto pub = create_publisher<msg::Imu>(e.ros2_topic, make_qos(e));
         const auto frame = e.frame_id;
@@ -188,6 +203,17 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
           };
         break;
       }
+    case Payload::SensorImu: {
+        auto pub = create_publisher<sensor_msgs::msg::Imu>(e.ros2_topic, make_qos(e));
+        const auto frame = e.frame_id;
+        dispatch = [pub, frame](
+          const cortex_wire::MessageHeader & h,
+          const cortex_wire::DecodedMetadata & m,
+          const std::vector<cortex_wire::ZmqFramePtr> & o) {
+            pub->publish(decoders::decode_sensor_imu({h, m, o, frame}));
+          };
+        break;
+      }
     case Payload::Events: {
         auto pub = create_publisher<msg::Events>(e.ros2_topic, make_qos(e));
         const auto frame = e.frame_id;
@@ -196,6 +222,19 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
           const cortex_wire::DecodedMetadata & m,
           const std::vector<cortex_wire::ZmqFramePtr> & o) {
             pub->publish(decoders::decode_events({h, m, o, frame}));
+          };
+        break;
+      }
+    case Payload::EventsImage: {
+        auto pub = create_publisher<sensor_msgs::msg::Image>(e.ros2_topic, make_qos(e));
+        const auto frame = e.frame_id;
+        const auto width = e.width;
+        const auto height = e.height;
+        dispatch = [pub, frame, width, height](
+          const cortex_wire::MessageHeader & h,
+          const cortex_wire::DecodedMetadata & m,
+          const std::vector<cortex_wire::ZmqFramePtr> & o) {
+            pub->publish(decoders::decode_events_image({h, m, o, frame}, width, height));
           };
         break;
       }
@@ -218,6 +257,28 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
           const cortex_wire::DecodedMetadata & m,
           const std::vector<cortex_wire::ZmqFramePtr> & o) {
             pub->publish(decoders::decode_depth_image({h, m, o, frame}));
+          };
+        break;
+      }
+    case Payload::CameraInfo: {
+        auto pub = create_publisher<sensor_msgs::msg::CameraInfo>(e.ros2_topic, make_qos(e));
+        const auto frame = e.frame_id;
+        dispatch = [pub, frame](
+          const cortex_wire::MessageHeader & h,
+          const cortex_wire::DecodedMetadata & m,
+          const std::vector<cortex_wire::ZmqFramePtr> & o) {
+            pub->publish(decoders::decode_camera_info({h, m, o, frame}));
+          };
+        break;
+      }
+    case Payload::Clock: {
+        auto pub = create_publisher<rosgraph_msgs::msg::Clock>(e.ros2_topic, make_qos(e));
+        const auto frame = e.frame_id;
+        dispatch = [pub, frame](
+          const cortex_wire::MessageHeader & h,
+          const cortex_wire::DecodedMetadata & m,
+          const std::vector<cortex_wire::ZmqFramePtr> & o) {
+            pub->publish(decoders::decode_clock({h, m, o, frame}));
           };
         break;
       }

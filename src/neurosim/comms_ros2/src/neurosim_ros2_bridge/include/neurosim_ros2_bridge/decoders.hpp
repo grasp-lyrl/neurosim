@@ -21,7 +21,12 @@
 #include <vector>
 #include <utility>
 
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <rosgraph_msgs/msg/clock.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 
 #include "neurosim_ros2_bridge/msg/events.hpp"
@@ -48,13 +53,29 @@ struct Inbound
 // .tolist()); zero OOB frames are consumed.
 std::unique_ptr<neurosim_ros2_bridge::msg::State> decode_state(const Inbound & in);
 
+// Same state as nav_msgs/Odometry: pose in frame_id, twist in child_frame_id.
+std::unique_ptr<nav_msgs::msg::Odometry> decode_odometry(
+  const Inbound & in, const std::string & child_frame_id);
+
+// The TF matching an Odometry message: frame_id -> child_frame_id at its pose.
+geometry_msgs::msg::TransformStamped transform_from_odometry(
+  const nav_msgs::msg::Odometry & odom);
+
 // Cortex DictMessage{uuid,accel,gyro,timestamp,simsteps} -> neurosim_msgs/Imu.
 // accel and gyro are length-3 numpy OOB frames; one tiny memcpy each (24 B).
 std::unique_ptr<neurosim_ros2_bridge::msg::Imu> decode_imu(const Inbound & in);
 
+// Same IMU sample as sensor_msgs/Imu, with orientation marked unknown.
+std::unique_ptr<sensor_msgs::msg::Imu> decode_sensor_imu(const Inbound & in);
+
 // Cortex MultiArrayMessage{x,y,t,p} -> neurosim_msgs/Events.
 // One memcpy per array into the ROS message's std::vector backing.
 std::unique_ptr<neurosim_ros2_bridge::msg::Events> decode_events(const Inbound & in);
+
+// One event packet drawn as a width x height rgb8 frame on black: ON events
+// blue, OFF events red, as in neurosim's Rerun visualizer.
+std::unique_ptr<sensor_msgs::msg::Image> decode_events_image(
+  const Inbound & in, std::uint32_t width, std::uint32_t height);
 
 // Cortex ArrayMessage(uint8 HxWx3) -> sensor_msgs/Image(rgb8). One memcpy
 // from the OOB frame into Image::data. Channels are inferred from shape[2];
@@ -63,6 +84,13 @@ std::unique_ptr<sensor_msgs::msg::Image> decode_color_image(const Inbound & in);
 
 // Cortex ArrayMessage(float32 HxW) -> sensor_msgs/Image(32FC1).
 std::unique_ptr<sensor_msgs::msg::Image> decode_depth_image(const Inbound & in);
+
+// Cortex DictMessage of sensor_msgs/CameraInfo's fields, computed by neurosim's
+// calibration from the simulator settings -> sensor_msgs/CameraInfo.
+std::unique_ptr<sensor_msgs::msg::CameraInfo> decode_camera_info(const Inbound & in);
+
+// The state's simulation time -> rosgraph_msgs/Clock, for use_sim_time nodes.
+std::unique_ptr<rosgraph_msgs::msg::Clock> decode_clock(const Inbound & in);
 
 // ---- ROS 2 -> Cortex --------------------------------------------------------
 

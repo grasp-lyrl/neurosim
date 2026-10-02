@@ -1,0 +1,18 @@
+# rosbag2_composable_recorder parameters for bridge.launch.py record:=true
+recorder:
+  ros__parameters:
+    storage_id: mcap
+    start_recording_immediately: true
+    topics:
+      - /neurosim/state
+      - /neurosim/odom
+      - /tf
+      - /neurosim/imu/imu_1
+      - /neurosim/imu/data
+      - /neurosim/camera/color/image_raw
+      - /neurosim/camera/color/camera_info
+      - /neurosim/camera/depth/image_raw
+      - /neurosim/camera/depth/camera_info
+      - /neurosim/camera/events/event_camera_1
+      - /neurosim/camera/events/camera_info
+      - /neurosim/control
