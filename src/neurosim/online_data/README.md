@@ -245,6 +245,21 @@ domain_randomization:    # optional; same schema as the loader's `randomization`
 
 - Each `.h5` has one group per sensor UUID (`depth_camera_1/data` stacked frames;
   `event_camera_1/{x,y,t,p}` flat-concatenated), plus `state` and `sim_time`/`sim_step`.
+- Every camera group has a `calib` group in Kalibr's camchain fields: `camera_model`,
+  `intrinsics` (fx, fy, cx, cy; pixel centres at integers), `distortion_model`,
+  `distortion_coeffs`, `resolution` and `T_cam_imu` (IMU = the body frame of `state`, to
+  OpenCV camera coordinates). `state/calib/T_habitat_world` maps `state/x` into the
+  Habitat scene. Every sample of a step shares its `sim_step`; event `t` is that
+  step's time in µs.
+- Every IMU group has a `calib` group with Kalibr's imu.yaml fields (`update_rate`, noise
+  densities and random walks, zero for the noise-free simulated IMU); the root attribute
+  `settings` is the simulator settings YAML the episode ran with.
+- `python scripts/compress_h5.py <h5>` compresses a finished file in place (LZF + shuffle,
+  about 20% of raw); `python scripts/h5_to_mcap.py <h5>` turns it into a ROS 2 bag, see
+  the neurosim_ros2_bridge README.
+- `state`: `x`, `v` in rotorpy's world (z up), `q` body-to-world as `[x, y, z, w]`, `w`
+  in the body frame. The IMU reads the body frame at the body origin, and its `accel` at
+  step k is exactly the acceleration that carries `v` from step k to k + 1.
 - `dataset_setup.yaml` records the DR **recipe** (the ranges/choices you asked for).
 - `episode_NNNNNN.meta.yaml` records the DR **realization** actually used for that
   episode — chosen scene, sampled sensor params, sampled `v_avg`, trajectory seed.
