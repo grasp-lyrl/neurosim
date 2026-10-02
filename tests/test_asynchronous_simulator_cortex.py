@@ -16,6 +16,7 @@ import yaml
 from cortex.messages.standard import ArrayMessage, DictMessage, MultiArrayMessage
 from cortex.utils.loop import run
 
+from neurosim.core.coord_trans.calibration import camera_calibration, camera_info
 from neurosim.rl.env import BaseNeurosimRLEnv
 from neurosim.sims.asynchronous_simulator import (
     controller_node,
@@ -27,6 +28,7 @@ from neurosim.sims.asynchronous_simulator.cortex_io import (
     CONTROL_TOPIC,
     STATE_TOPIC,
     message_type_for_sensor,
+    sensor_metadata_from_frame_id,
     sensor_topic,
     sensor_topics_from_settings,
 )
@@ -229,20 +231,73 @@ def test_simulator_publish_color_after_real_render(real_simulator_node):
     assert pub.publish_count == before + 1
 
 
-def test_simulator_publish_events_when_buffer_non_empty(real_simulator_node):
+def test_simulator_publishes_events_on_the_sim_clock(real_simulator_node, monkeypatch):
     node = real_simulator_node
     uuid = "event_camera_1"
-    pub = node.sensor_publishers[uuid]
-    buf = node.event_buffers[uuid]
-    before = pub.publish_count
-    for _ in range(1500):
+    sent = []
+    monkeypatch.setattr(
+        node.sensor_publishers[uuid], "publish", lambda m: sent.append(m) or True
+    )
+    viz_steps = node.sensor_manager.sensors[uuid].viz_steps
+    for _ in range(3 * viz_steps):
         run(node.simulate_step())
-        if buf.size > 0:
-            break
-    if buf.size == 0:
-        pytest.skip("No events accumulated in allotted steps (GPU/scene dependent)")
-    run(node.publish_events(node.sensor_manager.sensors[uuid]))
-    assert pub.publish_count == before + 1
+    if not sent:
+        pytest.skip("No events in three publish periods (GPU/scene dependent)")
+    previous = -1
+    for message in sent:
+        _, t, step = sensor_metadata_from_frame_id(message.frame_id)
+        assert step % viz_steps == 0, "events published off their viz steps"
+        t_us = message.arrays["t"].astype(np.int64)
+        assert previous < t_us.min() and t_us.max() <= round(t * 1e6)
+        previous = round(t * 1e6)
+
+
+@pytest.mark.parametrize("uuid", ["imu_1", "color_camera_1"])
+def test_simulator_publishes_every_sample_once_stamped_when_taken(
+    real_simulator_node, monkeypatch, uuid
+):
+    node = real_simulator_node
+    sent, taken = [], []
+    monkeypatch.setattr(
+        node.sensor_publishers[uuid], "publish", lambda m: sent.append(m) or True
+    )
+    sensor = node.sensor_manager.sensors[uuid]
+    for _ in range(3 * sensor.sampling_steps):
+        run(node.simulate_step())
+        if node.sampled_at.get(uuid, (0.0, -1))[1] == node.simsteps:
+            taken.append(node.sampled_at[uuid])
+    run(node.publish_sensor(sensor))
+    stamps = [
+        (m.data["timestamp"], m.data["simsteps"])
+        if isinstance(m, DictMessage)
+        else sensor_metadata_from_frame_id(m.frame_id)[1:]
+        for m in sent
+    ]
+    assert len(taken) == 3
+    np.testing.assert_allclose(np.array(stamps), np.array(taken))
+
+
+def test_simulator_publishes_camera_info_with_each_image(
+    real_simulator_node, monkeypatch
+):
+    node = real_simulator_node
+    uuid = "color_camera_1"
+    images, infos = [], []
+    monkeypatch.setattr(
+        node.sensor_publishers[uuid], "publish", lambda m: images.append(m) or True
+    )
+    monkeypatch.setattr(
+        node.camera_info_publishers[uuid], "publish", lambda m: infos.append(m) or True
+    )
+    for _ in range(2 * node.sensor_manager.sensors[uuid].sampling_steps):
+        run(node.simulate_step())
+    assert len(images) == 2
+    image_stamps = [sensor_metadata_from_frame_id(m.frame_id)[1:] for m in images]
+    info_stamps = [(m.data["timestamp"], m.data["simsteps"]) for m in infos]
+    np.testing.assert_allclose(np.array(info_stamps), np.array(image_stamps))
+    expected = camera_info(camera_calibration(node.settings, uuid))
+    for message in infos:
+        assert {k: message.data[k] for k in expected} == expected
 
 
 def test_controller_node_compute_control_after_real_state(real_controller_node):
