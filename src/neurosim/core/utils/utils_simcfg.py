@@ -23,11 +23,13 @@ class SimulationConfig:
     additional_sensors: dict = field(default_factory=dict)
     t_step: float = field(init=False)
     t_final: float = field(init=False)
+    control_steps: int = field(init=False)
     sensor_manager: "SensorManager" = field(init=False, default=None)
 
     def __post_init__(self):
         self.t_step = 1.0 / self.world_rate
         self.t_final = self.sim_time
+        self.control_steps = round(self.world_rate / self.control_rate)
 
         # Initialize sensor manager
         self.sensor_manager = SensorManager(
