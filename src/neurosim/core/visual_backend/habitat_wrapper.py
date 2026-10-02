@@ -16,6 +16,7 @@ from typing import Any
 
 import habitat_sim as hsim
 
+from neurosim.core.coord_trans.calibration import sensor_pose
 from neurosim.core.utils import RECOLOR_MAP, outline_border, Profiler
 from neurosim.core.event_sim import create_event_simulator, EventSimulatorProtocol
 from neurosim.core.visual_backend.base import VisualBackendProtocol
@@ -294,11 +295,7 @@ class HabitatWrapper(VisualBackendProtocol):
 
         camera_sensor_spec.resolution = mn.Vector2i(lens.resolution)
 
-        position[1] += self.settings["agent_height"]  # Adjust for agent height
-        if not isinstance(position, mn.Vector3):
-            camera_sensor_spec.position = mn.Vector3(position)
-        else:
-            camera_sensor_spec.position = position
+        camera_sensor_spec.position = mn.Vector3(position)
 
         if not isinstance(orientation, mn.Vector3):
             camera_sensor_spec.orientation = mn.Vector3(orientation)
@@ -365,8 +362,6 @@ class HabitatWrapper(VisualBackendProtocol):
         Returns:
             CameraSensorSpec for the internal depth sensor.
         """
-        from scipy.spatial.transform import Rotation
-
         if "distortion" in sensor_cfg:
             raise ValueError(f"optical flow sensor {sensor_name!r} has no lens model")
 
@@ -380,26 +375,14 @@ class HabitatWrapper(VisualBackendProtocol):
             orientation=sensor_cfg["orientation"],
         )
 
-        # Pre-compute sensor local pose (position with agent_height, orientation)
-        p_local = np.array(
-            sensor_cfg["position"], dtype=np.float32
-        )  # (3,) local position relative to agent origin
-
-        orientation = sensor_cfg["orientation"]
-        if any(o != 0 for o in orientation):
-            R_local = (
-                Rotation.from_euler("XYZ", orientation).as_matrix().astype(np.float32)
-            )
-        else:
-            R_local = np.eye(3, dtype=np.float32)
-
+        pose = sensor_pose(sensor_cfg).astype(np.float32)
         gpu_id = self.settings.get("gpu_id", 0)
         self._flow_computers[sensor_name] = OpticalFlowComputer(
             width=sensor_cfg["width"],
             height=sensor_cfg["height"],
             hfov=sensor_cfg["hfov"],
             device=f"cuda:{gpu_id}",
-            sensor_local_pose=(p_local, R_local),
+            sensor_local_pose=(pose[:3, 3], pose[:3, :3]),
         )
 
         logger.info(
@@ -611,15 +594,12 @@ class HabitatWrapper(VisualBackendProtocol):
     def update_agent_state(
         self, position: np.ndarray, quaternion: np.ndarray | np.quaternion
     ) -> None:
-        """Update the agent's pose.
-
-        Args:
-            agent_id: The ID of the agent to update.
-            position: The new position.
-            rotation: The new rotation.
-        """
+        """Fly the drone agent_height straight above the dynamics point ``position``."""
         self.agent.set_state(
-            hsim.AgentState(position=position, rotation=quaternion),
+            hsim.AgentState(
+                position=np.add(position, [0.0, self.settings["agent_height"], 0.0]),
+                rotation=quaternion,
+            ),
             reset_sensors=False,
         )
 
@@ -807,7 +787,7 @@ class HabitatWrapper(VisualBackendProtocol):
         position_3d = agent_state.position
 
         sim_topdown_map = self._sim.pathfinder.get_topdown_view(
-            meters_per_pixel, position_3d[1]
+            meters_per_pixel, position_3d[1] - self.settings["agent_height"]
         ).astype(np.uint8)
 
         outline_border(sim_topdown_map)

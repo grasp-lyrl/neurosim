@@ -180,9 +180,6 @@ class DynamicObstacleManager:
         if not self.cfg.enabled:
             return
 
-        #! drone_position is modified inplace.
-        drone_position[1] += self._agent_height
-
         if (
             sim_time - self._last_spawn_time >= self.cfg.spawn_interval_s
             and len(self._active) < self.cfg.max_concurrent
@@ -197,7 +194,7 @@ class DynamicObstacleManager:
         """Check sphere-sphere collision between the agent and any active obstacle."""
         for item in self._active.values():
             obstacle_pos = np.asarray(item.obj.translation, dtype=np.float32)
-            obstacle_pos[1] -= self._agent_height  # Adjust for agent height
+            obstacle_pos[1] -= self._agent_height  # callers pass the dynamics point
             dist = float(np.linalg.norm(agent_position - obstacle_pos))
             if dist <= self._agent_radius + item.collision_radius:
                 return True
