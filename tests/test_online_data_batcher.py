@@ -8,6 +8,7 @@ edge cases.
 import numpy as np
 
 from neurosim.online_data import (
+    LaneBatcher,
     SampleMeta,
     TimeAlignedSample,
     SampleSchema,
@@ -30,20 +31,29 @@ def _schema():
 
 
 def _sample(
-    uid, *, depth_fill, xs, ts, t_us=1000, step_idx=0, is_first=False, is_last=False
+    uid,
+    *,
+    depth_fill,
+    xs,
+    ts,
+    t_us=1000,
+    step_idx=0,
+    is_first=False,
+    is_last=False,
+    worker_id=0,
 ):
     xs = np.asarray(xs, np.uint16)
     ts = np.asarray(ts, np.uint64)
     n = len(xs)
     meta = SampleMeta(
-        worker_id=0,
+        worker_id=worker_id,
         spec_id=uid % 2,
         scene=f"scene{uid % 2}",
         seed=0,
         t_us=t_us,
         window_us=t_us,
         anchor_uuids=("depth_1",),
-        episode_id=SampleMeta.make_episode_id(0, 0),
+        episode_id=SampleMeta.make_episode_id(worker_id, 0),
         step_idx=step_idx,
         is_first=is_first,
         is_last=is_last,
@@ -162,3 +172,89 @@ def test_batcher_event_counts_concatenation_order():
     assert counts.tolist() == [2, 1]
     # rows are concatenated in sample order (raw x preserved)
     assert events[:, 0].tolist() == [1, 2, 3]
+
+
+# --------------------------------------------------------------------------- #
+# LaneBatcher: row i always continues producer i's own episode
+# --------------------------------------------------------------------------- #
+LANES = 3
+
+
+def _lane_sample(worker_id: int, step_idx: int) -> TimeAlignedSample:
+    """One step of one producer, tagged so the row it lands in is identifiable."""
+    return _sample(
+        uid=worker_id * 100 + step_idx,
+        depth_fill=worker_id,
+        xs=[worker_id],
+        ts=[1000],
+        step_idx=step_idx,
+        is_first=(step_idx == 0),
+        worker_id=worker_id,
+    )
+
+
+def test_lane_batcher_waits_for_every_lane():
+    batcher = LaneBatcher(_schema(), LANES)
+
+    # Two producers ahead by several steps still cannot fill a batch on their own.
+    for step in range(4):
+        for worker in (0, 1):
+            assert batcher.add(_lane_sample(worker, step)) is None
+
+    assert batcher.add(_lane_sample(2, 0)) is not None, (
+        "the batch should complete as soon as the last lane delivers its first sample"
+    )
+
+
+def test_lane_batcher_orders_rows_by_worker():
+    batcher = LaneBatcher(_schema(), LANES)
+
+    batch = None
+    for worker in (2, 0, 1):  # arrival order is deliberately scrambled
+        batch = batcher.add(_lane_sample(worker, 0))
+
+    assert list(batch.meta.worker_id) == [0, 1, 2], (
+        "rows must be ordered by worker id, not by arrival"
+    )
+    assert [d[0, 0] for d in batch["depth_1"]] == [0.0, 1.0, 2.0]
+
+
+def test_lane_batcher_keeps_each_row_on_its_own_episode():
+    batcher = LaneBatcher(_schema(), LANES)
+    batches = []
+
+    for step in range(3):
+        for worker in range(LANES):
+            out = batcher.add(_lane_sample(worker, step))
+            if out is not None:
+                batches.append(out)
+
+    assert len(batches) == 3
+    for row in range(LANES):
+        workers = [int(b.meta.worker_id[row]) for b in batches]
+        steps = [int(b.meta.step_idx[row]) for b in batches]
+        assert workers == [row] * 3, f"row {row} changed producer mid-stream"
+        assert steps == [0, 1, 2], f"row {row} skipped or repeated a step: {steps}"
+
+
+def test_lane_batcher_marks_episode_starts_per_row():
+    batcher = LaneBatcher(_schema(), LANES)
+
+    for worker in range(LANES):
+        first = batcher.add(_lane_sample(worker, 0))
+    for worker in range(LANES):
+        # Lane 1 begins a fresh episode while the others continue theirs.
+        second = batcher.add(_lane_sample(worker, 0 if worker == 1 else 1))
+
+    assert list(first.meta.is_first) == [True] * LANES
+    assert list(second.meta.is_first) == [False, True, False], (
+        "is_first must mark exactly the lanes that restarted, so only they reset memory"
+    )
+
+
+def test_lane_batcher_never_mixes_two_steps_of_one_lane():
+    batcher = LaneBatcher(_schema(), LANES)
+
+    # A single fast producer must not be allowed to fill more than its own row.
+    for step in range(LANES + 2):
+        assert batcher.add(_lane_sample(0, step)) is None

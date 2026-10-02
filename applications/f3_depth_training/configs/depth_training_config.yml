@@ -1,11 +1,17 @@
 # Monocular Depth Training Configuration (online_data pipeline)
 # Reference: https://github.com/grasp-lyrl/fast-feature-fields/blob/main/confs/monocular_depth/dav2b_fullttairv2indoor_pseudo_308x308x20.yml
 
+# Which validation drives the metrics and checkpoint selection.
+validation:
+  source: m3ed # 'simulator' or 'm3ed'
+  track_best: [SSIMAELoss, d1, abs_rel]
+
 # Training options
 lr: 5.0e-6 # Learning rate (DAv2 pseudo-label stage: encoder 5e-6, decoder 10x)
-lr_end_factor: 1.0 # Constant LR, as in DAv2's pseudo-label training (no decay)
+warmup_epochs: 10 # Linear ramp up to lr; 0 disables
+cooldown_epochs: 30 # Cosine anneal to lr/1000 over the final epochs; 0 disables
 clip_grad: 0 # Gradient clipping (0 = disabled)
-epochs: 250 # Number of epochs
+epochs: 300 # Number of epochs
 log_interval: 10 # Save checkpoint interval in epochs
 val_interval: 10 # Validation interval in epochs
 
@@ -28,12 +34,13 @@ max_disparity: 1000.0 # Maximum disparity for min depth 0.001 m
 dav2_config:
   size: 308 # Input size for DAv2
   encoder: vitb # Encoder type: 'vits', 'vitb', 'vitl'
-  ckpt: applications/f3_training/models/depth_anything_v2_vitb.pth # Path to DAv2 checkpoint
+  head: exp # 'relu' emits disparity, 'exp' a log disparity that cannot overflow
+  ckpt: applications/f3_depth_training/models/depth_anything_v2_vitb.pth # Path to DAv2 checkpoint
 
 # EventFF (F3) config - the feature backbone
 eventff:
-  config: deps/fast-feature-fields/confs/ff/modeloptions/640x480x20_patchff_ds1_small_v1.yml
-  ckpt: applications/f3_training/models/640x480x20_patchff_ds1_small_v1.pth # Path to EventFF checkpoint
+  config: applications/f3_depth_training/configs/f3_640x480x20_small.yml
+  ckpt: applications/f3_depth_training/models/640x480x20_patchff_ds1_small_v1_uncompiled.pth # Path to EventFF weights
 
 # Online data pipeline settings.
 # `online_data` is the same block OnlineDataLoader.from_config(...) reads everywhere
@@ -41,7 +48,18 @@ eventff:
 # `event_time_window_us` are training-only siblings.
 data:
   trainer_gpu: 1 # trainer GPU (producers run on online_data.gpu_ids)
-  min_events_per_sample: 10000 # drop sparser samples before they reach a batch
+  min_events_per_sample: 500 # drop sparser samples before they reach a batch
+
+  # Recorded M3ED flights scored against LiDAR
+  m3ed:
+    stride: 4 # every Nth LiDAR frame; 561 per sequence at 10 Hz, and adjacent ones agree
+    min_coverage: 0.01 # skip a frame under this fraction of valid LiDAR pixels
+    batch: 8
+    num_workers: 4 # h5 reads and cropping run ahead of the GPU
+    sequences:
+      - data/m3ed/falcon_indoor_flight_1
+      - data/m3ed/falcon_indoor_flight_2
+      - data/m3ed/falcon_indoor_flight_3
 
   online_data:
     base_settings: configs/online_data_hm3d_2gpu.yaml # sensors, dynamics, controller, trajectory
@@ -53,11 +71,16 @@ data:
       anchor: [depth_camera_1] # depth tick defines the sample boundary
       stream: [event_camera_1] # events accumulate within each depth window
     randomization:
-      resample_every: 20 # reload scene+sensors every N episodes; trajectory every episode
+      resample_every: 1 # reload scene+sensors every N episodes; trajectory every episode
       scenes_glob: data/hm3d/*/*.basis.glb
       sensors:
         event_camera_1:
-          contrast_threshold_pos: {range: [0.1, 0.3]}
-          contrast_threshold_neg: {range: [0.1, 0.3]}
+          contrast_threshold_pos: {range: [0.1, 0.4]}
+          contrast_threshold_neg: {range: [0.1, 0.4]}
+        # One shared draw:  both frusta must match.
+        "event_camera_1,depth_camera_1":
+          hfov: {range: [50, 65]}
       trajectory:
-        v_avg: {range: [0.5, 1.5]}
+        v_avg: {range: [0.2, 1.5]}
+        hovers: {choices: [0, 1, 2, 3]} # a count, so `choices`; `range` samples a float
+        hover_s: {range: [0.5, 1.5]}

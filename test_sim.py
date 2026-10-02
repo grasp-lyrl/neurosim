@@ -1,3 +1,14 @@
+"""Run one simulation episode from a settings YAML.
+
+If the viewer is choppy: rerun's wgpu falls back to GLES on the integrated GPU. The
+viewer is spawned as a child of this process, so the Vulkan vars go on this command,
+not on a separately started viewer.
+
+    WGPU_BACKEND=vulkan VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \\
+        __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only \\
+        python test_sim.py --settings <yaml> --display --stream-only
+"""
+
 import logging
 import argparse
 from pathlib import Path

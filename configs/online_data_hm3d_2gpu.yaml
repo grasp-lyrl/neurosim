@@ -39,7 +39,7 @@ visual_backend:
       width: 640
       height: 480
       hfov: 90
-      zfar: 1000.0
+      zfar: 40.0
       backend: "cuda"
       contrast_threshold_neg: 0.15
       contrast_threshold_pos: 0.15
@@ -69,6 +69,7 @@ trajectory:
   min_waypoint_distance: 0.5
   max_waypoints: 100
   v_avg: 1.0
+  yaw_rate_max: 1.0472 # rad/s = 60 deg/s; RateLimitedYaw enforces it after the solve
 
 safety:
   # End the episode when the drone leaves the scene

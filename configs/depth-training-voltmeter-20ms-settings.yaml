@@ -1,0 +1,73 @@
+# Simulator settings for depth training, 20 ms event context.
+simulator:
+  world_rate: 1000 # Hz
+  control_rate: 100 # Hz
+  sim_time: 30.0 # seconds per episode
+  coord_transform: "rotorpy_to_hm3d"
+
+  sensor_rates:
+    event_camera_1: 1000 # Hz - high-frequency event accumulation
+    depth_camera_1: 50 # Hz - anchor rate
+
+visual_backend:
+  gpu_id: 0 # overridden per-producer by online_data.gpu_ids
+  scene: "" # bootstrapped from randomization.scenes_glob[0]; DR picks a scene per episode
+  scene_dataset_config_file: "default"
+  clear_color: [0.0, 0.0, 0.0, 1.0]
+  default_agent: 0
+  agent_height: 1.0
+  agent_radius: 0.3
+  agent_max_climb: 2.0
+  agent_max_slope: 90.0
+  enable_hbao: false
+  frustum_culling: true
+  seed: 324
+  physics_config_file: "data/default.physics_config.json"
+  enable_physics: true
+
+  sensors:
+    event_camera_1:
+      type: "event"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 40.0
+      # DVS-Voltmeter: a stochastic process per pixel rather than a fixed contrast
+      # threshold, so noise, leakage and latency come from the model, not a knob.
+      backend: "voltmeter"
+      camera_type: "DVS346" # k1..k6 preset; `k` below overrides it
+      leak_scale: 1.0 # scales k4 (thermal) and k5 (photocurrent) leakage drift
+      randomize_phase: true # else static pixels fire in lock-step, flashing whole frames
+      anti_aliasing: 8
+
+    depth_camera_1:
+      type: "depth"
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 0.0]
+      width: 640
+      height: 480
+      hfov: 90
+      zfar: 1000.0
+
+controller:
+  model: "rotorpy_se3"
+  vehicle: "crazyflie"
+
+dynamics:
+  model: "rotorpy_multirotor_euler"
+  vehicle: "crazyflie"
+
+trajectory:
+  model: "habitat_random_minsnap"
+  seed: 42
+  target_length: 30.0
+  min_waypoint_distance: 0.5
+  max_waypoints: 100
+  v_avg: 1.0
+  yaw_rate_max: 1.0472 # rad/s = 60 deg/s; RateLimitedYaw enforces it after the solve
+
+safety:
+  # End the episode when the drone leaves the scene
+  abort_out_of_bounds: true

@@ -18,6 +18,7 @@ from .assembler import AnchorAssembler, StreamAccumulator
 from .sim_worker import SimulatorWorker, build_randomized_sim
 from .recorder import record_episodes, record_dataset
 from .batcher import (
+    LaneBatcher,
     ShuffledBatcher,
     Batch,
     BatchMeta,
@@ -51,6 +52,7 @@ __all__ = [
     # Transport + batching
     "SampleBus",
     "RoutingPolicy",
+    "LaneBatcher",
     "ShuffledBatcher",
     "Batch",
     "BatchMeta",

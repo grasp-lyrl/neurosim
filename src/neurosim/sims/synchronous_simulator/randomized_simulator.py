@@ -12,6 +12,7 @@ The randomization config uses an explicit ``range`` / ``choices`` syntax.
 """
 
 import copy
+import glob
 import yaml
 import logging
 import numpy as np
@@ -35,8 +36,12 @@ def _sample_value(spec: Any, rng: np.random.Generator) -> Any:
     *spec* is one of:
     - ``{"range": [lo, hi]}`` -> ``rng.uniform(lo, hi)``
     - ``{"choices": [a, b, ...]}`` -> ``rng.choice(...)``
+    - a list -> each entry resolved in turn, for vector parameters like the
+      voltmeter's ``k1..k6``
     - any other value -> returned as-is (fixed override)
     """
+    if isinstance(spec, list):
+        return [_sample_value(item, rng) for item in spec]
     if isinstance(spec, dict):
         if "range" in spec:
             lo, hi = spec["range"]
@@ -86,7 +91,12 @@ class DomainRandomizationConfig:
 
     Attributes:
         scenes: List of ``{"name": ..., "path": ...}`` dicts; one chosen per :meth:`sample`.
-        sensors: Per-sensor-UUID dict of randomizable parameters.
+        scene_p: Per-scene draw probability, or ``None`` for uniform.
+        sensors: Per-sensor-UUID dict of randomizable parameters. A key may list
+            several UUIDs comma-separated (``"event_camera_1,depth_camera_1"``) to
+            sample once and apply the same values to all of them.
+        visual_backend: Randomizable keys of the ``visual_backend`` block itself, for
+            what is not a sensor -- ``agent_height`` and friends.
         resample_every: Episodes between scene/sensor reconfigures (same meaning as
             the RL ``domain_randomization.resample_every``).
         trajectory: Optional per-param ``{range|choices}`` specs for the trajectory.
@@ -96,28 +106,50 @@ class DomainRandomizationConfig:
     a whole scene dataset can be referenced without enumerating paths. Because the
     expansion lives here, **every** consumer of a randomization dict — the online
     loader, the offline recorder, and direct ``RandomizedSimulator`` use — gets it.
+    It may also be a ``{pattern: share}`` mapping.
     """
 
     scenes: list[dict[str, str]] = field(default_factory=list)
+    scene_p: np.ndarray | None = None
     sensors: dict[str, dict[str, Any]] = field(default_factory=dict)
+    visual_backend: dict[str, Any] = field(default_factory=dict)
     resample_every: int = 1
     trajectory: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DomainRandomizationConfig":
         scenes = list(data.get("scenes", []))
-        pattern = data.get("scenes_glob")
-        if pattern:
-            import glob
-
+        weights = [1.0] * len(scenes)
+        globs = data.get("scenes_glob") or {}
+        if isinstance(globs, str):
+            globs = {globs: None}
+        for pattern, share in globs.items():
             matched = sorted(glob.glob(pattern))
             if not matched:
                 logger.warning("scenes_glob %r matched no files", pattern)
+                continue
             scenes += [{"name": Path(p).stem.split(".")[0], "path": p} for p in matched]
+            weights += [1.0 if share is None else share / len(matched)] * len(matched)
             logger.info("scenes_glob %r -> %d scene(s)", pattern, len(matched))
+        weighted = any(share is not None for share in globs.values())
+        # Two keys writing the same sensor param would silently last-writer-win
+        sensors = dict(data.get("sensors", {}))
+        owner: dict[tuple[str, str], str] = {}
+        for key, params in sensors.items():
+            names = set().union(*params["choices"]) if "choices" in params else params
+            for uuid in (u.strip() for u in key.split(",")):
+                for param in names:
+                    prev = owner.setdefault((uuid, param), key)
+                    if prev != key:
+                        raise ValueError(
+                            f"sensor randomization sets '{param}' for '{uuid}' from both "
+                            f"'{prev}' and '{key}'; give each param exactly one key"
+                        )
         return cls(
             scenes=scenes,
-            sensors=dict(data.get("sensors", {})),
+            scene_p=np.array(weights) / sum(weights) if weighted else None,
+            sensors=sensors,
+            visual_backend=dict(data.get("visual_backend", {})),
             resample_every=max(1, int(data.get("resample_every", 1))),
             trajectory=dict(data.get("trajectory", {})),
         )
@@ -127,29 +159,53 @@ class DomainRandomizationConfig:
         base_settings: dict[str, Any],
         rng: np.random.Generator,
     ) -> dict[str, Any]:
-        """Return a new settings dict with scene + sensor randomization applied.
+        """Return a new settings dict with scene, backend and sensor randomization applied.
 
         The *base_settings* dict is deep-copied before mutation. (Trajectory is
         handled separately by :meth:`sample_trajectory` / ``renew_trajectory``.)
         """
         settings = copy.deepcopy(base_settings)
 
+        # First, so a scene or sensor draw below still has the last word.
+        if self.visual_backend:
+            _apply_randomization_layer(
+                settings.setdefault("visual_backend", {}), self.visual_backend, rng
+            )
+
         if self.scenes:
-            scene = self.scenes[int(rng.integers(0, len(self.scenes)))]
-            settings.setdefault("visual_backend", {})["scene"] = scene["path"]
+            # integers when unweighted, so existing seeds keep their scene sequences
+            idx = (
+                rng.integers(0, len(self.scenes))
+                if self.scene_p is None
+                else rng.choice(len(self.scenes), p=self.scene_p)
+            )
+            settings.setdefault("visual_backend", {})["scene"] = self.scenes[int(idx)][
+                "path"
+            ]
 
         if self.sensors:
             vb_sensors = settings.setdefault("visual_backend", {}).setdefault(
                 "sensors", {}
             )
-            for uuid, param_specs in self.sensors.items():
-                if uuid not in vb_sensors:
-                    logger.warning(
-                        "Randomization references sensor '%s' not present in base settings; skipping",
-                        uuid,
-                    )
-                    continue
-                _apply_randomization_layer(vb_sensors[uuid], param_specs, rng)
+            for key, param_specs in self.sensors.items():
+                # Sample once, then apply the *same* values to every UUID in a
+                # comma-separated key ("a,b") -- for params that must agree across
+                # sensors, e.g. a shared hfov keeping depth labels pixel-aligned
+                # with the events. A plain single-UUID key is the 1-element case.
+                # A group-level `choices` picks one whole parameter set per sample.
+                if "choices" in param_specs:
+                    options = param_specs["choices"]
+                    param_specs = options[int(rng.integers(0, len(options)))]
+                resolved: dict[str, Any] = {}
+                _apply_randomization_layer(resolved, param_specs, rng)
+                for uuid in (u.strip() for u in key.split(",")):
+                    if uuid not in vb_sensors:
+                        logger.warning(
+                            "Randomization references sensor '%s' not present in base settings; skipping",
+                            uuid,
+                        )
+                        continue
+                    _apply_randomization_layer(vb_sensors[uuid], resolved, rng)
 
         return settings
 

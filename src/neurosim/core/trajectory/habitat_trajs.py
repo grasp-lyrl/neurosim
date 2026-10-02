@@ -23,6 +23,8 @@ YAW_RATE_MAX = 2 * np.pi
 # keyframes that merely approach the budget still make its QP infeasible, and it then
 # returns None. Spend only half the budget to stay clear of that edge.
 YAW_RATE_MARGIN = 0.5
+# Fraction of a chunk's arc length that a hover split may wander from the even spacing.
+SPLIT_JITTER = 0.5
 
 
 def rate_limit_yaw(yaw_angles: np.ndarray, segment_times: np.ndarray) -> np.ndarray:
@@ -117,12 +119,19 @@ def sample_minsnap_trajectory(
 def sample_random_navigable_point_with_height(
     pathfinder,
     max_retries: int = 100,
+    margin: float = 0.35,
+    max_height: float | None = None,
 ) -> np.ndarray | None:
     """Sample a random navigable point with random height and check navigability.
+
+    The height is sampled above *that point's own floor*, not from the navmesh's
+    global ``min_y``.
 
     Args:
         pathfinder: Habitat pathfinder instance
         max_retries: Number of retries before giving up
+        margin: Clearance held above the local floor and below the ceiling (m)
+        max_height: Ceiling for the flight band, measured above the local floor (m).
 
     Returns:
         A navigable point with random height, or None if unable to find one
@@ -140,8 +149,16 @@ def sample_random_navigable_point_with_height(
         if point[2] < min_z or point[2] > max_z:
             continue
 
-        # Sample random height within specified range
-        point[1] = random.uniform(min_y, max_y)
+        # get_random_navigable_point returns the floor height at that point; fly
+        # between it and the ceiling, keeping `margin` clear of both.
+        floor_y = float(point[1])
+        low = max(float(min_y) + margin, floor_y + margin)
+        high = float(max_y) - margin
+        if max_height is not None:
+            high = min(high, floor_y + float(max_height))
+        if high <= low:  # scene too short for the margin: use its middle
+            low = high = 0.5 * (max(float(min_y), floor_y) + float(max_y))
+        point[1] = random.uniform(low, high)
 
         # Check if navigable
         if pathfinder.is_navigable(point):
@@ -219,6 +236,7 @@ def sample_waypoint_path(
     max_waypoints: int = 100,
     start: np.ndarray | None = None,
     max_tries_per_waypoint: int = 100,
+    max_height: float | None = None,
 ) -> tuple[np.ndarray, float]:
     """Sample the raw navmesh waypoint path that :func:`generate_interesting_traj` smooths.
 
@@ -245,7 +263,9 @@ def sample_waypoint_path(
     max_tries = max_tries_per_waypoint * max_waypoints
 
     if start is None:
-        start = sample_random_navigable_point_with_height(pathfinder)
+        start = sample_random_navigable_point_with_height(
+            pathfinder, max_height=max_height
+        )
         if start is None:
             raise RuntimeError(
                 "Unable to sample initial navigable point."
@@ -267,7 +287,9 @@ def sample_waypoint_path(
         num_tries += 1
 
         # Sample a random navigable point with random height within bounds
-        candidate = sample_random_navigable_point_with_height(pathfinder)
+        candidate = sample_random_navigable_point_with_height(
+            pathfinder, max_height=max_height
+        )
 
         # ensure candidate is valid and sufficiently far
         if (
@@ -309,6 +331,163 @@ def sample_waypoint_path(
     return full_path, total_length
 
 
+class HoverMinSnap:
+    """Min-snap segments separated by hovers: fly, stop, fly, stop, ...
+
+    MinSnap zeroes velocity, acceleration and jerk at both endpoints and clips ``t`` into
+    its own range, so holding a finished segment past its end is already an exact hover.
+    Hovers sit between segments, so ``n`` segments hold ``n - 1`` of them.
+    """
+
+    def __init__(self, segments: list[MinSnap], hover_s: float):
+        self.segments = segments
+        self.hover_s = hover_s
+
+        starts, keyframes, t = [], [], 0.0
+        for segment in segments:
+            starts.append(t)
+            keyframes.append(segment.t_keyframes + t)
+            t += float(segment.t_keyframes[-1]) + hover_s
+        self.starts = np.array(starts)
+        self.t_keyframes = np.concatenate(keyframes)
+        self.duration = t - hover_s
+
+    def update(self, t: float) -> dict:
+        """Flat output at ``t``; inside a hover this is the previous segment held at its end."""
+        i = max(int(np.searchsorted(self.starts, t, side="right")) - 1, 0)
+        return self.segments[i].update(t - self.starts[i])
+
+
+def rate_limited_profile(
+    target: np.ndarray,
+    step: float,
+    rate_max: float,
+    accel_max: float,
+    gain: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Follow ``target`` as closely as a bounded turn allows, sample by sample.
+
+    A first-order tracker whose rate and acceleration are clipped every step, which is
+    what turns the cap into a bound: the output cannot exceed it however the target
+    behaves. Returns ``(angle, rate, accel)`` on ``target``'s own grid.
+    """
+    angle_out = np.empty(len(target))
+    rate_out = np.empty(len(target))
+    accel_out = np.empty(len(target))
+
+    angle, rate = float(target[0]), 0.0
+    for i, want in enumerate(target):
+        # Shortest way round, so a target that wrapped does not order a full turn.
+        error = math.atan2(math.sin(want - angle), math.cos(want - angle))
+        wanted_rate = np.clip(gain * error, -rate_max, rate_max)
+        accel = np.clip((wanted_rate - rate) / step, -accel_max, accel_max)
+
+        angle_out[i], rate_out[i], accel_out[i] = angle, rate, accel
+        rate = float(np.clip(rate + accel * step, -rate_max, rate_max))
+        angle += rate * step
+
+    return angle_out, rate_out, accel_out
+
+
+class RateLimitedYaw:
+    """Wrap a trajectory, replacing its yaw with a profile that honours a rate cap.
+
+    For a differentially flat quadrotor yaw is a free fourth output: nothing about where
+    the vehicle goes depends on it. MinSnap still solves it as a polynomial through yaw
+    keyframes, under a rate constraint rotorpy applies one-sided (``v(dt/2) <= vmax``,
+    with no lower bound), so the cap it is handed is a request the polynomial may exceed
+    between keyframes.
+
+    Making it bounded instead: the solver's yaw becomes the target of
+    :func:`rate_limited_profile`, and position passes through untouched.
+    """
+
+    def __init__(
+        self,
+        traj,
+        yaw_rate_max: float = np.pi / 2,
+        yaw_accel_max: float | None = None,
+        gain: float = 2.0,
+        dt: float = 0.01,
+    ):
+        self.traj = traj
+        self.yaw_rate_max = float(yaw_rate_max)
+        self.times = self.yaw = self.rate = self.accel = None
+
+        # A path MinSnap collapsed to a single waypoint never sets t_keyframes and holds
+        # one pose for the whole episode, so there is no yaw to shape.
+        if getattr(traj, "null", False) or not hasattr(traj, "t_keyframes"):
+            return
+
+        duration = float(traj.t_keyframes[-1])
+        count = max(2, int(np.ceil(duration / dt)) + 1)
+        self.times = np.linspace(0.0, duration, count)
+        target = np.array([float(traj.update(float(t))["yaw"]) for t in self.times])
+
+        self.yaw, self.rate, self.accel = rate_limited_profile(
+            target,
+            step=float(self.times[1] - self.times[0]),
+            rate_max=self.yaw_rate_max,
+            accel_max=4.0 * self.yaw_rate_max
+            if yaw_accel_max is None
+            else float(yaw_accel_max),
+            gain=gain,
+        )
+
+    def update(self, t: float) -> dict:
+        """The wrapped flat output with yaw, yaw_dot and yaw_ddot taken from the profile."""
+        out = dict(self.traj.update(t))
+        if self.times is None:
+            return out
+        at = float(np.clip(t, self.times[0], self.times[-1]))
+        out["yaw"] = float(np.interp(at, self.times, self.yaw))
+        out["yaw_dot"] = float(np.interp(at, self.times, self.rate))
+        out["yaw_ddot"] = float(np.interp(at, self.times, self.accel))
+        return out
+
+    def __getattr__(self, name):
+        # t_keyframes, null, points, segments: everything else still comes from the
+        # wrapped trajectory. Guard `traj` itself or this recurses before __init__ runs.
+        if name == "traj":
+            raise AttributeError(name)
+        return getattr(self.traj, name)
+
+
+def split_indices(path: np.ndarray, chunks: int, rng: np.random.Generator) -> list[int]:
+    """Boundaries cutting ``path`` into ``chunks`` runs at jittered equal arc lengths.
+
+    Consecutive runs share their boundary waypoint, so ``path[b[i] : b[i + 1] + 1]`` tiles
+    the path and every join is continuous in position and yaw.
+    """
+    arc = np.concatenate(
+        [[0.0], np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))]
+    )
+    edges = np.arange(1, chunks) / chunks
+    edges = edges + (rng.random(chunks - 1) - 0.5) * SPLIT_JITTER / chunks
+    bounds = [0, *np.searchsorted(arc, edges * arc[-1]), len(path) - 1]
+    assert np.all(np.diff(bounds) >= 1), (
+        f"{chunks} chunks need {chunks + 1} waypoints spread wider than this path's "
+        f"{len(path)}; lower `hovers` or raise `target_length`"
+    )
+    return bounds
+
+
+def build_minsnap(points: np.ndarray, yaw_angles: np.ndarray, v_avg: float) -> MinSnap:
+    """One min-snap segment over ``points``, starting and ending at rest."""
+    return MinSnap(
+        points=points,
+        yaw_angles=yaw_angles,
+        yaw_rate_max=YAW_RATE_MAX,
+        poly_degree=7,
+        yaw_poly_degree=7,
+        v_max=3.0,
+        v_avg=v_avg,
+        v_start=np.zeros(3),
+        v_end=np.zeros(3),
+        verbose=False,
+    )
+
+
 def generate_interesting_traj(
     pathfinder,
     seed: int,
@@ -320,7 +499,12 @@ def generate_interesting_traj(
     max_tries_per_waypoint: int = 100,
     coord_transform=None,
     episode_duration: float | None = None,
-) -> MinSnap:
+    hovers: int = 0,
+    hover_s: float = 2.5,
+    max_height: float | None = None,
+    yaw_rate_max: float = np.pi / 2,
+    max_attempts: int = 5,
+) -> RateLimitedYaw:
     """Generate a longer trajectory by sampling distant waypoints and connecting them.
 
     Algorithm:
@@ -342,10 +526,76 @@ def generate_interesting_traj(
         coord_transform: Optional coordinate transform function to apply to path points.
                          Useful to convert from visual sim to dynamics coordinate system.
         episode_duration: Episode length in seconds; warn when the trajectory is shorter.
+        hovers: Pauses to hold between flight segments; 0 flies straight through.
+        hover_s: Seconds held at each pause.
+        max_height: Ceiling for the flight band above the local floor (m).
+        yaw_rate_max: Hard cap on how fast the camera turns (rad/s), enforced by
+            :class:`RateLimitedYaw` rather than asked of MinSnap.
+        max_attempts: Fresh draws to try before giving up, since the min-snap solve can
+            fail on a particular set of waypoints.
 
     Returns:
-        MinSnap trajectory object
+        A :class:`RateLimitedYaw` around a MinSnap, or around a HoverMinSnap when
+        ``hovers`` is non-zero.
     """
+    # A hover spends episode time without covering ground, so fly proportionally less.
+    if hovers and episode_duration is not None:
+        target_length = min(
+            target_length, v_avg * (episode_duration - hovers * hover_s)
+        )
+
+    # rotorpy's min-snap QP does not always solve: it returns None and the constructor
+    # then walks off it. Which waypoints get sampled decides whether that happens, so a
+    # different draw is the fix -- measured on hm3d 00167, 2 of 21 seeds fail and their
+    # neighbours are fine. Raising here would take a producer down with it.
+    for attempt in range(max_attempts):
+        try:
+            return _build_trajectory(
+                pathfinder,
+                seed=seed + attempt * 7919,
+                target_length=target_length,
+                min_waypoint_distance=min_waypoint_distance,
+                max_waypoints=max_waypoints,
+                v_avg=v_avg,
+                start=start,
+                max_tries_per_waypoint=max_tries_per_waypoint,
+                coord_transform=coord_transform,
+                episode_duration=episode_duration,
+                hovers=hovers,
+                hover_s=hover_s,
+                max_height=max_height,
+                yaw_rate_max=yaw_rate_max,
+            )
+        except Exception as exc:  # noqa: BLE001 - any solver failure is a reason to redraw
+            logger.warning(
+                "trajectory seed %d failed to build (%s: %s); redrawing",
+                seed + attempt * 7919,
+                type(exc).__name__,
+                exc,
+            )
+    raise RuntimeError(
+        f"no trajectory built for scene after {max_attempts} draws from seed {seed}"
+    )
+
+
+def _build_trajectory(
+    pathfinder,
+    *,
+    seed: int,
+    target_length: float,
+    min_waypoint_distance: float,
+    max_waypoints: int,
+    v_avg: float,
+    start,
+    max_tries_per_waypoint: int,
+    coord_transform,
+    episode_duration: float | None,
+    hovers: int,
+    hover_s: float,
+    max_height: float | None,
+    yaw_rate_max: float,
+):
+    """One draw: sample a path, shape its yaw, and fit the min-snap through it."""
     full_path, _ = sample_waypoint_path(
         pathfinder,
         seed=seed,
@@ -354,6 +604,7 @@ def generate_interesting_traj(
         max_waypoints=max_waypoints,
         start=start,
         max_tries_per_waypoint=max_tries_per_waypoint,
+        max_height=max_height,
     )
 
     if coord_transform is not None:
@@ -368,7 +619,7 @@ def generate_interesting_traj(
     segment_times = np.linalg.norm(np.diff(full_path, axis=0), axis=1) / v_avg
     yaw_angles = rate_limit_yaw(yaw_angles, segment_times)
 
-    duration = float(segment_times.sum())
+    duration = float(segment_times.sum()) + hovers * hover_s
     if episode_duration is not None and duration < episode_duration:
         logger.warning(
             "Trajectory lasts %.1fs but the episode is %.1fs: MinSnap.update clips t, "
@@ -378,17 +629,23 @@ def generate_interesting_traj(
             episode_duration - duration,
         )
 
-    traj = MinSnap(
-        points=full_path,
-        yaw_angles=yaw_angles,
-        yaw_rate_max=YAW_RATE_MAX,
-        poly_degree=7,
-        yaw_poly_degree=7,
-        v_max=3.0,
-        v_avg=v_avg,
-        v_start=np.zeros(3),
-        v_end=np.zeros(3),
-        verbose=False,
-    )
+    if not hovers:
+        return RateLimitedYaw(
+            build_minsnap(full_path, yaw_angles, v_avg), yaw_rate_max=yaw_rate_max
+        )
 
-    return traj
+    bounds = split_indices(full_path, hovers + 1, np.random.default_rng(seed))
+    segments = [
+        build_minsnap(full_path[a : b + 1], yaw_angles[a : b + 1], v_avg)
+        for a, b in zip(bounds[:-1], bounds[1:])
+    ]
+    assert not any(segment.null for segment in segments), (
+        "a flight segment collapsed to one waypoint; MinSnap drops waypoints under 0.1m"
+    )
+    logger.info(
+        "Trajectory: %d flight segments split by %d hovers of %.1fs",
+        len(segments),
+        hovers,
+        hover_s,
+    )
+    return RateLimitedYaw(HoverMinSnap(segments, hover_s), yaw_rate_max=yaw_rate_max)

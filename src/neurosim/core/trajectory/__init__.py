@@ -80,6 +80,10 @@ def create_trajectory(model: TrajectoryType | str, **kwargs) -> TrajectoryProtoc
             max_tries_per_waypoint=kwargs.get("max_tries_per_waypoint", 100),
             coord_transform=kwargs.get("coord_transform", None),
             episode_duration=kwargs.get("episode_duration", None),
+            hovers=int(kwargs.get("hovers", 0)),
+            hover_s=float(kwargs.get("hover_s", 2.5)),
+            max_height=kwargs.get("max_height", None),
+            yaw_rate_max=float(kwargs.get("yaw_rate_max", np.pi / 2)),
         )
     else:
         raise ValueError(f"Unsupported trajectory type: {model}")

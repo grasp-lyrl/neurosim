@@ -4,6 +4,7 @@ import copy
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from neurosim.sims.synchronous_simulator.randomized_simulator import (
     DomainRandomizationConfig,
@@ -50,6 +51,20 @@ class TestSampleValue:
         rng = np.random.default_rng(2)
         assert _sample_value(42, rng) == 42
         assert _sample_value("fixed", rng) == "fixed"
+
+    def test_list_resolves_each_entry(self):
+        """Vector parameters, e.g. the DVS-Voltmeter's k1..k6."""
+        rng = np.random.default_rng(3)
+        spec = [{"range": [1.0, 2.0]}, 5.0, {"choices": [7, 8]}]
+        for _ in range(20):
+            k1, k2, k3 = _sample_value(spec, rng)
+            assert 1.0 <= k1 <= 2.0
+            assert k2 == 5.0
+            assert k3 in (7, 8)
+
+    def test_a_list_of_plain_numbers_is_unchanged(self):
+        rng = np.random.default_rng(4)
+        assert _sample_value([0.0, 0.0, 0.05], rng) == [0.0, 0.0, 0.05]
 
 
 class TestDomainRandomizationConfigSample:
@@ -120,6 +135,218 @@ class TestDomainRandomizationConfigSample:
         )
         names = sorted(s["name"] for s in cfg.scenes)
         assert names == ["X", "explicit"]
+
+    def test_weighted_globs_draw_each_group_at_its_share(self, tmp_path):
+        (tmp_path / "few").mkdir()
+        (tmp_path / "many").mkdir()
+        (tmp_path / "few" / "a.glb").write_text("")
+        for i in range(20):
+            (tmp_path / "many" / f"s{i:02d}.glb").write_text("")
+
+        cfg = DomainRandomizationConfig.from_dict(
+            {
+                "scenes_glob": {
+                    str(tmp_path / "few" / "*.glb"): 0.5,
+                    str(tmp_path / "many" / "*.glb"): 0.5,
+                }
+            }
+        )
+        rng = np.random.default_rng(0)
+        base = _minimal_base_settings()
+        drawn = [cfg.sample(base, rng)["visual_backend"]["scene"] for _ in range(4000)]
+        share = sum("few" in d for d in drawn) / len(drawn)
+        assert 0.47 < share < 0.53, (
+            f"`few` group drew {share:.3f} of scenes, wanted 0.5"
+        )
+
+    def test_shares_normalize_to_a_probability(self, tmp_path):
+        for group, n in (("a", 3), ("b", 7), ("c", 1)):
+            (tmp_path / group).mkdir()
+            for i in range(n):
+                (tmp_path / group / f"s{i}.glb").write_text("")
+
+        def probs(shares):
+            cfg = DomainRandomizationConfig.from_dict(
+                {
+                    "scenes_glob": {
+                        str(tmp_path / g / "*.glb"): w for g, w in zip("abc", shares)
+                    }
+                }
+            )
+            return cfg.scene_p
+
+        halves, doubled = probs([0.5, 0.25, 0.25]), probs([2, 1, 1])
+        assert np.isclose(halves.sum(), 1.0)
+        assert np.allclose(halves, doubled)
+        assert np.isclose(halves[:3].sum(), 0.5)
+        assert np.isclose(halves[-1], 0.25)
+
+    def test_unweighted_glob_keeps_the_uniform_draw(self, tmp_path):
+        for i in range(8):
+            (tmp_path / f"s{i}.basis.glb").write_text("")
+        cfg = DomainRandomizationConfig.from_dict(
+            {"scenes_glob": str(tmp_path / "*.basis.glb")}
+        )
+        assert cfg.scene_p is None
+
+        base = _minimal_base_settings()
+        rng = np.random.default_rng(3)
+        drawn = [cfg.sample(base, rng)["visual_backend"]["scene"] for _ in range(5)]
+        expected = [
+            cfg.scenes[int(i)]["path"]
+            for i in np.random.default_rng(3).integers(0, 8, size=5)
+        ]
+        assert drawn == expected
+
+
+def _two_camera_settings() -> dict:
+    """Base settings with an event + depth camera, as the depth trainer runs them."""
+    base = _minimal_base_settings()
+    base["visual_backend"]["sensors"]["depth_camera_1"] = {"type": "depth", "hfov": 90}
+    return base
+
+
+class TestSharedSensorGroups:
+    """A comma-separated sensors key samples once and applies to every listed UUID.
+
+    The depth trainer needs this: it takes ``disparity = 1/depth`` per pixel against
+    the event frame, so the two cameras must share one frustum.
+    """
+
+    def test_comma_key_shares_one_draw(self):
+        cfg = DomainRandomizationConfig.from_dict(
+            {
+                "sensors": {
+                    "event_camera_1,depth_camera_1": {"hfov": {"range": [32, 90]}}
+                }
+            }
+        )
+        rng = np.random.default_rng(0)
+        seen = set()
+        for _ in range(20):
+            s = cfg.sample(_two_camera_settings(), rng)["visual_backend"]["sensors"]
+            assert s["event_camera_1"]["hfov"] == s["depth_camera_1"]["hfov"]
+            assert 32 <= s["event_camera_1"]["hfov"] <= 90
+            seen.add(s["event_camera_1"]["hfov"])
+        assert len(seen) > 1, "shared value must still vary across draws"
+
+    def test_params_under_one_key_still_draw_independently(self):
+        # Sharing is per-key, not per-param: pos/neg must not collapse to one draw.
+        cfg = DomainRandomizationConfig.from_dict(
+            {
+                "sensors": {
+                    "event_camera_1": {
+                        "contrast_threshold_pos": {"range": [0.1, 0.4]},
+                        "contrast_threshold_neg": {"range": [0.1, 0.4]},
+                    }
+                }
+            }
+        )
+        s = cfg.sample(_two_camera_settings(), np.random.default_rng(3))[
+            "visual_backend"
+        ]["sensors"]["event_camera_1"]
+        assert s["contrast_threshold_pos"] != s["contrast_threshold_neg"]
+
+    def test_single_uuid_key_rng_stream_unchanged(self):
+        # Regression guard: grouping must not perturb the draw order for existing
+        # configs, or a rerun stops reproducing its scene/sensor sequence.
+        cfg = DomainRandomizationConfig.from_dict(
+            {
+                "sensors": {
+                    "event_camera_1": {
+                        "contrast_threshold_pos": {"range": [0.1, 0.4]},
+                        "contrast_threshold_neg": {"range": [0.1, 0.4]},
+                    }
+                }
+            }
+        )
+        s = cfg.sample(_two_camera_settings(), np.random.default_rng(7))[
+            "visual_backend"
+        ]["sensors"]["event_camera_1"]
+        # Pre-patch: two sequential uniforms off the same generator, in dict order.
+        ref = np.random.default_rng(7)
+        assert s["contrast_threshold_pos"] == float(ref.uniform(0.1, 0.4))
+        assert s["contrast_threshold_neg"] == float(ref.uniform(0.1, 0.4))
+
+    def test_unknown_uuid_in_group_is_skipped_not_fatal(self):
+        cfg = DomainRandomizationConfig.from_dict(
+            {"sensors": {"event_camera_1,nope_cam": {"hfov": {"range": [40, 40]}}}}
+        )
+        out = cfg.sample(_two_camera_settings(), np.random.default_rng(1))
+        sensors = out["visual_backend"]["sensors"]
+        assert sensors["event_camera_1"]["hfov"] == 40.0
+        assert "nope_cam" not in sensors
+
+    @pytest.mark.parametrize(
+        "sensors",
+        [
+            # group last: silently overwrote the standalone value
+            {
+                "event_camera_1": {"hfov": {"range": [10, 20]}},
+                "event_camera_1,depth_camera_1": {"hfov": {"range": [80, 90]}},
+            },
+            # group first: silently diverged the two frusta -- the bug this prevents
+            {
+                "event_camera_1,depth_camera_1": {"hfov": {"range": [80, 90]}},
+                "event_camera_1": {"hfov": {"range": [10, 20]}},
+            },
+        ],
+        ids=["group-last", "group-first"],
+    )
+    def test_duplicate_param_across_keys_raises(self, sensors):
+        with pytest.raises(ValueError, match="hfov.*event_camera_1"):
+            DomainRandomizationConfig.from_dict({"sensors": sensors})
+
+    def test_disjoint_params_on_same_uuid_are_allowed(self):
+        # event_camera_1 owns the thresholds, the group owns hfov -- no overlap.
+        cfg = DomainRandomizationConfig.from_dict(
+            {
+                "sensors": {
+                    "event_camera_1": {"contrast_threshold_pos": {"range": [0.1, 0.4]}},
+                    "event_camera_1,depth_camera_1": {"hfov": {"range": [32, 90]}},
+                }
+            }
+        )
+        s = cfg.sample(_two_camera_settings(), np.random.default_rng(0))[
+            "visual_backend"
+        ]["sensors"]
+        assert s["event_camera_1"]["hfov"] == s["depth_camera_1"]["hfov"]
+        assert 0.1 <= s["event_camera_1"]["contrast_threshold_pos"] <= 0.4
+
+    def test_group_choices_apply_one_whole_set_to_every_sensor(self):
+        lens = {"hfov": {"range": [47, 51]}, "distortion": [-0.5, 0.2, 0.0, 0.0, 0.0]}
+        cfg = DomainRandomizationConfig.from_dict(
+            {
+                "sensors": {
+                    "event_camera_1,depth_camera_1": {
+                        "choices": [{"hfov": {"range": [50, 65]}}, lens]
+                    }
+                }
+            }
+        )
+        rng = np.random.default_rng(0)
+        lensed = 0
+        for _ in range(200):
+            s = cfg.sample(_two_camera_settings(), rng)["visual_backend"]["sensors"]
+            ev, dp = s["event_camera_1"], s["depth_camera_1"]
+            assert ev["hfov"] == dp["hfov"], "the group must share one draw"
+            assert ev.get("distortion") == dp.get("distortion")
+            if "distortion" in ev:
+                lensed += 1
+                assert 47 <= ev["hfov"] <= 51, "a set's params come from that set"
+            else:
+                assert 50 <= ev["hfov"] <= 65, "a set's params come from that set"
+        assert 0 < lensed < 200, "both parameter sets must be drawn"
+
+    def test_group_choices_count_every_set_toward_param_ownership(self):
+        sensors = {
+            "depth_camera_1": {"distortion": [0.0] * 5},
+            "event_camera_1,depth_camera_1": {
+                "choices": [{"hfov": 60}, {"hfov": 49, "distortion": [0.1] * 5}]
+            },
+        }
+        with pytest.raises(ValueError, match="distortion.*depth_camera_1"):
+            DomainRandomizationConfig.from_dict({"sensors": sensors})
 
 
 class TestRandomizedSimulatorMocked:
@@ -333,3 +560,44 @@ def test_sims_package_exports_randomized_simulator():
 
     assert RandomizedSimulator is not None
     assert DomainRandomizationConfig is not None
+
+
+def test_visual_backend_keys_can_be_randomized():
+    """agent_height lives on the backend, not a sensor, and the navmesh is built from it."""
+    from neurosim.sims.synchronous_simulator.randomized_simulator import (
+        DomainRandomizationConfig,
+    )
+
+    cfg = DomainRandomizationConfig.from_dict(
+        {"visual_backend": {"agent_height": {"range": [1.0, 1.5]}}}
+    )
+    base = {"visual_backend": {"agent_height": 1.0, "agent_radius": 0.3, "sensors": {}}}
+    rng = np.random.default_rng(0)
+
+    drawn = {cfg.sample(base, rng)["visual_backend"]["agent_height"] for _ in range(50)}
+    assert len(drawn) > 1, "the draw should vary"
+    assert all(1.0 <= h <= 1.5 for h in drawn)
+    # The base dict is deep-copied, so repeated episodes never compound.
+    assert base["visual_backend"]["agent_height"] == 1.0
+    assert cfg.sample(base, rng)["visual_backend"]["agent_radius"] == 0.3
+
+
+def test_backend_randomization_leaves_scene_and_sensors_alone():
+    """The three blocks are independent; one must not clobber another."""
+    from neurosim.sims.synchronous_simulator.randomized_simulator import (
+        DomainRandomizationConfig,
+    )
+
+    cfg = DomainRandomizationConfig.from_dict(
+        {
+            "scenes": [{"name": "s", "path": "s.glb"}],
+            "visual_backend": {"agent_height": {"range": [1.0, 1.5]}},
+            "sensors": {"cam": {"hfov": {"range": [70, 110]}}},
+        }
+    )
+    base = {"visual_backend": {"agent_height": 1.0, "sensors": {"cam": {"hfov": 90}}}}
+    out = cfg.sample(base, np.random.default_rng(0))["visual_backend"]
+
+    assert out["scene"] == "s.glb"
+    assert 1.0 <= out["agent_height"] <= 1.5
+    assert 70 <= out["sensors"]["cam"]["hfov"] <= 110

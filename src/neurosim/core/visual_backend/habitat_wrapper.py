@@ -16,7 +16,7 @@ from typing import Any
 
 import habitat_sim as hsim
 
-from neurosim.core.utils import color2intensity, RECOLOR_MAP, outline_border, Profiler
+from neurosim.core.utils import RECOLOR_MAP, outline_border, Profiler
 from neurosim.core.event_sim import create_event_simulator, EventSimulatorProtocol
 from neurosim.core.visual_backend.base import VisualBackendProtocol
 from neurosim.core.visual_backend.optical_flow import OpticalFlowComputer
@@ -25,6 +25,7 @@ from neurosim.core.visual_backend.corner_detector import (
     FeatureDetectionResult,
 )
 from neurosim.core.visual_backend.edge_detector import EdgeDetector
+from neurosim.core.visual_backend.lens import Pinhole, Radtan, create_lens
 from neurosim.core.visual_backend.dynamic_obstacles import (
     DynamicObstacleManager,
     DynamicObstaclesConfig,
@@ -39,6 +40,17 @@ class HabitatWrapper(VisualBackendProtocol):
     Args:
         settings: A dictionary containing simulator settings.
     """
+
+    READOUT = {
+        "event": "luma",
+        "grayscale": "luma",
+        "color": "rgba",
+        "corner": "rgba",
+        "edge": "rgba",
+        "depth": "nearest",
+        "semantic": "nearest",
+        "optical_flow": "nearest",
+    }
 
     def __init__(self, settings: dict[str, Any]):
         self.settings = settings
@@ -59,6 +71,14 @@ class HabitatWrapper(VisualBackendProtocol):
         # Initialize edge detectors
         self._edge_detectors: dict[str, EdgeDetector] = {}
 
+        self._lenses: dict[str, Pinhole | Radtan] = {}
+
+        # Habitat caches every scene it loads for the life of a Simulator and offers no
+        # way to evict one. Rebuilding the Simulator is the only way to give that back; this
+        # bounds how many scenes one instance is allowed to accumulate first.
+        self._scene_cache_limit = int(settings.get("scene_cache_limit", 4))
+        self._cached_scenes: set[str] = {settings.get("scene", "")}
+
         # Create Habitat configuration and fill in event simulators if any
         self._cfg = self._make_cfg()
 
@@ -74,6 +94,8 @@ class HabitatWrapper(VisualBackendProtocol):
         # Cache scene bounds *after* recomputing the navmesh:
         # bounds are only valid once a navmesh is loaded/built.
         self._scene_bounds = self._sim.pathfinder.get_bounds()
+
+        self._apply_lighting()
 
         # init the agent to the start position and orientation
         # self.agent = self._init_agent_state(self.settings["default_agent"])
@@ -102,6 +124,56 @@ class HabitatWrapper(VisualBackendProtocol):
             f"✅ Habitat simulator initialized with scene: {self.settings['scene']}"
         )
         logger.info("════════════════════════════════════════════════════════════════")
+
+    def _apply_lighting(self) -> None:
+        """Install the configured light setup, sized from the scene bounds.
+
+        Habitat's Phong lighting has no shadows or bounce light, so the setup is a
+        grid of point lights under the ceiling plus one directional fill that keeps
+        the unlit sides off pure black. Positions come from the scene AABB, so the
+        same config works for any room.
+        """
+        cfg = self.settings.get("lighting", {})
+        if not cfg.get("enabled", False):
+            return
+
+        lo, hi = self._scene_bounds
+        intensity = float(cfg.get("intensity", 4.0))
+        fill = float(cfg.get("fill", 0.4))
+        warmth = cfg.get("color", [1.0, 0.94, 0.85])
+        nx, nz = cfg.get("grid", [2, 2])
+        drop = float(cfg.get("ceiling_offset", 0.15))
+
+        lights = []
+        for ix in range(int(nx)):
+            for iz in range(int(nz)):
+                # Spread the lights over the footprint, inset from the walls.
+                fx = (ix + 1) / (int(nx) + 1)
+                fz = (iz + 1) / (int(nz) + 1)
+                lights.append(
+                    hsim.gfx.LightInfo(
+                        vector=mn.Vector4(
+                            float(lo[0] + fx * (hi[0] - lo[0])),
+                            float(hi[1] - drop),
+                            float(lo[2] + fz * (hi[2] - lo[2])),
+                            1.0,
+                        ),
+                        color=mn.Color3(*[intensity * c for c in warmth]),
+                        model=hsim.gfx.LightPositionModel.Global,
+                    )
+                )
+        if fill > 0.0:
+            lights.append(
+                hsim.gfx.LightInfo(
+                    vector=mn.Vector4(0.3, 1.0, 0.4, 0.0),  # w=0 -> directional
+                    color=mn.Color3(fill, fill * 1.08, fill * 1.25),
+                    model=hsim.gfx.LightPositionModel.Global,
+                )
+            )
+        self._sim.set_light_setup(lights, hsim.gfx.DEFAULT_LIGHTING_KEY)
+        logger.info(
+            "applied %d Habitat lights (intensity %.2f)", len(lights), intensity
+        )
 
     def _set_seed(self, seed: int) -> None:
         """Set the random seed for the simulator and numpy.
@@ -170,8 +242,6 @@ class HabitatWrapper(VisualBackendProtocol):
         uuid: str,
         sensor_type: hsim.SensorType | str,
         sensor_subtype: hsim.SensorSubType | str,
-        resolution: mn.Vector2i | tuple[int, int] | list[int],
-        hfov: float,
         far: float,
         position: mn.Vector3 | tuple[float, float, float] | list[float],
         orientation: mn.Vector3 | tuple[float, float, float] | list[float],
@@ -188,9 +258,16 @@ class HabitatWrapper(VisualBackendProtocol):
         Args:
             anti_aliasing: Number of MSAA samples for anti-aliasing (0 disables, 8 or 16 recommended).
         """
+        sensor_cfg = self.settings["sensors"][uuid]
+        lens = self._lenses[uuid] = create_lens(
+            sensor_cfg,
+            f"cuda:{int(self.settings.get('gpu_id', 0))}",
+            self.READOUT[sensor_cfg["type"]],
+        )
+
         camera_sensor_spec = hsim.CameraSensorSpec()
         camera_sensor_spec.uuid = uuid
-        camera_sensor_spec.hfov = hfov
+        camera_sensor_spec.hfov = lens.hfov
         camera_sensor_spec.far = far
         if not isinstance(sensor_type, hsim.SensorType):
             camera_sensor_spec.sensor_type = {
@@ -215,10 +292,7 @@ class HabitatWrapper(VisualBackendProtocol):
         else:
             camera_sensor_spec.sensor_subtype = sensor_subtype
 
-        if not isinstance(resolution, mn.Vector2i):
-            camera_sensor_spec.resolution = mn.Vector2i(resolution)
-        else:
-            camera_sensor_spec.resolution = resolution
+        camera_sensor_spec.resolution = mn.Vector2i(lens.resolution)
 
         position[1] += self.settings["agent_height"]  # Adjust for agent height
         if not isinstance(position, mn.Vector3):
@@ -263,8 +337,6 @@ class HabitatWrapper(VisualBackendProtocol):
             uuid=sensor_name,
             sensor_type="color",
             sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
-            resolution=(sensor_cfg["height"], sensor_cfg["width"]),
-            hfov=sensor_cfg["hfov"],
             far=sensor_cfg["zfar"],
             position=sensor_cfg["position"],
             orientation=sensor_cfg["orientation"],
@@ -295,13 +367,14 @@ class HabitatWrapper(VisualBackendProtocol):
         """
         from scipy.spatial.transform import Rotation
 
+        if "distortion" in sensor_cfg:
+            raise ValueError(f"optical flow sensor {sensor_name!r} has no lens model")
+
         # Create internal depth sensor spec
         depth_sensor_spec = self._create_camera_spec(
             uuid=sensor_name,
             sensor_type="depth",
             sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
-            resolution=(sensor_cfg["height"], sensor_cfg["width"]),
-            hfov=sensor_cfg["hfov"],
             far=sensor_cfg["zfar"],
             position=sensor_cfg["position"],
             orientation=sensor_cfg["orientation"],
@@ -357,8 +430,6 @@ class HabitatWrapper(VisualBackendProtocol):
             uuid=sensor_name,
             sensor_type="color",
             sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
-            resolution=(sensor_cfg["height"], sensor_cfg["width"]),
-            hfov=sensor_cfg["hfov"],
             far=sensor_cfg["zfar"],
             position=sensor_cfg["position"],
             orientation=sensor_cfg["orientation"],
@@ -412,8 +483,6 @@ class HabitatWrapper(VisualBackendProtocol):
             uuid=sensor_name,
             sensor_type="color",
             sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
-            resolution=(sensor_cfg["height"], sensor_cfg["width"]),
-            hfov=sensor_cfg["hfov"],
             far=sensor_cfg["zfar"],
             position=sensor_cfg["position"],
             orientation=sensor_cfg["orientation"],
@@ -466,7 +535,11 @@ class HabitatWrapper(VisualBackendProtocol):
             "physics_config_file", "data/default.physics_config.json"
         )
 
-        # TODO: Add scene_light_setup and other habitat settings
+        # GLB stages render unlit unless we override the scene's light defaults,
+        # which is what makes flat-lit assets (SceneSmith rooms) look shaded.
+        if self.settings.get("lighting", {}).get("enabled", False):
+            sim_cfg.override_scene_light_defaults = True
+            sim_cfg.scene_light_setup = hsim.gfx.DEFAULT_LIGHTING_KEY
 
         sim_cfg.frustum_culling = self.settings.get("frustum_culling", False)
         sim_cfg.enable_hbao = self.settings.get("enable_hbao", False)
@@ -487,8 +560,6 @@ class HabitatWrapper(VisualBackendProtocol):
                     uuid=sensor_name,
                     sensor_type=sensor_cfg["type"],
                     sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
-                    resolution=(sensor_cfg["height"], sensor_cfg["width"]),
-                    hfov=sensor_cfg["hfov"],
                     far=sensor_cfg["zfar"],
                     position=sensor_cfg["position"],
                     orientation=sensor_cfg["orientation"],
@@ -511,8 +582,6 @@ class HabitatWrapper(VisualBackendProtocol):
                     uuid=sensor_name,
                     sensor_type="color",
                     sensor_subtype=sensor_cfg.get("subtype", "pinhole"),
-                    resolution=(sensor_cfg["height"], sensor_cfg["width"]),
-                    hfov=sensor_cfg["hfov"],
                     far=sensor_cfg["zfar"],
                     position=sensor_cfg["position"],
                     orientation=sensor_cfg["orientation"],
@@ -588,16 +657,11 @@ class HabitatWrapper(VisualBackendProtocol):
             Tuple of (x, y, t, p) event arrays, or None if no events.
         """
         prof = self.profiler
-        color_sensor = self._sim._sensors[uuid]
 
         # These sections auto-nest under the active render_sensors.<uuid>
         # Habitat GPU render of the intensity image feeding the event sim.
         with prof.section("habitat_render", gpu=True):
-            color_sensor.draw_observation()
-            color_observation = color_sensor.get_observation()[..., :3]  # RGB
-
-        with prof.section("color2intensity", gpu=True):
-            intensity_image = color2intensity(color_observation / 255.0)
+            intensity_image = self._observe(uuid)
 
         # The event-sim kernel
         with prof.section("event_kernel", gpu=True):
@@ -630,9 +694,7 @@ class HabitatWrapper(VisualBackendProtocol):
         flow_computer = self._flow_computers[uuid]
 
         # Render depth from internal depth sensor (stays on GPU)
-        depth_sensor = self._sim._sensors[uuid]
-        depth_sensor.draw_observation()
-        depth = depth_sensor.get_observation()  # (H, W) or (H, W, 1) on GPU
+        depth = self._observe(uuid)  # (H, W) or (H, W, 1) on GPU
         if depth.ndim == 3:
             depth = depth.squeeze(-1)
 
@@ -644,15 +706,19 @@ class HabitatWrapper(VisualBackendProtocol):
 
         return flow
 
+    def _observe(self, uuid: str) -> torch.Tensor:
+        """Draw a sensor and return its image through its lens."""
+        sensor = self._sim._sensors[uuid]
+        sensor.draw_observation()
+        return self._lenses[uuid](sensor.get_observation())
+
     def render_color(self, uuid: str) -> torch.Tensor:
         """Render the color sensor.
 
         Returns:
             RGB image tensor of shape (H, W, 3).
         """
-        sensor = self._sim._sensors[uuid]
-        sensor.draw_observation()
-        return sensor.get_observation()[..., :3]
+        return self._observe(uuid)[..., :3]
 
     def render_semantic(self, uuid: str) -> torch.Tensor:
         """Render the semantic sensor.
@@ -660,9 +726,7 @@ class HabitatWrapper(VisualBackendProtocol):
         Returns:
             Semantic image tensor.
         """
-        sensor = self._sim._sensors[uuid]
-        sensor.draw_observation()
-        return sensor.get_observation()
+        return self._observe(uuid)
 
     def render_depth(self, uuid: str) -> torch.Tensor:
         """Render the depth sensor.
@@ -670,9 +734,7 @@ class HabitatWrapper(VisualBackendProtocol):
         Returns:
             Depth image tensor.
         """
-        sensor = self._sim._sensors[uuid]
-        sensor.draw_observation()
-        return sensor.get_observation()
+        return self._observe(uuid)
 
     def render_corners(self, uuid: str) -> FeatureDetectionResult:
         """Render corner/feature detections for the given sensor.
@@ -689,9 +751,7 @@ class HabitatWrapper(VisualBackendProtocol):
         corner_detector = self._corner_detectors[uuid]
 
         # Render color from internal color sensor (stays on GPU)
-        color_sensor = self._sim._sensors[uuid]
-        color_sensor.draw_observation()
-        color_image = color_sensor.get_observation()[..., :3]  # RGB (H, W, 3)
+        color_image = self._observe(uuid)[..., :3]  # RGB (H, W, 3)
 
         return corner_detector.detect(color_image)
 
@@ -710,9 +770,7 @@ class HabitatWrapper(VisualBackendProtocol):
         edge_detector = self._edge_detectors[uuid]
 
         # Render color from internal color sensor (stays on GPU)
-        color_sensor = self._sim._sensors[uuid]
-        color_sensor.draw_observation()
-        color_image = color_sensor.get_observation()[..., :3]  # RGB (H, W, 3)
+        color_image = self._observe(uuid)[..., :3]  # RGB (H, W, 3)
 
         return edge_detector.detect(color_image)
 
@@ -728,10 +786,7 @@ class HabitatWrapper(VisualBackendProtocol):
         Returns:
             Intensity image tensor of shape (H, W) with values in [0, 1].
         """
-        sensor = self._sim._sensors[uuid]
-        sensor.draw_observation()
-        color_image = sensor.get_observation()[..., :3]  # RGB (H, W, 3)
-        return color2intensity(color_image / 255.0)
+        return self._observe(uuid)
 
     def render_navmesh(
         self,
@@ -785,6 +840,7 @@ class HabitatWrapper(VisualBackendProtocol):
         self._flow_computers.clear()
         self._corner_detectors.clear()
         self._edge_detectors.clear()
+        self._lenses.clear()
 
         # Drop references to old GPU-side processors before allocating the new
         # scene + sensors (reduces peak VRAM during reconfigure).
@@ -793,9 +849,10 @@ class HabitatWrapper(VisualBackendProtocol):
             torch.cuda.empty_cache()
 
         self._cfg = self._make_cfg()
-        self._sim.reconfigure(self._cfg)
+        self._reconfigure_or_rebuild(self.settings.get("scene", ""))
 
         self._scene_bounds = self._sim.pathfinder.get_bounds()
+        self._apply_lighting()
         self._set_seed(self.settings.get("seed", 324))
         self._recompute_navmesh()
         self.agent = self._sim.get_agent(self.settings["default_agent"])
@@ -819,6 +876,31 @@ class HabitatWrapper(VisualBackendProtocol):
             "Habitat simulator reconfigured with scene: %s",
             self.settings["scene"],
         )
+
+    def _reconfigure_or_rebuild(self, scene: str) -> None:
+        """Swap the scene, rebuilding the Simulator once it has cached too many.
+
+        Reconfiguring reuses the GL context and is much cheaper, but it never releases the
+        scenes already loaded, so it can only be done a bounded number of times.
+        """
+        if scene in self._cached_scenes or (
+            len(self._cached_scenes) < self._scene_cache_limit
+        ):
+            self._sim.reconfigure(self._cfg)
+            self._cached_scenes.add(scene)
+            return
+
+        logger.info(
+            "rebuilding the Habitat simulator to release %d cached scenes",
+            len(self._cached_scenes),
+        )
+        if self._dynamic_obstacles is not None:
+            self._dynamic_obstacles.cleanup()
+            self._dynamic_obstacles = None
+        self._sim.close(destroy=True)
+        gc.collect()
+        self._sim = hsim.Simulator(self._cfg)
+        self._cached_scenes = {scene}
 
     def close(self) -> None:
         """Close the simulator."""

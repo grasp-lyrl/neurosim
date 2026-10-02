@@ -3,17 +3,9 @@
 Train F3 + DepthAnythingV2 on events+depth streamed live from neurosim. Simulators
 run in their own processes; the model trains on one GPU.
 
-## 0. Set up f3
-
-```bash
-git clone git@github.com:grasp-lyrl/fast-feature-fields.git deps/fast-feature-fields
-```
-
-Two edits to the clone are required:
-
-1. Comment out `dependencies` and `requires-python` in its `pyproject.toml`.
-2. Delete the `@torch.compile` on `batch_cropper` in `src/f3/utils/utils_gen.py` — it
-   slices by tensor values, which raises `PendingUnbackedSymbolNotFound` on torch 2.11.
+The model lives in [nets/](nets/): F3 and DepthAnythingV2 are in-house, so there is no
+`f3` package to install. Two weight files go under `models/` (gitignored): the released F3
+backbone and the DAv2 ViT-B checkpoint, both named in the config below.
 
 ## 1. Write the config
 
@@ -52,8 +44,8 @@ Full DR grammar in [online_data/README.md](../../src/neurosim/online_data/README
 
 ```bash
 nohup conda run --no-capture-output -n neurosim python -u \
-    applications/f3_training/train_depth.py \
-    --conf applications/f3_training/configs/depth_training_config.yml \
+    -m applications.f3_depth_training.train_depth_nonrec \
+    --conf applications/f3_depth_training/configs/depth_training_config.yml \
     --name my_run --batches-per-epoch 2048 --retrain-f3 --amp --wandb \
     > /tmp/my_run.log 2>&1 &
 ```
@@ -65,6 +57,45 @@ Flags: `--retrain-f3` (unfreeze the backbone), `--amp` (bf16; ~1.4x on the model
 SSI loss stays fp32), `--init path.pth` (warm-start), `--wandb`. `--compile` (the DAv2
 decoder) is off by default and best left there; `eventff` is compiled regardless.
 
+Run from the repo root: the entry points import their siblings (`nets/`, `utils/`), so they
+go through `-m`, not a file path.
+
 **Outputs:** `outputs/monoculardepth/<name>/` — `models/{last,best}.pth`, `training.log`,
 `config.yaml`, visualizations, per-producer logs under `logs/`. Resume is automatic if
 `last.pth` exists.
+
+## 3. Metric depth
+
+The default trains relative disparity: the SSI loss forgives any per-frame scale and shift,
+so consecutive predictions drift against each other. `--metric` trains depth in metres
+instead: a sigmoid head capped at `max_depth`, the SiLog loss, and metrics scored as
+predicted (the `*_aligned` keys show what an affine fit would still recover).
+
+```bash
+python -m applications.f3_depth_training.train_depth_nonrec \
+    --conf applications/f3_depth_training/configs/depth_training_config_voltmeter_metric.yml \
+    --name my_metric_run --metric --amp --wandb \
+    --init outputs/monoculardepth/my_run/models/best_d1.pth
+```
+
+The head emits metres directly, bounded by `head_max_depth`, the sigmoid ceiling, which
+must exceed `max_depth` or the far field clips. The network never sees intrinsics, so while
+the FOV is randomized the metric depth of a given input stays ambiguous by the focal-length
+ratio and the head can only learn the average — narrowing the `hfov` range is what bounds
+that.
+
+`--init` from a relative run warm-starts everything but the emit conv, which is reset
+because the head differs. The eval and replay scripts read the head from the run, so they
+need no flag.
+
+Both losses report their two terms, `train/data_term` and `train/grad_term`, per step to
+wandb and per epoch to the log, since the gradient term's natural scale differs between
+normalized disparity and log depth.
+
+## 4. Replay a checkpoint over recorded events
+
+```bash
+python -m applications.f3_depth_training.replay_depth_h5 \
+    --run outputs/monoculardepth/my_run --h5 data/falcon_indoor_flight_3.h5 \
+    --video /tmp/replay.mp4
+```

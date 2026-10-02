@@ -276,6 +276,11 @@ resample_every: 20          # reload scene + sensors every N episodes (scene rel
 scenes:                     # pool; one sampled per resample (uniform). Omit -> fixed base scene.
   - {name: a, path: .../a.basis.glb}
   - {name: b, path: .../b.basis.glb}
+scenes_glob: data/hm3d/*/*.basis.glb    # or, expanded into the pool above
+scenes_glob:                # ... or a {pattern: share} mix, uniform within each group
+  data/hm3d/*/*.basis.glb:      0.5
+  data/scenesmith/Room/*.glb:   0.25
+  data/scenesmith/House/*.glb:  0.25
 sensors:                    # per-UUID param overrides, sampled each resample
   event_camera_1:
     contrast_threshold_pos: {range: [0.1, 0.3]}   # uniform in [lo, hi]
@@ -286,6 +291,8 @@ trajectory:                 # re-sampled EVERY episode (cheap; rebuilt in-place)
 
 - **`{range: [lo, hi]}`** → uniform float; **`{choices: [...]}`** → uniform pick;
   a plain value → fixed override.
+- A sensors key can hold **`{choices: [set_a, set_b]}`** instead of params: each sample
+  applies one whole parameter set, picked uniformly, to every sensor in the key.
 - **Cadence:** scene + sensors change every `resample_every` episodes (expensive);
   the **trajectory is re-seeded every episode** so each clip flies a new path. The
   per-episode trajectory seed is derived deterministically from `(seed, episode)`.
