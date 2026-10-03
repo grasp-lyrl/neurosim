@@ -25,13 +25,15 @@ from neurosim_ros2_bridge import msg as bridge_msg
 from rclpy.serialization import serialize_message
 from rosgraph_msgs.msg import Clock
 from scipy.spatial.transform import Rotation
-from sensor_msgs.msg import CameraInfo, Image, Imu
+from sensor_msgs.msg import CameraInfo, Image, Imu, Range
 from std_msgs.msg import Header
 from tf2_msgs.msg import TFMessage
 
 from neurosim.core.coord_trans.calibration import (
     camera_calibration,
     camera_info,
+    range_info,
+    ros_range,
     write_calibration,
 )
 from neurosim.core.utils import SimulationConfig
@@ -251,6 +253,20 @@ def camera_info_messages(entry: Entry, rec: Recording) -> Messages:
         yield ns, entry.ros2_topic, msg
 
 
+def range_messages(entry: Entry, rec: Recording) -> Messages:
+    """Rangefinder readings as sensor_msgs/Range, out of span as REP 117's +-inf."""
+    info = range_info(rec.settings["visual_backend"]["sensors"][entry.uuid])
+    distances = rec.h5[entry.uuid]["data"][:]
+    for ns, i in rec.schedules[entry.uuid]:
+        msg = Range(
+            header=header(ns, entry.frame_id),
+            radiation_type=Range.INFRARED,
+            range=ros_range(distances[i], info),
+            **info,
+        )
+        yield ns, entry.ros2_topic, msg
+
+
 PAYLOADS = {
     "state": Payload("neurosim_ros2_bridge/msg/State", state_messages),
     "odometry": Payload("nav_msgs/msg/Odometry", odometry_messages),
@@ -262,6 +278,7 @@ PAYLOADS = {
     "events": Payload("neurosim_ros2_bridge/msg/Events", events_messages),
     "events_image": Payload("sensor_msgs/msg/Image", events_image_messages),
     "camera_info": Payload("sensor_msgs/msg/CameraInfo", camera_info_messages),
+    "range": Payload("sensor_msgs/msg/Range", range_messages),
 }
 
 
@@ -293,16 +310,17 @@ def main() -> None:
     bridge = yaml.safe_load(args.config.read_text())
     recorder = yaml.safe_load(args.record_config.read_text())
     recorded = set(recorder["recorder"]["ros__parameters"]["topics"])
-    entries = [
-        e
-        for e in map(parse_entry, bridge["cortex_to_ros2"])
-        if e.ros2_topic in recorded
-    ]
-    topics = {e.ros2_topic: PAYLOADS[e.payload].ros_type for e in entries}
-    if "/tf" in recorded and any(e.payload == "odometry" for e in entries):
-        topics["/tf"] = "tf2_msgs/msg/TFMessage"
 
     with h5py.File(args.h5, "r") as h5:
+        # a sensor the bridge config names but the flight did not have gets no topic
+        entries = [
+            e
+            for e in map(parse_entry, bridge["cortex_to_ros2"])
+            if e.ros2_topic in recorded and e.uuid in h5
+        ]
+        topics = {e.ros2_topic: PAYLOADS[e.payload].ros_type for e in entries}
+        if "/tf" in recorded and any(e.payload == "odometry" for e in entries):
+            topics["/tf"] = "tf2_msgs/msg/TFMessage"
         settings = yaml.safe_load(h5.attrs["settings"])
         sim_cfg = SimulationConfig(
             **settings["simulator"],
