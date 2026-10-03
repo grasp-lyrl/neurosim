@@ -16,7 +16,12 @@ import yaml
 from cortex.messages.standard import ArrayMessage, DictMessage, MultiArrayMessage
 from cortex.utils.loop import run
 
-from neurosim.core.coord_trans.calibration import camera_calibration, camera_info
+from neurosim.core.coord_trans.calibration import (
+    camera_calibration,
+    camera_info,
+    range_info,
+    ros_range,
+)
 from neurosim.rl.env import BaseNeurosimRLEnv
 from neurosim.sims.asynchronous_simulator import (
     controller_node,
@@ -42,6 +47,14 @@ except ImportError:  # pragma: no cover
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCENE_GLB = _REPO_ROOT / "data/scene_datasets/habitat-test-scenes/apartment_1.glb"
 _APARTMENT_SETTINGS = _REPO_ROOT / "configs" / "apartment_1-settings.yaml"
+RANGE = {
+    "type": "range",
+    "position": [0.0, 0.0, 0.0],
+    "orientation": [-1.5708, 0.0, 0.0],
+    "hfov": 2.0,
+    "min_range": 0.05,
+    "max_range": 12.0,
+}
 
 skip_missing_async_settings = pytest.mark.skipif(
     not _APARTMENT_SETTINGS.is_file(),
@@ -75,12 +88,15 @@ def _load_apartment_settings() -> dict:
 
 @pytest.fixture(scope="module")
 def real_simulator_node(cortex_discovery_daemon):
-    """Real :class:`SimulatorNode` (Habitat + RotorPy dynamics + sensors)."""
+    """Real :class:`SimulatorNode` (Habitat + RotorPy dynamics + sensors) plus a rangefinder."""
     if not _SCENE_GLB.is_file() or not _APARTMENT_SETTINGS.is_file():
         pytest.skip(
             f"Missing scene or async settings: {_SCENE_GLB} / {_APARTMENT_SETTINGS}"
         )
-    node = SimulatorNode(settings=_load_apartment_settings())
+    settings = _load_apartment_settings()
+    settings["visual_backend"]["sensors"]["range_sensor_1"] = RANGE
+    settings["simulator"]["sensor_rates"]["range_sensor_1"] = 100
+    node = SimulatorNode(settings=settings)
     try:
         yield node
     finally:
@@ -135,6 +151,7 @@ def test_sensor_topics_cover_all_sync_visual_sensor_types():
         "corner_1": {"type": "corner"},
         "edge_1": {"type": "edge"},
         "gray_1": {"type": "grayscale"},
+        "range_1": {"type": "range"},
     }
     settings = {
         "visual_backend": {"sensors": sensors},
@@ -151,11 +168,13 @@ def test_sensor_topics_cover_all_sync_visual_sensor_types():
     assert ("corner/corner_1", "corner_1") in topics["corner"]
     assert ("edge/edge_1", "edge_1") in topics["edge"]
     assert ("grayscale/gray_1", "gray_1") in topics["grayscale"]
+    assert ("range/range_1", "range_1") in topics["range"]
     assert ("imu/imu_1", "imu_1") in topics["imu"]
 
     assert message_type_for_sensor("event") is MultiArrayMessage
     assert message_type_for_sensor("imu") is DictMessage
     assert message_type_for_sensor("corner") is DictMessage
+    assert message_type_for_sensor("range") is DictMessage
     for sensor_type in (
         "color",
         "semantic",
@@ -252,7 +271,7 @@ def test_simulator_publishes_events_on_the_sim_clock(real_simulator_node, monkey
         previous = round(t * 1e6)
 
 
-@pytest.mark.parametrize("uuid", ["imu_1", "color_camera_1"])
+@pytest.mark.parametrize("uuid", ["imu_1", "color_camera_1", "range_sensor_1"])
 def test_simulator_publishes_every_sample_once_stamped_when_taken(
     real_simulator_node, monkeypatch, uuid
 ):
@@ -298,6 +317,27 @@ def test_simulator_publishes_camera_info_with_each_image(
     expected = camera_info(camera_calibration(node.settings, uuid))
     for message in infos:
         assert {k: message.data[k] for k in expected} == expected
+
+
+def test_simulator_publishes_rangefinder_readings_as_rep_117_ranges(
+    real_simulator_node, monkeypatch
+):
+    node = real_simulator_node
+    uuid = "range_sensor_1"
+    sent, readings = [], []
+    monkeypatch.setattr(
+        node.sensor_publishers[uuid], "publish", lambda m: sent.append(m) or True
+    )
+    for _ in range(3 * node.sensor_manager.sensors[uuid].sampling_steps):
+        run(node.simulate_step())
+        if node.sampled_at.get(uuid, (0.0, -1))[1] == node.simsteps:
+            readings.append(float(node.measurements[uuid]))
+    info = range_info(RANGE)
+    assert len(sent) == 3
+    assert [m.data["range"] for m in sent] == [ros_range(r, info) for r in readings]
+    for message in sent:
+        assert {k: message.data[k] for k in info} == info
+    assert uuid not in node.camera_info_publishers, "a rangefinder has no CameraInfo"
 
 
 def test_controller_node_compute_control_after_real_state(real_controller_node):

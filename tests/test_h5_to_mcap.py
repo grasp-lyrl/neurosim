@@ -11,7 +11,13 @@ import pytest
 import yaml
 from scipy.spatial.transform import Rotation
 
-from neurosim.core.coord_trans.calibration import camera_calibration, camera_info
+from neurosim.core.coord_trans.calibration import (
+    camera_calibration,
+    camera_info,
+    range_calibration,
+    range_info,
+    ros_range,
+)
 
 rosbag2_py = pytest.importorskip("rosbag2_py")
 
@@ -29,11 +35,20 @@ TYPES = {
     "/neurosim/camera/depth/camera_info": "sensor_msgs/msg/CameraInfo",
     "/neurosim/camera/events/event_camera_1": "neurosim_ros2_bridge/msg/Events",
     "/neurosim/camera/events/camera_info": "sensor_msgs/msg/CameraInfo",
+    "/neurosim/range/range_sensor_1": "sensor_msgs/msg/Range",
 }
 CAMERAS = {
     "color_camera_1": ("/neurosim/camera/color/image_raw", "color"),
     "depth_camera_1": ("/neurosim/camera/depth/image_raw", "depth"),
     "event_camera_1": ("/neurosim/camera/events/event_camera_1", "events"),
+}
+RANGE = {
+    "type": "range",
+    "position": [0.0, 0.0, 0.0],
+    "orientation": [-1.5708, 0.0, 0.0],
+    "hfov": 2.0,
+    "min_range": 0.05,
+    "max_range": 12.0,
 }
 
 
@@ -50,6 +65,8 @@ def bag(tmp_path_factory):
     settings["simulator"]["sim_time"] = 0.3
     for cfg in settings["visual_backend"]["sensors"].values():
         cfg.update(width=64, height=48)
+    settings["visual_backend"]["sensors"]["range_sensor_1"] = RANGE
+    settings["simulator"]["sensor_rates"]["range_sensor_1"] = 100
     out = tmp_path_factory.mktemp("convert")
     (out / "settings.yaml").write_text(yaml.safe_dump(settings))
     record = [sys.executable, "test_sim.py", "--settings", str(out / "settings.yaml")]
@@ -180,8 +197,31 @@ def test_camera_info_accompanies_each_camera_message(bag, uuid):
             np.testing.assert_array_equal(getattr(msg, key), expected[key], key)
 
 
+def test_range_messages_are_the_logged_readings_as_rep_117_ranges(bag):
+    f, _, messages, _ = bag
+    readings = messages["/neurosim/range/range_sensor_1"]
+    assert [ns for ns, _ in readings] == logged_ns(f["range_sensor_1"], 10)
+    info = range_info(RANGE)
+    fixed = np.float32([info["field_of_view"], info["min_range"], info["max_range"]])
+    for distance, (_, msg) in zip(f["range_sensor_1/data"][:], readings):
+        assert (msg.header.frame_id, msg.radiation_type) == (
+            "range_sensor_1",
+            msg.INFRARED,
+        )
+        np.testing.assert_array_equal(
+            [msg.field_of_view, msg.min_range, msg.max_range], fixed
+        )
+        assert msg.range == np.float32(ros_range(distance, info))
+
+
 def test_calibration_files_sit_beside_the_bag(bag):
-    *_, path = bag
+    f, *_, path = bag
     names = {p.name for p in path.iterdir()}
-    beside = {"camchain-imucam.yaml", "imu_1.yaml", *(f"{c}.xml" for c in CAMERAS)}
-    assert beside <= names
+    beside = {"camchain-imucam.yaml", "imu_1.yaml", "range_sensor_1.yaml"}
+    assert beside | {f"{c}.xml" for c in CAMERAS} <= names
+    rangefinder = yaml.safe_load((path / "range_sensor_1.yaml").read_text())
+    settings = yaml.safe_load(f.attrs["settings"])
+    assert rangefinder == {
+        "rostopic": "/neurosim/range/range_sensor_1",
+        **range_calibration(settings, "range_sensor_1"),
+    }

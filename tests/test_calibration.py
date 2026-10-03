@@ -20,6 +20,8 @@ from neurosim.core.coord_trans.calibration import (
     camera_calibration,
     camera_info,
     kalibr_camera,
+    range_calibration,
+    ros_range,
     write_kalibr_camchain,
     write_opencv_intrinsics,
 )
@@ -202,6 +204,34 @@ def test_agent_turns_rigidly_with_the_body(name):
             atol=1e-9,
             err_msg=f"{name} does not carry the agent rigidly with the body",
         )
+
+
+@pytest.mark.parametrize(
+    "orientation, beam",
+    [([-1.5708, 0.0, 0.0], [0, 0, -1]), ([1.5708, 0.0, 0.0], [0, 0, 1])],
+)
+def test_rangefinder_beam_is_the_body_axis_it_is_turned_to(orientation, beam):
+    rangefinder = {
+        "type": "range",
+        "position": [0.0, 0.0, 0.0],
+        "orientation": orientation,
+        "hfov": 2.0,
+        "min_range": 0.05,
+        "max_range": 12.0,
+    }
+    settings = {"visual_backend": {"sensors": {"range": rangefinder}}}
+    T_range_imu = np.array(range_calibration(settings, "range")["T_range_imu"])
+    np.testing.assert_allclose(
+        T_range_imu[2, :3], beam, atol=1e-5, err_msg="the beam is not that body axis"
+    )
+
+
+def test_ros_range_reads_out_of_span_as_rep_117_infinities():
+    info = {"field_of_view": 0.035, "min_range": 0.05, "max_range": 12.0}
+    assert ros_range(0.0, info) == np.inf, "no hit must read +inf"
+    assert ros_range(12.5, info) == np.inf, "past max_range must read +inf"
+    assert ros_range(0.01, info) == -np.inf, "short of min_range must read -inf"
+    assert ros_range(1.7, info) == 1.7
 
 
 def test_opencv_intrinsics_read_back_through_filestorage(tmp_path):
