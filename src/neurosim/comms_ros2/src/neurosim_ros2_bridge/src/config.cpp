@@ -8,21 +8,33 @@ namespace
 
 const std::unordered_map<std::string, Payload> kPayloadFromString = {
   {"state", Payload::State},
+  {"odometry", Payload::Odometry},
   {"imu", Payload::Imu},
+  {"sensor_imu", Payload::SensorImu},
   {"events", Payload::Events},
+  {"events_image", Payload::EventsImage},
   {"color_image", Payload::ColorImage},
   {"depth_image", Payload::DepthImage},
+  {"camera_info", Payload::CameraInfo},
+  {"range", Payload::Range},
+  {"clock", Payload::Clock},
   {"control", Payload::Control},
 };
 
 const char * payload_default_cortex_type(Payload p)
 {
   switch (p) {
-    case Payload::State: return "DictMessage";
-    case Payload::Imu: return "DictMessage";
-    case Payload::Events: return "MultiArrayMessage";
+    case Payload::State:
+    case Payload::Odometry: return "DictMessage";
+    case Payload::Imu:
+    case Payload::SensorImu: return "DictMessage";
+    case Payload::Events:
+    case Payload::EventsImage: return "MultiArrayMessage";
     case Payload::ColorImage:
     case Payload::DepthImage: return "ArrayMessage";
+    case Payload::CameraInfo:
+    case Payload::Range:
+    case Payload::Clock:
     case Payload::Control: return "DictMessage";
   }
   return "";
@@ -68,6 +80,15 @@ Entry parse_entry(const YAML::Node & node, bool is_inbound, std::size_t idx)
     ? node["ros2_topic"].as<std::string>()
     : throw std::runtime_error("[" + e.name + "] missing 'ros2_topic'");
   e.frame_id = node["frame_id"] ? node["frame_id"].as<std::string>() : "";
+  e.child_frame_id = node["child_frame_id"] ? node["child_frame_id"].as<std::string>() : "";
+  e.width = node["width"] ? node["width"].as<std::uint32_t>() : 0;
+  e.height = node["height"] ? node["height"].as<std::uint32_t>() : 0;
+  if (e.payload == Payload::Odometry && (e.frame_id.empty() || e.child_frame_id.empty())) {
+    throw std::runtime_error("[" + e.name + "] odometry needs 'frame_id' and 'child_frame_id'");
+  }
+  if (e.payload == Payload::EventsImage && (e.width == 0 || e.height == 0)) {
+    throw std::runtime_error("[" + e.name + "] events_image needs the sensor 'width' and 'height'");
+  }
   e.cortex_type = node["cortex_type"]
     ? node["cortex_type"].as<std::string>()
     : payload_default_cortex_type(e.payload);

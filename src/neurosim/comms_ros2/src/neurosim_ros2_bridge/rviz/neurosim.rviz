@@ -1,0 +1,103 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Marker Scale: 2
+      Show Names: true
+      Show Axes: true
+      Show Arrows: false
+      Value: true
+    - Class: rviz_default_plugins/Odometry
+      Name: Odometry
+      Enabled: true
+      Keep: 300
+      Position Tolerance: 0.05
+      Angle Tolerance: 0.2
+      Covariance:
+        Value: false
+      Shape:
+        Value: Arrow
+        Color: 255; 25; 0
+        Shaft Length: 0.3
+        Shaft Radius: 0.015
+        Head Length: 0.08
+        Head Radius: 0.04
+      Topic:
+        Value: /neurosim/odom
+      Value: true
+    - Class: rviz_imu_plugin/Imu
+      Name: IMU acceleration
+      Enabled: true
+      Topic:
+        Value: /neurosim/imu/data
+        Filter size: 50
+      Box properties:
+        Enable box: false
+      Axes properties:
+        Enable axes: false
+      Acceleration properties:
+        Enable acceleration: true
+        Derotate acceleration: false
+        Acc. vector scale: 0.1
+        Acc. vector color: 0; 255; 255
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Name: Events
+      Enabled: true
+      Topic:
+        Value: /neurosim/camera/events/image
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Name: Color
+      Enabled: true
+      Topic:
+        Value: /neurosim/camera/color/image_raw
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Name: Depth
+      Enabled: true
+      Normalize Range: true
+      Topic:
+        Value: /neurosim/camera/depth/image_raw
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: world
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 10
+      Focal Point:
+        X: 2
+        Y: 0
+        Z: -1
+      Pitch: 0.7
+      Yaw: 3.9
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+    Saved: ~
+Window Geometry:
+  Width: 1600
+  Height: 1000

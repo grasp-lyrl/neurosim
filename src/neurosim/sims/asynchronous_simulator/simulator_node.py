@@ -25,6 +25,12 @@ from neurosim.core.visual_backend import create_visual_backend
 from neurosim.core.dynamics import create_dynamics
 from neurosim.core.imu_sim import create_imu_sensor
 from neurosim.core.coord_trans import CoordinateTransform
+from neurosim.core.coord_trans.calibration import (
+    camera_calibration,
+    camera_info,
+    range_info,
+    ros_range,
+)
 from neurosim.core.utils import SimulationConfig, SensorConfig, EventBuffer
 from neurosim.sims.synchronous_simulator import SynchronousSimulator
 from neurosim.sims.asynchronous_simulator.cortex_io import (
@@ -96,6 +102,10 @@ class SimulatorNode(Node):
 
         # Storage for sensor measurements
         self.measurements = {}  # Stores latest sensor measurements
+        # A sensor may publish after its latest sample: stamp each sample with the
+        # simulation time it was taken at, and publish it once.
+        self.sampled_at: dict[str, tuple[float, int]] = {}
+        self._published_step: dict[str, int] = {}
 
         # Event camera buffers (pre-allocated GPU tensor buffers)
         self.event_buffers: dict[str, EventBuffer] = {}
@@ -224,7 +234,29 @@ class SimulatorNode(Node):
                 queue_size=1000,
             )
 
-        publishers = [self.state_pub, *self.sensor_publishers.values()]
+        self.range_infos = {
+            uuid: range_info(self.config.visual_sensors[uuid])
+            for uuid, sensor in self.sensor_manager.sensors.items()
+            if sensor.sensor_type == "range"
+        }
+        self.camera_infos = {
+            uuid: camera_info(camera_calibration(self.settings, uuid))
+            for uuid in self.sensor_publishers
+            if "hfov" in self.config.visual_sensors.get(uuid, {})
+            and uuid not in self.range_infos
+        }
+        self.camera_info_publishers = {
+            uuid: self.create_publisher(
+                sensor_topic("camera_info", uuid), DictMessage, queue_size=1000
+            )
+            for uuid in self.camera_infos
+        }
+
+        publishers = [
+            self.state_pub,
+            *self.sensor_publishers.values(),
+            *self.camera_info_publishers.values(),
+        ]
         unregistered = [pub.topic_name for pub in publishers if not pub.is_registered]
         if unregistered:
             raise RuntimeError(
@@ -241,19 +273,8 @@ class SimulatorNode(Node):
 
     def _init_executors(self) -> None:
         """Initialize async executors."""
-        # Main simulation loop at world rate
+        # Main simulation loop at world rate; it publishes on the simulation clock too
         self.create_timer(1.0 / self.config.world_rate, self.simulate_step)
-
-        # Publish state at control rate
-        self.create_timer(1.0 / self.config.control_rate, self.publish_state)
-
-        # Create sensor publishing executors at viz rates
-        for _, sensor in self.sensor_manager.sensors.items():
-            if sensor.uuid in self.sensor_publishers:
-                self.create_timer(
-                    1.0 / sensor.viz_rate,
-                    lambda s=sensor: self.publish_sensor(s),
-                )
 
         # Stats printer
         self.create_timer(1.0, self.print_stats)
@@ -277,8 +298,21 @@ class SimulatorNode(Node):
 
         # Render sensors at their sampling rate (similar to synchronous simulator)
         self._render_sensors()
+        await self._publish_due()
 
         self._stats["sim_steps"] += 1
+
+    async def _publish_due(self) -> None:
+        """Publish the state at control rate and each sensor at its viz rate, in sim steps."""
+        # Wall-clock publish timers drop a sample whenever the loop runs two steps between
+        # two of their ticks.
+        if self.simsteps % self.config.control_steps == 0:
+            await self.publish_state()
+        for uuid, sensor in self.sensor_manager.sensors.items():
+            if uuid in self.sensor_publishers and self.sensor_manager.should_visualize(
+                uuid, self.simsteps
+            ):
+                await self.publish_sensor(sensor)
 
     def _render_sensors(self) -> None:
         """Render sensors that should be sampled at this timestep and store results."""
@@ -287,6 +321,7 @@ class SimulatorNode(Node):
         for uuid, sensor_cfg in sensor_manager.sensors.items():
             if sensor_manager.should_sample(uuid, self.simsteps):
                 sensor_type = sensor_cfg.sensor_type
+                self.sampled_at[uuid] = (self.time, self.simsteps)
 
                 if sensor_type == "event":
                     # Events are accumulated in a buffer
@@ -311,14 +346,14 @@ class SimulatorNode(Node):
         return np.asarray(measurement)
 
     def _sensor_frame_id(self, uuid: str) -> str:
-        return sensor_frame_id(uuid, self.time, self.simsteps)
+        return sensor_frame_id(uuid, *self.sampled_at[uuid])
 
     def _corner_to_dict(self, uuid: str, measurement) -> dict:
         """Serialize FeatureDetectionResult-style corner measurements."""
         return {
             "uuid": uuid,
-            "timestamp": self.time,
-            "simsteps": self.simsteps,
+            "timestamp": self.sampled_at[uuid][0],
+            "simsteps": self.sampled_at[uuid][1],
             "keypoints": self._to_numpy(measurement.keypoints),
             "scores": self._to_numpy(measurement.scores),
             "descriptors": None
@@ -373,6 +408,9 @@ class SimulatorNode(Node):
         else:
             if uuid not in self.measurements:
                 return
+            sampled_time, sampled_step = self.sampled_at[uuid]
+            if self._published_step.get(uuid) == sampled_step:
+                return
             measurement = self.measurements[uuid]
             if sensor_type == "imu":
                 message = DictMessage(
@@ -380,12 +418,22 @@ class SimulatorNode(Node):
                         "uuid": uuid,
                         "accel": self._to_numpy(measurement["accel"]),
                         "gyro": self._to_numpy(measurement["gyro"]),
-                        "timestamp": self.time,
-                        "simsteps": self.simsteps,
+                        "timestamp": sampled_time,
+                        "simsteps": sampled_step,
                     }
                 )
             elif sensor_type == "corner":
                 message = DictMessage(data=self._corner_to_dict(uuid, measurement))
+            elif sensor_type == "range":
+                info = self.range_infos[uuid]
+                message = DictMessage(
+                    data={
+                        **info,
+                        "range": ros_range(float(measurement), info),
+                        "timestamp": sampled_time,
+                        "simsteps": sampled_step,
+                    }
+                )
             else:
                 message = ArrayMessage(
                     data=self._to_numpy(measurement),
@@ -395,6 +443,15 @@ class SimulatorNode(Node):
 
         if self.sensor_publishers[uuid].publish(message):
             self._stats[f"published_{uuid}"] += 1
+            self._published_step[uuid] = self.sampled_at[uuid][1]
+            if uuid in self.camera_info_publishers:
+                time_s, step = self.sampled_at[uuid]
+                info = {
+                    **self.camera_infos[uuid],
+                    "timestamp": time_s,
+                    "simsteps": step,
+                }
+                self.camera_info_publishers[uuid].publish(DictMessage(data=info))
 
     async def publish_imu(self, sensor: SensorConfig) -> None:
         """Publish IMU sensor data from stored measurements."""

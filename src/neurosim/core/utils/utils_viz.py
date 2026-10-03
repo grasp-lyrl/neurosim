@@ -330,8 +330,8 @@ class RerunVisualizer:
             return
 
         static = self.stream_only
-        if not static:
-            rr.set_time("sim_time", timestamp=time)
+        # static entities ignore the timeline; scalar plots (range) need it even when streaming
+        rr.set_time("sim_time", timestamp=time)
 
         for uuid, measurement in measurements.items():
             sensor_cfg = self.config.sensor_manager.get_sensor_config(uuid)
@@ -378,17 +378,18 @@ class RerunVisualizer:
                     static=static,
                 )
 
+            elif sensor_type == "range":
+                rr.log(f"sensors/{uuid}/range", rr.Scalars(float(measurement)))
+
             elif sensor_type == "imu":
                 # IMU data is typically small, already on CPU
                 rr.log(
                     f"sensors/{uuid}/accel",
                     rr.Scalars(measurement["accel"]),
-                    static=static,
                 )
                 rr.log(
                     f"sensors/{uuid}/gyro",
                     rr.Scalars(measurement["gyro"]),
-                    static=static,
                 )
 
             elif sensor_type == "navmesh":

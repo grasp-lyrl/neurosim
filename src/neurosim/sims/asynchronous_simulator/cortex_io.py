@@ -15,6 +15,7 @@ SENSOR_TOPIC_TYPES = {
     "color": "color",
     "semantic": "semantic",
     "depth": "depth",
+    "range": "range",
     "navmesh": "navmesh",
     "optical_flow": "optical_flow",
     "corner": "corner",
@@ -33,7 +34,7 @@ def message_type_for_sensor(sensor_type: str):
     """Return the Cortex message type used for a supported sensor stream."""
     if sensor_type == "event":
         return MultiArrayMessage
-    if sensor_type in {"imu", "corner"}:
+    if sensor_type in {"imu", "corner", "range"}:
         return DictMessage
     if sensor_type in {
         "color",

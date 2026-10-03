@@ -17,10 +17,16 @@ namespace neurosim_ros2_bridge
 enum class Payload
 {
   State,        // DictMessage{x,q,v,w,timestamp,simsteps}  -> neurosim_msgs/State
+  Odometry,     // DictMessage{x,q,v,w,timestamp,simsteps}  -> nav_msgs/Odometry + TF frame_id -> child_frame_id
   Imu,          // DictMessage{accel,gyro,timestamp,uuid}   -> neurosim_msgs/Imu
+  SensorImu,    // DictMessage{accel,gyro,timestamp,uuid}   -> sensor_msgs/Imu
   Events,       // MultiArrayMessage{x,y,t,p}               -> neurosim_msgs/Events
+  EventsImage,  // MultiArrayMessage{x,y,t,p}               -> sensor_msgs/Image (rgb8, ON blue, OFF red)
   ColorImage,   // ArrayMessage uint8 HxWx3                 -> sensor_msgs/Image (rgb8)
   DepthImage,   // ArrayMessage float32 HxW                 -> sensor_msgs/Image (32FC1)
+  CameraInfo,   // DictMessage{width,height,distortion_model,d,k,r,p,timestamp} -> sensor_msgs/CameraInfo
+  Range,        // DictMessage{range,field_of_view,min_range,max_range,timestamp} -> sensor_msgs/Range
+  Clock,        // DictMessage{...,timestamp} (the state)   -> rosgraph_msgs/Clock
   Control,      // ROS 2 std_msgs/Float64MultiArray         -> cortex DictMessage{cmd_motor_speeds,timestamp}
 };
 
@@ -32,6 +38,9 @@ struct Entry
   std::string cortex_topic;    // cortex topic name (no prefix)
   std::string ros2_topic;      // ROS 2 topic name (use a leading slash)
   std::string frame_id;        // header.frame_id stamped on outbound ROS msgs
+  std::string child_frame_id;  // odometry only: child frame of the Odometry msg and its TF
+  std::uint32_t width = 0;     // events_image only: sensor resolution
+  std::uint32_t height = 0;
   Payload payload;
   std::uint32_t depth = 10;    // ROS 2 QoS depth (history KEEP_LAST)
   bool best_effort = false;    // KEEP_LAST/RELIABLE by default; opt-in to best-effort for cameras
@@ -54,8 +63,9 @@ struct BridgeConfig
 // violations with a message that points at the offending entry.
 BridgeConfig load_config(const std::string & path);
 
-// Convert a payload tag <-> the YAML string the user writes ("state", "imu",
-// "events", "color_image", "depth_image", "control").
+// Convert a payload tag <-> the YAML string the user writes ("state",
+// "odometry", "imu", "sensor_imu", "events", "events_image", "color_image",
+// "depth_image", "camera_info", "range", "clock", "control").
 std::optional<Payload> parse_payload(const std::string & s);
 std::string payload_to_string(Payload p);
 

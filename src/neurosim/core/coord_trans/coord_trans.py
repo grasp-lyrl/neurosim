@@ -1,4 +1,5 @@
 import numpy as np
+import quaternion as _quaternion  # noqa: F401  registers np.quaternion, used below
 from scipy.spatial.transform import Rotation
 
 

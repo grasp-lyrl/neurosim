@@ -89,17 +89,13 @@ def read_scene_cfg(config: Path) -> SceneCfg:
     camera = next(
         cfg for cfg in vb["sensors"].values() if cfg["type"] in ("color", "depth")
     )
-    # HabitatWrapper adds agent_height to the configured sensor y, so the camera rides
-    # that far above the trajectory point.
-    mount = np.asarray(camera["position"], dtype=float).copy()
-    mount[1] += vb["agent_height"]
     return SceneCfg(
         agent_height=vb["agent_height"],
         agent_radius=vb["agent_radius"],
         agent_max_climb=vb["agent_max_climb"],
         agent_max_slope=vb["agent_max_slope"],
         hfov=camera["hfov"],
-        mount=mount,
+        mount=np.asarray(camera["position"], dtype=float),
         sim_time=settings["simulator"]["sim_time"],
         target_length=traj["target_length"],
         min_waypoint_distance=traj["min_waypoint_distance"],
@@ -147,13 +143,18 @@ def probe_clearance(sim: habitat_sim.Simulator, point: np.ndarray) -> float:
     return min(dists, default=PROBE_MAX_DIST)
 
 
-def camera_track(points: np.ndarray, quats: list, mount: np.ndarray) -> np.ndarray:
-    """World camera position per pose: agent position plus the body-frame mount."""
-    local = mn.Vector3(*mount)
+def drone_track(points: np.ndarray, cfg: SceneCfg) -> np.ndarray:
+    """Where HabitatWrapper flies the drone: agent_height straight above each point."""
+    return points + [0.0, cfg.agent_height, 0.0]
+
+
+def camera_track(points: np.ndarray, quats: list, cfg: SceneCfg) -> np.ndarray:
+    """World camera position per pose: the drone plus the body-frame mount."""
+    local = mn.Vector3(*cfg.mount)
     return np.array(
         [
-            np.asarray(p) + np.asarray(q.transform_vector(local))
-            for p, q in zip(points, quats)
+            drone + np.asarray(q.transform_vector(local))
+            for drone, q in zip(drone_track(points, cfg), quats)
         ]
     )
 
@@ -223,7 +224,7 @@ def scan_episode(
     dt = 1.0 / SAMPLE_HZ
     points, quats = sample_minsnap_trajectory(traj, dt=dt)
     clearances = np.array(
-        [probe_clearance(sim, c) for c in camera_track(points, quats, cfg.mount)]
+        [probe_clearance(sim, c) for c in camera_track(points, quats, cfg)]
     )
     lo, hi = (np.asarray(b, dtype=float) for b in sim.pathfinder.get_bounds())
     duration = float(traj.t_keyframes[-1])
@@ -296,7 +297,7 @@ def render_episode(
     fps = SAMPLE_HZ
     points, quats = sample_minsnap_trajectory(traj, dt=1.0 / fps)
     clearances = np.array(
-        [probe_clearance(sim, c) for c in camera_track(points, quats, cfg.mount)]
+        [probe_clearance(sim, c) for c in camera_track(points, quats, cfg)]
     )
     speeds = np.linalg.norm(np.gradient(points, 1.0 / fps, axis=0), axis=1)
     panel, pix = navmesh_panel(sim, points, clearances)
@@ -306,7 +307,7 @@ def render_episode(
     width, height = CAMERA_WH
 
     with imageio.get_writer(str(out_path), fps=int(fps), macro_block_size=1) as writer:
-        for i, (position, rotation) in enumerate(zip(points, quats)):
+        for i, (position, rotation) in enumerate(zip(drone_track(points, cfg), quats)):
             state.position = position
             state.rotation = hutils.quat_from_magnum(rotation)
             agent.set_state(state)

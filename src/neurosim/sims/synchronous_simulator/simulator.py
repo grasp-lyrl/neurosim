@@ -162,7 +162,7 @@ class SynchronousSimulator:
             def executor():
                 # Minimize function call depth - call provider inline
                 return render_events(
-                    uuid=uuid, time=int(time_provider() * 1e6), to_numpy=False
+                    uuid=uuid, time=round(time_provider() * 1e6), to_numpy=False
                 )
 
         elif sensor_type == "color":
@@ -191,6 +191,13 @@ class SynchronousSimulator:
 
             def executor():
                 return render_depth(uuid)
+
+        elif sensor_type == "range":
+            uuid = kwargs["uuid"]
+            render_range = kwargs["backend"].render_range
+
+            def executor():
+                return render_range(uuid)
 
         elif sensor_type == "imu":
             sensor = kwargs["sensor"]
@@ -470,6 +477,7 @@ class SynchronousSimulator:
                 deepcopy_data=False,  # Use zero-copy for speed
                 compression=None,  # Disable compression for speed (can enable 'lzf' for smaller files)
                 verbose=True,
+                settings=self.settings,
             )
 
         # Run simulation loop

@@ -14,6 +14,7 @@ Usage:
 """
 
 import h5py
+import yaml
 import torch
 import logging
 import numpy as np
@@ -21,7 +22,7 @@ from typing import Any
 import multiprocessing as mp
 from copy import deepcopy as dcopy
 
-from neurosim.core.visual_backend.corner_detector import FeatureDetectionResult
+from neurosim.core.coord_trans.calibration import write_h5_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class H5Logger:
         "edge": 50,
         "grayscale": 50,
         "imu": 100,
+        "range": 100,
         "state": 100,
     }
 
@@ -70,6 +72,7 @@ class H5Logger:
         deepcopy_data: bool = False,
         compression: str = "lzf",
         verbose: bool = False,
+        settings: dict | None = None,
     ):
         self.verbose = verbose
         self.filename = filename
@@ -85,6 +88,9 @@ class H5Logger:
                     if cfg.sensor_type not in self.IGNORED_SENSOR_TYPES:
                         grp = f.create_group(uuid)
                         grp.attrs.update(cfg.config)
+            if settings is not None:
+                f.attrs["settings"] = yaml.safe_dump(settings, sort_keys=False)
+                write_h5_calibration(f, settings)
 
         ctx = mp.get_context("spawn")
         self.queue = ctx.Queue()
@@ -147,6 +153,8 @@ class H5Logger:
     @staticmethod
     def _torch_to_numpy(data):
         """Convert PyTorch tensors to NumPy."""
+        from neurosim.core.visual_backend.corner_detector import FeatureDetectionResult
+
         if isinstance(data, torch.Tensor):
             return data.cpu().numpy()
         elif isinstance(data, dict):

@@ -10,6 +10,12 @@ Split-process loop: **simulator** (dynamics + Habitat + sensors), **controller**
   - `state` / `control` — `DictMessage`
   - `events/<uuid>`, `imu/<uuid>` — `MultiArrayMessage` / `DictMessage`
   - `color/<uuid>`, `depth/<uuid>` — `ArrayMessage`
+  - `camera_info/<uuid>` — `DictMessage` of `sensor_msgs/CameraInfo` fields, with every
+    image or events packet of that camera, under its stamp
+- **Timing**: the simulator publishes on its own clock, `state` every
+  `world_rate / control_rate` steps and each sensor every `world_rate / viz_rate`,
+  and stamps each sample with the simulation time it was taken at (`timestamp`, or
+  `uuid|seconds|simsteps` in an array message's `frame_id`). Each sample goes out once.
 
 ## Run (example)
 

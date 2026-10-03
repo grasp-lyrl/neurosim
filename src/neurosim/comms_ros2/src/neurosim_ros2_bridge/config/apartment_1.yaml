@@ -8,13 +8,14 @@
 #   1. cortex-discovery
 #   2. python -m neurosim.sims.asynchronous_simulator.simulator_node \
 #        --settings configs/apartment_1-settings.yaml
-#   3. ros2 launch neurosim_ros2_bridge bridge.launch.py \
-#        config:=$(ros2 pkg prefix neurosim_ros2_bridge)/share/neurosim_ros2_bridge/config/apartment_1.yaml
-#   4. rviz2 (Fixed Frame: world, add an Image display each for color/depth)
+#   3. python -m neurosim.sims.asynchronous_simulator.controller_node \
+#        --settings configs/apartment_1-settings.yaml
+#   4. ros2 launch neurosim_ros2_bridge bridge.launch.py   (this config is the default; opens rviz2)
 #
-# Optional: drive the simulator from a ROS 2 controller / teleop:
+# Optional: drive the simulator from ROS 2 instead of controller_node
+# (uncomment ros2_to_cortex below; crazyflie hover is 1788.5 rad/s):
 #   ros2 topic pub --once /neurosim/control std_msgs/msg/Float64MultiArray \
-#       "{data: [1500.0, 1500.0, 1500.0, 1500.0]}"
+#       "{data: [1788.5, 1788.5, 1788.5, 1788.5]}"
 
 version: 1
 discovery_address: "ipc:///tmp/cortex/discovery.sock"
@@ -28,16 +29,40 @@ cortex_to_ros2:
     payload: state
     frame_id: world
 
+  - name: clock
+    cortex_topic: state
+    ros2_topic: /clock
+    payload: clock
+
+  - name: odometry
+    cortex_topic: state
+    ros2_topic: /neurosim/odom
+    payload: odometry
+    frame_id: world
+    child_frame_id: base_link
+
   - name: imu_1
     cortex_topic: imu/imu_1
     ros2_topic: /neurosim/imu/imu_1
     payload: imu
     frame_id: imu_1
 
+  - name: imu_1_sensor_msgs
+    cortex_topic: imu/imu_1
+    ros2_topic: /neurosim/imu/data
+    payload: sensor_imu
+    frame_id: base_link
+
   - name: color_camera_1
     cortex_topic: color/color_camera_1
     ros2_topic: /neurosim/camera/color/image_raw
     payload: color_image
+    frame_id: color_camera_1
+
+  - name: color_camera_1_info
+    cortex_topic: camera_info/color_camera_1
+    ros2_topic: /neurosim/camera/color/camera_info
+    payload: camera_info
     frame_id: color_camera_1
 
   - name: depth_camera_1
@@ -46,11 +71,37 @@ cortex_to_ros2:
     payload: depth_image
     frame_id: depth_camera_1
 
+  - name: depth_camera_1_info
+    cortex_topic: camera_info/depth_camera_1
+    ros2_topic: /neurosim/camera/depth/camera_info
+    payload: camera_info
+    frame_id: depth_camera_1
+
   - name: event_camera_1
     cortex_topic: events/event_camera_1
     ros2_topic: /neurosim/camera/events/event_camera_1
     payload: events
     frame_id: event_camera_1
+
+  - name: event_camera_1_info
+    cortex_topic: camera_info/event_camera_1
+    ros2_topic: /neurosim/camera/events/camera_info
+    payload: camera_info
+    frame_id: event_camera_1
+
+  - name: event_camera_1_image
+    cortex_topic: events/event_camera_1
+    ros2_topic: /neurosim/camera/events/image
+    payload: events_image
+    frame_id: event_camera_1
+    width: 640
+    height: 480
+
+  - name: range_sensor_1
+    cortex_topic: range/range_sensor_1
+    ros2_topic: /neurosim/range/range_sensor_1
+    payload: range
+    frame_id: range_sensor_1
 
 # ros2_to_cortex:
 

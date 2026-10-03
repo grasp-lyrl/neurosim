@@ -16,6 +16,12 @@ import yaml
 from cortex.messages.standard import ArrayMessage, DictMessage, MultiArrayMessage
 from cortex.utils.loop import run
 
+from neurosim.core.coord_trans.calibration import (
+    camera_calibration,
+    camera_info,
+    range_info,
+    ros_range,
+)
 from neurosim.rl.env import BaseNeurosimRLEnv
 from neurosim.sims.asynchronous_simulator import (
     controller_node,
@@ -27,6 +33,7 @@ from neurosim.sims.asynchronous_simulator.cortex_io import (
     CONTROL_TOPIC,
     STATE_TOPIC,
     message_type_for_sensor,
+    sensor_metadata_from_frame_id,
     sensor_topic,
     sensor_topics_from_settings,
 )
@@ -40,6 +47,14 @@ except ImportError:  # pragma: no cover
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCENE_GLB = _REPO_ROOT / "data/scene_datasets/habitat-test-scenes/apartment_1.glb"
 _APARTMENT_SETTINGS = _REPO_ROOT / "configs" / "apartment_1-settings.yaml"
+RANGE = {
+    "type": "range",
+    "position": [0.0, 0.0, 0.0],
+    "orientation": [-1.5708, 0.0, 0.0],
+    "hfov": 2.0,
+    "min_range": 0.05,
+    "max_range": 12.0,
+}
 
 skip_missing_async_settings = pytest.mark.skipif(
     not _APARTMENT_SETTINGS.is_file(),
@@ -73,12 +88,15 @@ def _load_apartment_settings() -> dict:
 
 @pytest.fixture(scope="module")
 def real_simulator_node(cortex_discovery_daemon):
-    """Real :class:`SimulatorNode` (Habitat + RotorPy dynamics + sensors)."""
+    """Real :class:`SimulatorNode` (Habitat + RotorPy dynamics + sensors) plus a rangefinder."""
     if not _SCENE_GLB.is_file() or not _APARTMENT_SETTINGS.is_file():
         pytest.skip(
             f"Missing scene or async settings: {_SCENE_GLB} / {_APARTMENT_SETTINGS}"
         )
-    node = SimulatorNode(settings=_load_apartment_settings())
+    settings = _load_apartment_settings()
+    settings["visual_backend"]["sensors"]["range_sensor_1"] = RANGE
+    settings["simulator"]["sensor_rates"]["range_sensor_1"] = 100
+    node = SimulatorNode(settings=settings)
     try:
         yield node
     finally:
@@ -133,6 +151,7 @@ def test_sensor_topics_cover_all_sync_visual_sensor_types():
         "corner_1": {"type": "corner"},
         "edge_1": {"type": "edge"},
         "gray_1": {"type": "grayscale"},
+        "range_1": {"type": "range"},
     }
     settings = {
         "visual_backend": {"sensors": sensors},
@@ -149,11 +168,13 @@ def test_sensor_topics_cover_all_sync_visual_sensor_types():
     assert ("corner/corner_1", "corner_1") in topics["corner"]
     assert ("edge/edge_1", "edge_1") in topics["edge"]
     assert ("grayscale/gray_1", "gray_1") in topics["grayscale"]
+    assert ("range/range_1", "range_1") in topics["range"]
     assert ("imu/imu_1", "imu_1") in topics["imu"]
 
     assert message_type_for_sensor("event") is MultiArrayMessage
     assert message_type_for_sensor("imu") is DictMessage
     assert message_type_for_sensor("corner") is DictMessage
+    assert message_type_for_sensor("range") is DictMessage
     for sensor_type in (
         "color",
         "semantic",
@@ -229,20 +250,94 @@ def test_simulator_publish_color_after_real_render(real_simulator_node):
     assert pub.publish_count == before + 1
 
 
-def test_simulator_publish_events_when_buffer_non_empty(real_simulator_node):
+def test_simulator_publishes_events_on_the_sim_clock(real_simulator_node, monkeypatch):
     node = real_simulator_node
     uuid = "event_camera_1"
-    pub = node.sensor_publishers[uuid]
-    buf = node.event_buffers[uuid]
-    before = pub.publish_count
-    for _ in range(1500):
+    sent = []
+    monkeypatch.setattr(
+        node.sensor_publishers[uuid], "publish", lambda m: sent.append(m) or True
+    )
+    viz_steps = node.sensor_manager.sensors[uuid].viz_steps
+    for _ in range(3 * viz_steps):
         run(node.simulate_step())
-        if buf.size > 0:
-            break
-    if buf.size == 0:
-        pytest.skip("No events accumulated in allotted steps (GPU/scene dependent)")
-    run(node.publish_events(node.sensor_manager.sensors[uuid]))
-    assert pub.publish_count == before + 1
+    if not sent:
+        pytest.skip("No events in three publish periods (GPU/scene dependent)")
+    previous = -1
+    for message in sent:
+        _, t, step = sensor_metadata_from_frame_id(message.frame_id)
+        assert step % viz_steps == 0, "events published off their viz steps"
+        t_us = message.arrays["t"].astype(np.int64)
+        assert previous < t_us.min() and t_us.max() <= round(t * 1e6)
+        previous = round(t * 1e6)
+
+
+@pytest.mark.parametrize("uuid", ["imu_1", "color_camera_1", "range_sensor_1"])
+def test_simulator_publishes_every_sample_once_stamped_when_taken(
+    real_simulator_node, monkeypatch, uuid
+):
+    node = real_simulator_node
+    sent, taken = [], []
+    monkeypatch.setattr(
+        node.sensor_publishers[uuid], "publish", lambda m: sent.append(m) or True
+    )
+    sensor = node.sensor_manager.sensors[uuid]
+    for _ in range(3 * sensor.sampling_steps):
+        run(node.simulate_step())
+        if node.sampled_at.get(uuid, (0.0, -1))[1] == node.simsteps:
+            taken.append(node.sampled_at[uuid])
+    run(node.publish_sensor(sensor))
+    stamps = [
+        (m.data["timestamp"], m.data["simsteps"])
+        if isinstance(m, DictMessage)
+        else sensor_metadata_from_frame_id(m.frame_id)[1:]
+        for m in sent
+    ]
+    assert len(taken) == 3
+    np.testing.assert_allclose(np.array(stamps), np.array(taken))
+
+
+def test_simulator_publishes_camera_info_with_each_image(
+    real_simulator_node, monkeypatch
+):
+    node = real_simulator_node
+    uuid = "color_camera_1"
+    images, infos = [], []
+    monkeypatch.setattr(
+        node.sensor_publishers[uuid], "publish", lambda m: images.append(m) or True
+    )
+    monkeypatch.setattr(
+        node.camera_info_publishers[uuid], "publish", lambda m: infos.append(m) or True
+    )
+    for _ in range(2 * node.sensor_manager.sensors[uuid].sampling_steps):
+        run(node.simulate_step())
+    assert len(images) == 2
+    image_stamps = [sensor_metadata_from_frame_id(m.frame_id)[1:] for m in images]
+    info_stamps = [(m.data["timestamp"], m.data["simsteps"]) for m in infos]
+    np.testing.assert_allclose(np.array(info_stamps), np.array(image_stamps))
+    expected = camera_info(camera_calibration(node.settings, uuid))
+    for message in infos:
+        assert {k: message.data[k] for k in expected} == expected
+
+
+def test_simulator_publishes_rangefinder_readings_as_rep_117_ranges(
+    real_simulator_node, monkeypatch
+):
+    node = real_simulator_node
+    uuid = "range_sensor_1"
+    sent, readings = [], []
+    monkeypatch.setattr(
+        node.sensor_publishers[uuid], "publish", lambda m: sent.append(m) or True
+    )
+    for _ in range(3 * node.sensor_manager.sensors[uuid].sampling_steps):
+        run(node.simulate_step())
+        if node.sampled_at.get(uuid, (0.0, -1))[1] == node.simsteps:
+            readings.append(float(node.measurements[uuid]))
+    info = range_info(RANGE)
+    assert len(sent) == 3
+    assert [m.data["range"] for m in sent] == [ros_range(r, info) for r in readings]
+    for message in sent:
+        assert {k: message.data[k] for k in info} == info
+    assert uuid not in node.camera_info_publishers, "a rangefinder has no CameraInfo"
 
 
 def test_controller_node_compute_control_after_real_state(real_controller_node):

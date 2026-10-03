@@ -1,239 +1,118 @@
-"""Visualize event-camera data from a Neurosim H5 log.
+"""Play a neurosim H5 recording as rgb | depth | events, live or into an mp4.
 
-The script loads an event group (x, y, t, p), bins events into fixed-duration
-frames (default: 20 ms), and renders polarity frames where positive events are
-red and negative events are blue.
+python scripts/visualize_h5_events.py outputs/flight.h5 [--out outputs/flight.mp4]
 """
 
-import sys
 import argparse
-from pathlib import Path
-from dataclasses import dataclass
+import itertools
+from collections.abc import Iterator
 
 import h5py
-import numpy as np
+import imageio.v2 as imageio
 import matplotlib.pyplot as plt
+import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_ms_to_idx import build_ms_to_idx
+from build_ms_to_idx import write_ms_to_idx
 
+INVALID_RGB = (255, 214, 0)
 
-@dataclass
-class EventGroup:
-    name: str
-    width: int
-    height: int
+Frames = Iterator[tuple[int, np.ndarray]]  # (window start ms, panels side by side)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Visualize H5 event data as polarity frames."
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("h5_path", help="Path to Neurosim H5 log file")
+    parser.add_argument("h5_path")
+    parser.add_argument("--sensor", default="event_camera_1")
+    parser.add_argument("--color", default="color_camera_1")
+    parser.add_argument("--depth", default="depth_camera_1")
+    parser.add_argument("--bin-ms", type=int, default=20)
     parser.add_argument(
-        "--sensor",
-        default="event_camera_1",
-        help="Event sensor group name (default: event_camera_1).",
+        "--speed", type=float, default=1.0, help="playback speed, 1 = sim time"
     )
-    parser.add_argument(
-        "--bin-ms",
-        type=int,
-        default=20,
-        help="Frame bin duration in milliseconds (default: 20).",
-    )
-    parser.add_argument(
-        "--chunk-events",
-        type=int,
-        default=2_000_000,
-        help="How many events to read per chunk (default: 2000000).",
-    )
-    parser.add_argument(
-        "--max-frames",
-        type=int,
-        default=300,
-        help="Maximum number of frames to display (default: 300). Use -1 for all.",
-    )
-    parser.add_argument(
-        "--playback-speed",
-        type=float,
-        default=1.0,
-        help="Playback speed multiplier for display timing (default: 1.0).",
-    )
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="Run without interactive display (useful for testing).",
-    )
-    parser.add_argument(
-        "--save-first-frame",
-        default=None,
-        help="Optional path to save the first rendered frame image.",
-    )
+    parser.add_argument("--out", help="mp4 to write instead of showing a window")
     return parser.parse_args()
 
 
-def add_events_to_frame(
-    frame: np.ndarray,
-    x: np.ndarray,
-    y: np.ndarray,
-    p: np.ndarray,
-) -> None:
-    if x.size == 0:
-        return
-
-    xv = x.astype(np.int64, copy=False)
-    yv = y.astype(np.int64, copy=False)
-    pv = p.astype(np.int8, copy=False)
-    pos_mask = pv > 0
-    neg_mask = ~pos_mask
-
-    # Binary polarity frame: red for positive events, blue for negative events.
-    if np.any(pos_mask):
-        frame[yv[pos_mask], xv[pos_mask], 0] = 255
-    if np.any(neg_mask):
-        frame[yv[neg_mask], xv[neg_mask], 2] = 255
-
-
-def ensure_ms_to_idx(h5_path: str, sensor: str, chunk_events: int) -> None:
-    """Build the ms_to_idx lookup for the sensor group if it is missing."""
-    with h5py.File(h5_path, "a") as f:
-        if sensor not in f:
-            raise RuntimeError(f"Sensor group '{sensor}' not found in H5 file.")
-
-        grp = f[sensor]
-        if not isinstance(grp, h5py.Group):
-            raise RuntimeError(f"'{sensor}' exists but is not an HDF5 group.")
-        if not {"x", "y", "t", "p"}.issubset(set(grp.keys())):
-            raise RuntimeError(
-                f"Group '{sensor}' does not contain expected datasets x, y, t, p."
-            )
-        if "ms_to_idx" in grp:
+def ensure_ms_to_idx(h5_path: str, sensor: str) -> None:
+    with h5py.File(h5_path, "r") as f:
+        if "ms_to_idx" in f[sensor]:
             return
+    with h5py.File(h5_path, "a") as f:
+        write_ms_to_idx(f[sensor])
 
-        print(f"ms_to_idx not found in '{sensor}'. Building it now...")
-        ms_to_idx = build_ms_to_idx(grp["t"], chunk_events)
-        grp.create_dataset(
-            "ms_to_idx",
-            data=ms_to_idx,
-            dtype=np.int64,
-            compression="lzf",
-            chunks=(min(1_000_000, ms_to_idx.shape[0]),),
-        )
-        print(f"Wrote {sensor}/ms_to_idx with length {ms_to_idx.shape[0]}")
+
+def event_rgb(
+    x: np.ndarray, y: np.ndarray, p: np.ndarray, width: int, height: int
+) -> np.ndarray:
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    pos = p > 0
+    frame[y[pos], x[pos], 0] = 255
+    frame[y[~pos], x[~pos], 2] = 255
+    return frame
+
+
+def depth_rgb(depth: np.ndarray) -> np.ndarray:
+    valid = depth > 0
+    lo, hi = np.percentile(depth[valid], [1, 99]) if valid.any() else (0.0, 1.0)
+    grey = (np.clip((depth - lo) / max(hi - lo, 1e-3), 0, 1) * 255).astype(np.uint8)
+    rgb = np.repeat(grey[..., None], 3, axis=2)
+    rgb[~valid] = INVALID_RGB
+    return rgb
+
+
+def render(f: h5py.File, sensor: str, color: str, depth: str, bin_ms: int) -> Frames:
+    events = f[sensor]
+    x, y, p = events["x"], events["y"], events["p"]
+    width, height = events.attrs["width"], events.attrs["height"]
+    bounds = np.append(events["ms_to_idx"][:], len(x))
+    cameras = [
+        (f[name]["data"], f[name]["sim_time"][:], draw)
+        for name, draw in ((color, np.asarray), (depth, depth_rgb))
+        if name in f
+    ]
+    for ms in range(0, len(bounds) - 1, bin_ms):
+        i0, i1 = bounds[ms], bounds[min(ms + bin_ms, len(bounds) - 1)]
+        mid = (ms + bin_ms / 2) / 1000
+        panels = [
+            draw(data[np.abs(times - mid).argmin()]) for data, times, draw in cameras
+        ]
+        panels.append(event_rgb(x[i0:i1], y[i0:i1], p[i0:i1], width, height))
+        yield ms, np.concatenate(panels, axis=1)
+
+
+def show(frames: Frames, pause: float) -> None:
+    ms, frame = next(frames)
+    height, width = frame.shape[:2]
+    fig, ax = plt.subplots(figsize=(width / 120, height / 120), layout="tight")
+    ax.axis("off")
+    image = ax.imshow(frame, interpolation="nearest")
+    for ms, frame in itertools.chain([(ms, frame)], frames):
+        if not plt.fignum_exists(fig.number):
+            return
+        image.set_data(frame)
+        ax.set_title(f"{ms} ms")
+        plt.pause(pause)
+    plt.show()
+
+
+def write_video(frames: Frames, out: str, fps: float) -> None:
+    with imageio.get_writer(out, fps=fps, macro_block_size=1) as writer:
+        for _, frame in frames:
+            writer.append_data(frame)
 
 
 def main() -> None:
     args = parse_args()
-
-    if args.bin_ms <= 0:
-        raise ValueError("--bin-ms must be > 0")
-    if args.chunk_events <= 0:
-        raise ValueError("--chunk-events must be > 0")
-    if args.playback_speed <= 0:
-        raise ValueError("--playback-speed must be > 0")
-
-    ensure_ms_to_idx(args.h5_path, args.sensor, args.chunk_events)
-
+    ensure_ms_to_idx(args.h5_path, args.sensor)
     with h5py.File(args.h5_path, "r") as f:
-        if args.sensor not in f:
-            raise RuntimeError(f"Sensor group '{args.sensor}' not found in H5 file.")
-
-        grp = f[args.sensor]
-        if not isinstance(grp, h5py.Group):
-            raise RuntimeError(f"'{args.sensor}' exists but is not an HDF5 group.")
-        if not {"x", "y", "t", "p"}.issubset(set(grp.keys())):
-            raise RuntimeError(
-                f"Group '{args.sensor}' does not contain expected datasets x, y, t, p."
-            )
-
-        group_info = EventGroup(
-            name=args.sensor,
-            width=int(grp.attrs.get("width", int(np.max(grp["x"]) + 1))),
-            height=int(grp.attrs.get("height", int(np.max(grp["y"]) + 1))),
-        )
-        x_ds = grp["x"]
-        y_ds = grp["y"]
-        p_ds = grp["p"]
-        ms_to_idx_ds = grp["ms_to_idx"]
-
-        bin_width_ms = args.bin_ms
-
-        print(f"Using sensor: {group_info.name}")
-        print(f"Resolution: {group_info.width}x{group_info.height}")
-        print(f"Bin size: {args.bin_ms:.3f} ms")
-        print(f"Total events: {x_ds.shape[0]}")
-        print(f"ms_to_idx length: {ms_to_idx_ds.shape[0]}")
-
-        if not args.headless:
-            plt.ion()
-            fig, ax = plt.subplots(figsize=(8, 6))
-            image_artist = ax.imshow(
-                np.zeros((group_info.height, group_info.width, 3), dtype=np.uint8),
-                interpolation="nearest",
-            )
-            ax.set_title("Event polarity frame")
-            ax.set_xlabel("x")
-            ax.set_ylabel("y")
-            plt.tight_layout()
-
-        frame = np.zeros((group_info.height, group_info.width, 3), dtype=np.uint8)
-        total_events = x_ds.shape[0]
-        frame_idx = 0
-        frame_start_ms = 0
-        saved_first = False
-
-        def ms_lookup(q_ms: int) -> int:
-            if q_ms < 0:
-                return 0
-            if q_ms >= ms_to_idx_ds.shape[0]:
-                return total_events
-            return int(ms_to_idx_ds[q_ms])
-
-        while True:
-            start_idx = ms_lookup(frame_start_ms)
-            end_idx = ms_lookup(frame_start_ms + bin_width_ms)
-            if start_idx >= total_events and end_idx >= total_events:
-                break
-
-            if end_idx > start_idx:
-                add_events_to_frame(
-                    frame,
-                    np.asarray(x_ds[start_idx:end_idx]),
-                    np.asarray(y_ds[start_idx:end_idx]),
-                    np.asarray(p_ds[start_idx:end_idx]),
-                )
-
-            rgb = frame
-            if args.save_first_frame and not saved_first:
-                plt.imsave(args.save_first_frame, rgb)
-                saved_first = True
-
-            if not args.headless:
-                image_artist.set_data(rgb)
-                ax.set_title(
-                    f"{group_info.name} | frame={frame_idx} | "
-                    f"t=[{frame_start_ms}, {frame_start_ms + bin_width_ms}) ms"
-                )
-                fig.canvas.draw_idle()
-                plt.pause((args.bin_ms / 1000.0) / args.playback_speed)
-
-            frame_idx += 1
-            if args.max_frames >= 0 and frame_idx >= args.max_frames:
-                print(f"Reached max frames: {args.max_frames}")
-                if not args.headless:
-                    plt.ioff()
-                    plt.show()
-                return
-
-            frame.fill(0)
-            frame_start_ms += bin_width_ms
-            if frame_idx > 0 and frame_idx % 50 == 0:
-                print(f"Rendered {frame_idx} frames...")
-
-        print(f"Completed. Total rendered frames: {frame_idx}")
-        if not args.headless:
-            plt.ioff()
-            plt.show()
+        frames = render(f, args.sensor, args.color, args.depth, args.bin_ms)
+        if args.out:
+            write_video(frames, args.out, fps=args.speed * 1000 / args.bin_ms)
+            print(f"wrote {args.out}")
+        else:
+            show(frames, pause=args.bin_ms / 1000 / args.speed)
 
 
 if __name__ == "__main__":
