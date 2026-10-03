@@ -192,6 +192,13 @@ class SynchronousSimulator:
             def executor():
                 return render_depth(uuid)
 
+        elif sensor_type == "range":
+            uuid = kwargs["uuid"]
+            render_range = kwargs["backend"].render_range
+
+            def executor():
+                return render_range(uuid)
+
         elif sensor_type == "imu":
             sensor = kwargs["sensor"]
             state_provider = kwargs["state_provider"]
