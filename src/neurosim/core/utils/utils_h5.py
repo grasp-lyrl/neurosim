@@ -42,6 +42,7 @@ class H5Logger:
         "edge": 50,
         "grayscale": 50,
         "imu": 100,
+        "range": 100,
         "state": 100,
     }
 
