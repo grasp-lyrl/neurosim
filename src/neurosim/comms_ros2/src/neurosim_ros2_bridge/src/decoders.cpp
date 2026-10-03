@@ -392,7 +392,7 @@ std::unique_ptr<sensor_msgs::msg::Image> decode_depth_image(const Inbound & in)
   return out;
 }
 
-// ---- CameraInfo / Clock ---------------------------------------------------
+// ---- CameraInfo / Range / Clock -------------------------------------------
 
 std::unique_ptr<sensor_msgs::msg::CameraInfo> decode_camera_info(const Inbound & in)
 {
@@ -409,6 +409,22 @@ std::unique_ptr<sensor_msgs::msg::CameraInfo> decode_camera_info(const Inbound &
   read_doubles(map_require(data, "k"), out->k);
   read_doubles(map_require(data, "r"), out->r);
   read_doubles(map_require(data, "p"), out->p);
+  return out;
+}
+
+std::unique_ptr<sensor_msgs::msg::Range> decode_range(const Inbound & in)
+{
+  if (in.metadata.field_count() != 1) {
+    throw WireDecodeError("range: expected 1 metadata field");
+  }
+  const auto & data = in.metadata.field(0);
+  auto out = std::make_unique<sensor_msgs::msg::Range>();
+  stamp_header(out->header, as_double(map_require(data, "timestamp")), in.frame_id);
+  out->radiation_type = sensor_msgs::msg::Range::INFRARED;
+  out->field_of_view = static_cast<float>(as_double(map_require(data, "field_of_view")));
+  out->min_range = static_cast<float>(as_double(map_require(data, "min_range")));
+  out->max_range = static_cast<float>(as_double(map_require(data, "max_range")));
+  out->range = static_cast<float>(as_double(map_require(data, "range")));
   return out;
 }
 

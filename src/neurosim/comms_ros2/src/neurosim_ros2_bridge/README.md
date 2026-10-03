@@ -55,6 +55,7 @@ For a generic Cortex<->ROS 2 bridge with a pluggable adapter system, see
 | cortex → ROS 2 | `events/<uuid>` (MultiArrayMessage) | `/neurosim/camera/events/<uuid>` (`neurosim_ros2_bridge/msg/Events`) |
 | cortex → ROS 2 | `events/<uuid>` (MultiArrayMessage) | `/neurosim/camera/events/image` (`sensor_msgs/msg/Image`, `rgb8`, ON blue, OFF red) |
 | cortex → ROS 2 | `camera_info/<uuid>` (DictMessage) | `/neurosim/camera/<color\|depth\|events>/camera_info` (`sensor_msgs/msg/CameraInfo`, `plumb_bob`) |
+| cortex → ROS 2 | `range/<uuid>` (DictMessage) | `/neurosim/range/<uuid>` (`sensor_msgs/msg/Range`, `INFRARED`) |
 | ROS 2 → cortex | `/neurosim/control` (`std_msgs/Float64MultiArray`) | `control` (DictMessage) |
 
 Color/depth become `sensor_msgs/Image` directly so rviz2's Image display
@@ -67,8 +68,11 @@ sample was taken at, counted from the simulator's start, on the same clock as
 `Events.t` (microseconds), so samples of one simulation step share one stamp.
 An events packet is stamped with its last render. The simulator publishes each
 camera's CameraInfo with every image or events packet, under the same stamp, from
-`neurosim.core.coord_trans.calibration.camera_info`. rviz2 runs on `/clock`
-(`use_sim_time`).
+`neurosim.core.coord_trans.calibration.camera_info`. A rangefinder (sensor type
+`range`: one beam, rendered as a 1x1 depth camera at its `position` and `orientation`)
+reads the distance to the first surface along its beam, so a tilted drone's downward
+beam reads slant range; out of `[min_range, max_range]` it reads REP 117's `-inf`/`+inf`
+(`calibration.ros_range`). rviz2 runs on `/clock` (`use_sim_time`).
 
 ## Build
 
@@ -118,9 +122,9 @@ ros2_to_cortex:
 ```
 
 Valid `payload` values: `state`, `odometry`, `imu`, `sensor_imu`, `events`,
-`events_image`, `color_image`, `depth_image`, `control`. Anything else fails
-fast at load time. `odometry` also needs `child_frame_id`; `events_image`
-needs the sensor `width` and `height`.
+`events_image`, `color_image`, `depth_image`, `camera_info`, `range`, `clock`,
+`control`. Anything else fails fast at load time. `odometry` also needs
+`child_frame_id`; `events_image` needs the sensor `width` and `height`.
 
 A working full-coverage example for the `apartment_1` simulation ships at
 [`config/apartment_1.yaml`](config/apartment_1.yaml).
@@ -190,9 +194,9 @@ closes the bag; `ros2 service call /stop_recording std_srvs/srv/Trigger` closes 
 without stopping the bridge.
 
 Beside the MCAP, `python -m neurosim.core.coord_trans.calibration` writes the calibration of
-every camera and IMU the bridge config publishes, from the simulator settings
-(`settings:=`, default `configs/apartment_1-settings.yaml`; pass the file the
-simulator runs with):
+every camera, IMU and rangefinder the bridge config publishes and the simulator has, from the
+simulator settings (`settings:=`, default `configs/apartment_1-settings.yaml`; pass the file
+the simulator runs with):
 
 - `<uuid>.xml`: OpenCV `FileStorage` intrinsics (`camera_matrix`,
   `distortion_coefficients`, `image_width`, `image_height`), pixel centres at
@@ -201,6 +205,8 @@ simulator runs with):
   (IMU to OpenCV camera coordinates), `T_cn_cnm1`, `rostopic` of each camera.
 - `<imu uuid>.yaml`: Kalibr's imu.yaml (`rostopic`, `update_rate`, noise densities
   and random walks); all noise is zero, as the simulated IMU has none.
+- `<rangefinder uuid>.yaml`: `rostopic`, `field_of_view` (rad), `min_range`, `max_range`
+  and `T_range_imu` (IMU to the beam frame, the beam along its z).
 
 Humble's recorder stamps bag time with the wall clock, whatever `use_sim_time`
 says, so a live bag's bag time differs from its header stamps. Bags converted

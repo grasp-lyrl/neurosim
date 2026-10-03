@@ -271,6 +271,17 @@ void NeurosimRos2Bridge::wire_inbound(const Entry & e)
           };
         break;
       }
+    case Payload::Range: {
+        auto pub = create_publisher<sensor_msgs::msg::Range>(e.ros2_topic, make_qos(e));
+        const auto frame = e.frame_id;
+        dispatch = [pub, frame](
+          const cortex_wire::MessageHeader & h,
+          const cortex_wire::DecodedMetadata & m,
+          const std::vector<cortex_wire::ZmqFramePtr> & o) {
+            pub->publish(decoders::decode_range({h, m, o, frame}));
+          };
+        break;
+      }
     case Payload::Clock: {
         auto pub = create_publisher<rosgraph_msgs::msg::Clock>(e.ros2_topic, make_qos(e));
         const auto frame = e.frame_id;

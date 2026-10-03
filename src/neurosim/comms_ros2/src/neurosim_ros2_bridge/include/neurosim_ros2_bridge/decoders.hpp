@@ -27,6 +27,7 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/range.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 
 #include "neurosim_ros2_bridge/msg/events.hpp"
@@ -88,6 +89,10 @@ std::unique_ptr<sensor_msgs::msg::Image> decode_depth_image(const Inbound & in);
 // Cortex DictMessage of sensor_msgs/CameraInfo's fields, computed by neurosim's
 // calibration from the simulator settings -> sensor_msgs/CameraInfo.
 std::unique_ptr<sensor_msgs::msg::CameraInfo> decode_camera_info(const Inbound & in);
+
+// Cortex DictMessage of sensor_msgs/Range's fields, the reading already in REP 117's
+// +-inf convention (neurosim.core.coord_trans.calibration.ros_range) -> sensor_msgs/Range.
+std::unique_ptr<sensor_msgs::msg::Range> decode_range(const Inbound & in);
 
 // The state's simulation time -> rosgraph_msgs/Clock, for use_sim_time nodes.
 std::unique_ptr<rosgraph_msgs::msg::Clock> decode_clock(const Inbound & in);

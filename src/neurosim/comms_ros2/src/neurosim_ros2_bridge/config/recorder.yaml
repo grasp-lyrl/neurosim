@@ -15,4 +15,5 @@ recorder:
       - /neurosim/camera/depth/camera_info
       - /neurosim/camera/events/event_camera_1
       - /neurosim/camera/events/camera_info
+      - /neurosim/range/range_sensor_1
       - /neurosim/control

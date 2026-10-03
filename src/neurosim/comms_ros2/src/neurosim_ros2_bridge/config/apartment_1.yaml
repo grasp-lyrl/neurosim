@@ -97,6 +97,12 @@ cortex_to_ros2:
     width: 640
     height: 480
 
+  - name: range_sensor_1
+    cortex_topic: range/range_sensor_1
+    ros2_topic: /neurosim/range/range_sensor_1
+    payload: range
+    frame_id: range_sensor_1
+
 # ros2_to_cortex:
 
 #   - name: control

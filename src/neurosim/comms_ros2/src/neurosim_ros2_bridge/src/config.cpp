@@ -16,6 +16,7 @@ const std::unordered_map<std::string, Payload> kPayloadFromString = {
   {"color_image", Payload::ColorImage},
   {"depth_image", Payload::DepthImage},
   {"camera_info", Payload::CameraInfo},
+  {"range", Payload::Range},
   {"clock", Payload::Clock},
   {"control", Payload::Control},
 };
@@ -32,6 +33,7 @@ const char * payload_default_cortex_type(Payload p)
     case Payload::ColorImage:
     case Payload::DepthImage: return "ArrayMessage";
     case Payload::CameraInfo:
+    case Payload::Range:
     case Payload::Clock:
     case Payload::Control: return "DictMessage";
   }

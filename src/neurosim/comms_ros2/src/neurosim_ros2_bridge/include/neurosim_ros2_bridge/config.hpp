@@ -25,6 +25,7 @@ enum class Payload
   ColorImage,   // ArrayMessage uint8 HxWx3                 -> sensor_msgs/Image (rgb8)
   DepthImage,   // ArrayMessage float32 HxW                 -> sensor_msgs/Image (32FC1)
   CameraInfo,   // DictMessage{width,height,distortion_model,d,k,r,p,timestamp} -> sensor_msgs/CameraInfo
+  Range,        // DictMessage{range,field_of_view,min_range,max_range,timestamp} -> sensor_msgs/Range
   Clock,        // DictMessage{...,timestamp} (the state)   -> rosgraph_msgs/Clock
   Control,      // ROS 2 std_msgs/Float64MultiArray         -> cortex DictMessage{cmd_motor_speeds,timestamp}
 };
@@ -64,7 +65,7 @@ BridgeConfig load_config(const std::string & path);
 
 // Convert a payload tag <-> the YAML string the user writes ("state",
 // "odometry", "imu", "sensor_imu", "events", "events_image", "color_image",
-// "depth_image", "camera_info", "clock", "control").
+// "depth_image", "camera_info", "range", "clock", "control").
 std::optional<Payload> parse_payload(const std::string & s);
 std::string payload_to_string(Payload p);
 
