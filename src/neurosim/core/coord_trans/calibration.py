@@ -1,4 +1,5 @@
-"""Camera and IMU calibration of a neurosim settings file: OpenCV XML, Kalibr YAML, CameraInfo, H5.
+"""Camera, IMU and rangefinder calibration of a neurosim settings file: OpenCV XML, Kalibr YAML,
+CameraInfo, Range, H5.
 
     python -m neurosim.core.coord_trans.calibration --settings configs/apartment_1-settings.yaml \
         --config src/neurosim/comms_ros2/src/neurosim_ros2_bridge/config/apartment_1.yaml \
@@ -118,13 +119,44 @@ def kalibr_imu(settings: dict, uuid: str) -> dict:
     }
 
 
-def bridged_topics(config: dict, payloads: tuple[str, ...]) -> dict[str, str]:
-    """ROS topic of each sensor a bridge config publishes with one of these payloads."""
+def range_info(cfg: dict) -> dict:
+    """sensor_msgs/Range's fixed fields of a rangefinder sensor config."""
     return {
+        "field_of_view": float(np.radians(cfg["hfov"])),
+        "min_range": float(cfg["min_range"]),
+        "max_range": float(cfg["max_range"]),
+    }
+
+
+def range_calibration(settings: dict, uuid: str) -> dict:
+    """A rangefinder's Range fields and T_range_imu, IMU to a frame with the beam along z."""
+    cfg = settings["visual_backend"]["sensors"][uuid]
+    return {**range_info(cfg), "T_range_imu": camera_from_imu(settings, uuid).tolist()}
+
+
+def ros_range(distance: float, info: dict) -> float:
+    """REP 117 reading of a rendered distance: +inf for no hit (0) or past max_range, -inf below min_range."""
+    if distance == 0.0 or distance > info["max_range"]:
+        return float("inf")
+    if distance < info["min_range"]:
+        return float("-inf")
+    return float(distance)
+
+
+def bridged_topics(
+    config: dict, settings: dict, payloads: tuple[str, ...]
+) -> dict[str, str]:
+    """ROS topic of each simulated sensor a bridge config publishes with one of these payloads."""
+    sensors = {
+        **settings["visual_backend"]["sensors"],
+        **settings["simulator"].get("additional_sensors", {}),
+    }
+    topics = {
         entry["cortex_topic"].rpartition("/")[2]: entry["ros2_topic"]
         for entry in config["cortex_to_ros2"]
         if entry["payload"] in payloads
     }
+    return {uuid: topic for uuid, topic in topics.items() if uuid in sensors}
 
 
 def write_opencv_intrinsics(path: Path, camera: CameraCalibration) -> None:
@@ -173,28 +205,37 @@ def write_kalibr_camchain(
 
 
 def write_calibration(folder: Path, settings: dict, config: dict) -> list[str]:
-    """Each bridged camera's OpenCV XML, their Kalibr camchain, each bridged IMU's Kalibr yaml."""
-    topics = bridged_topics(config, CAMERA_PAYLOADS)
+    """Each bridged camera's OpenCV XML, their Kalibr camchain, a yaml per bridged IMU and rangefinder."""
+    topics = bridged_topics(config, settings, CAMERA_PAYLOADS)
     cameras = {uuid: camera_calibration(settings, uuid) for uuid in topics}
     for uuid, camera in cameras.items():
         write_opencv_intrinsics(folder / f"{uuid}.xml", camera)
     write_kalibr_camchain(folder / "camchain-imucam.yaml", cameras, topics)
-    imus = bridged_topics(config, ("sensor_imu",))
+    imus = bridged_topics(config, settings, ("sensor_imu",))
     for uuid, topic in imus.items():
         imu = {"rostopic": topic, **kalibr_imu(settings, uuid)}
         (folder / f"{uuid}.yaml").write_text(yaml.safe_dump(imu, sort_keys=False))
-    return [*cameras, *imus]
+    ranges = bridged_topics(config, settings, ("range",))
+    for uuid, topic in ranges.items():
+        rangefinder = {"rostopic": topic, **range_calibration(settings, uuid)}
+        (folder / f"{uuid}.yaml").write_text(
+            yaml.safe_dump(rangefinder, sort_keys=False, default_flow_style=None)
+        )
+    return [*cameras, *imus, *ranges]
 
 
 def write_h5_calibration(file: h5py.File, settings: dict) -> None:
-    """Kalibr fields of every camera and IMU under /<uuid>/calib, T_habitat_world in /state."""
+    """Calibration of every camera, IMU and rangefinder under /<uuid>/calib, T_habitat_world in /state."""
     for uuid, cfg in settings["visual_backend"]["sensors"].items():
-        if "hfov" in cfg:
-            calib = file.require_group(f"{uuid}/calib")
-            for name, value in kalibr_camera(
-                camera_calibration(settings, uuid)
-            ).items():
-                calib[name] = value
+        if cfg["type"] == "range":
+            fields = range_calibration(settings, uuid)
+        elif "hfov" in cfg:
+            fields = kalibr_camera(camera_calibration(settings, uuid))
+        else:
+            continue
+        calib = file.require_group(f"{uuid}/calib")
+        for name, value in fields.items():
+            calib[name] = value
     for uuid, cfg in settings["simulator"].get("additional_sensors", {}).items():
         if cfg["type"] == "imu":
             calib = file.require_group(f"{uuid}/calib")
@@ -223,7 +264,7 @@ def main() -> None:
         "--config",
         type=Path,
         required=True,
-        help="bridge config: which cameras and IMUs reach ROS, on which topics",
+        help="bridge config: which cameras, IMUs and rangefinders reach ROS, on which topics",
     )
     parser.add_argument(
         "--bag",

@@ -254,6 +254,10 @@ domain_randomization:    # optional; same schema as the loader's `randomization`
 - Every IMU group has a `calib` group with Kalibr's imu.yaml fields (`update_rate`, noise
   densities and random walks, zero for the noise-free simulated IMU); the root attribute
   `settings` is the simulator settings YAML the episode ran with.
+- Every rangefinder group (sensor type `range`) has `data` (N,) float32 in meters along
+  the beam, 0 where nothing lies within `max_range`, and a `calib` group with
+  `field_of_view` (rad), `min_range`, `max_range` and `T_range_imu` (IMU to the beam
+  frame, the beam along its z).
 - `python scripts/compress_h5.py <h5>` compresses a finished file in place (LZF + shuffle,
   about 20% of raw); `python scripts/h5_to_mcap.py <h5>` turns it into a ROS 2 bag, see
   the neurosim_ros2_bridge README.
