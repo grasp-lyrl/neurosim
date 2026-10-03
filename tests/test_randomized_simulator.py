@@ -492,6 +492,31 @@ class TestRandomizedSimulatorMocked:
         assert s1 == s3  # decoupled from scene cadence + reproducible
         assert len(set(s1)) == 4  # a fresh seed every episode
 
+    @patch(
+        "neurosim.sims.synchronous_simulator.randomized_simulator.SynchronousSimulator"
+    )
+    def test_event_camera_seeded_per_episode(self, mock_cls):
+        inst = MagicMock()
+        inst.settings = {"trajectory": {"model": "x"}}
+        mock_cls.return_value = inst
+        base = _minimal_base_settings()
+        base["visual_backend"]["sensors"]["event_camera_2"] = {"type": "event"}
+        r = RandomizedSimulator(
+            base,
+            randomization={"scenes": [{"name": "a", "path": "a.glb"}]},
+            visualizer_disabled=True,
+        )
+        seeds = []
+        for _ in range(3):
+            r.randomize(np.random.default_rng(0))
+            sensors = inst.reconfigure.call_args[0][0]["visual_backend"]["sensors"]
+            traj_seed = inst.renew_trajectory.call_args[0][0]["seed"]
+            assert sensors["event_camera_1"]["seed"] == traj_seed
+            assert sensors["event_camera_2"]["seed"] == traj_seed + 1
+            seeds.append(traj_seed)
+        assert len(set(seeds)) == 3
+        r.close()
+
 
 class TestTrajectoryAndCadenceConfig:
     def test_resample_every(self):

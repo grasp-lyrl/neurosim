@@ -75,6 +75,13 @@ def _apply_randomization_layer(
             target[key] = _sample_value(spec, rng)
 
 
+def _seed_event_cameras(settings: dict[str, Any], seed: int) -> None:
+    """Give each event camera its own noise stream, fresh every episode."""
+    sensors = settings["visual_backend"].get("sensors", {}).values()
+    for offset, sensor in enumerate(s for s in sensors if s["type"] == "event"):
+        sensor["seed"] = seed + offset
+
+
 @dataclass
 class DomainRandomizationConfig:
     """Parsed representation of a ``domain_randomization`` YAML section.
@@ -322,25 +329,25 @@ class RandomizedSimulator:
         episode = self._episode
         self._episode += 1
 
+        # Deterministic per-episode trajectory: seed from (base_seed, episode)
+        # so it is reproducible and decoupled from scene/sensor sampling on
+        # the shared `rng`.
+        traj_rng = np.random.default_rng(np.random.SeedSequence([self._seed, episode]))
+        overrides = (
+            self._rand_cfg.sample_trajectory(traj_rng)
+            if self._rand_cfg is not None
+            else {"seed": int(traj_rng.integers(0, 2**31 - 1))}
+        )
+
         rebuilt = False
         if self._rand_cfg is not None and episode % self._rand_cfg.resample_every == 0:
             settings = self._rand_cfg.sample(self._base_settings, rng)
+            _seed_event_cameras(settings, overrides["seed"])
             self.sim.reconfigure(settings)
             self._last_sampled_settings = settings
             rebuilt = True
 
         if "trajectory" in self.sim.settings:
-            # Deterministic per-episode trajectory: seed from (base_seed, episode)
-            # so it is reproducible and decoupled from scene/sensor sampling on
-            # the shared `rng`.
-            traj_rng = np.random.default_rng(
-                np.random.SeedSequence([self._seed, episode])
-            )
-            overrides = (
-                self._rand_cfg.sample_trajectory(traj_rng)
-                if self._rand_cfg is not None
-                else {"seed": int(traj_rng.integers(0, 2**31 - 1))}
-            )
             self.sim.renew_trajectory(overrides)
 
         return rebuilt
