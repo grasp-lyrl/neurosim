@@ -169,6 +169,7 @@ class VisualizerNode(Node):
             "color": self.receive_array,
             "semantic": self.receive_array,
             "depth": self.receive_array,
+            "range": self.receive_range,
             "navmesh": self.receive_array,
             "optical_flow": self.receive_array,
             "corner": self.receive_corner,
@@ -233,6 +234,14 @@ class VisualizerNode(Node):
                 {"accel": msg.data["accel"], "gyro": msg.data["gyro"]},
                 timestamp,
             )
+
+    async def receive_range(
+        self, topic: str, uuid: str, msg: DictMessage, _header
+    ) -> None:
+        """Receive and plot a rangefinder reading, REP 117's +-inf out of span."""
+        if msg.data is not None:
+            self._stats["received_" + topic] += 1
+            self._log_measurement(uuid, msg.data["range"], msg.data["timestamp"])
 
     async def receive_array(
         self, topic: str, uuid: str, msg: ArrayMessage, _header

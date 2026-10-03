@@ -25,7 +25,12 @@ from neurosim.core.visual_backend import create_visual_backend
 from neurosim.core.dynamics import create_dynamics
 from neurosim.core.imu_sim import create_imu_sensor
 from neurosim.core.coord_trans import CoordinateTransform
-from neurosim.core.coord_trans.calibration import camera_calibration, camera_info
+from neurosim.core.coord_trans.calibration import (
+    camera_calibration,
+    camera_info,
+    range_info,
+    ros_range,
+)
 from neurosim.core.utils import SimulationConfig, SensorConfig, EventBuffer
 from neurosim.sims.synchronous_simulator import SynchronousSimulator
 from neurosim.sims.asynchronous_simulator.cortex_io import (
@@ -229,10 +234,16 @@ class SimulatorNode(Node):
                 queue_size=1000,
             )
 
+        self.range_infos = {
+            uuid: range_info(self.config.visual_sensors[uuid])
+            for uuid, sensor in self.sensor_manager.sensors.items()
+            if sensor.sensor_type == "range"
+        }
         self.camera_infos = {
             uuid: camera_info(camera_calibration(self.settings, uuid))
             for uuid in self.sensor_publishers
             if "hfov" in self.config.visual_sensors.get(uuid, {})
+            and uuid not in self.range_infos
         }
         self.camera_info_publishers = {
             uuid: self.create_publisher(
@@ -413,6 +424,16 @@ class SimulatorNode(Node):
                 )
             elif sensor_type == "corner":
                 message = DictMessage(data=self._corner_to_dict(uuid, measurement))
+            elif sensor_type == "range":
+                info = self.range_infos[uuid]
+                message = DictMessage(
+                    data={
+                        **info,
+                        "range": ros_range(float(measurement), info),
+                        "timestamp": sampled_time,
+                        "simsteps": sampled_step,
+                    }
+                )
             else:
                 message = ArrayMessage(
                     data=self._to_numpy(measurement),
