@@ -61,6 +61,10 @@ class VisualBackendProtocol(Protocol):
         """
         ...
 
+    def render_range(self, uuid: str) -> torch.Tensor:
+        """Distance along a rangefinder's beam to the first surface, 0 if none in range."""
+        ...
+
     def render_events(
         self, uuid: str, time: int, to_numpy: bool = False
     ) -> tuple[Any, ...] | None:

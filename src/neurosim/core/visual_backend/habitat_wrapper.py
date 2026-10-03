@@ -49,6 +49,7 @@ class HabitatWrapper(VisualBackendProtocol):
         "corner": "rgba",
         "edge": "rgba",
         "depth": "nearest",
+        "range": "nearest",
         "semantic": "nearest",
         "optical_flow": "nearest",
     }
@@ -260,6 +261,8 @@ class HabitatWrapper(VisualBackendProtocol):
             anti_aliasing: Number of MSAA samples for anti-aliasing (0 disables, 8 or 16 recommended).
         """
         sensor_cfg = self.settings["sensors"][uuid]
+        if sensor_cfg["type"] == "range":
+            sensor_cfg = {**sensor_cfg, "width": 1, "height": 1}
         lens = self._lenses[uuid] = create_lens(
             sensor_cfg,
             f"cuda:{int(self.settings.get('gpu_id', 0))}",
@@ -548,6 +551,16 @@ class HabitatWrapper(VisualBackendProtocol):
                     orientation=sensor_cfg["orientation"],
                     anti_aliasing=sensor_cfg.get("anti_aliasing", 0),
                 )
+            elif sensor_cfg["type"] == "range":
+                # one beam: a 1x1 depth render, whose only pixel lies on the optical axis
+                sensor_spec = self._create_camera_spec(
+                    uuid=sensor_name,
+                    sensor_type="depth",
+                    sensor_subtype="pinhole",
+                    far=sensor_cfg["max_range"],
+                    position=sensor_cfg["position"],
+                    orientation=sensor_cfg["orientation"],
+                )
             elif sensor_cfg["type"] == "optical_flow":
                 sensor_spec = self._create_flow_sensor(
                     sensor_name=sensor_name, sensor_cfg=sensor_cfg
@@ -715,6 +728,10 @@ class HabitatWrapper(VisualBackendProtocol):
             Depth image tensor.
         """
         return self._observe(uuid)
+
+    def render_range(self, uuid: str) -> torch.Tensor:
+        """Distance along the beam to the first surface, 0 if none within max_range."""
+        return self._observe(uuid).reshape(())
 
     def render_corners(self, uuid: str) -> FeatureDetectionResult:
         """Render corner/feature detections for the given sensor.
