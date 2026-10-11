@@ -30,6 +30,8 @@
 
 - [ ] Hardware-in-the-loop (HIL) support for real robot testing
 - [ ] 📚 Detailed documentation and tutorials
+- `10/01/26`: Full ROS2 and MCAP bagging support with all sensor extrinsics and intrinsics. 
+- `09/15/26`: Radtan Lens distortion support with Triton kernels, for event cameras too. Blazing fast!
 - `06/21/26`: Added [online dataloader](src/neurosim/online_data) with shared mem for Multi GPU simulation and learning. 
 - `04/16/26`: Added dynamic obstacles thrown at the agent. See [GIF](assets/neurosim_dynamic_obstacles.gif) for fun.
 - `03/30/26`: Reinforcement Learning (RL) support added.
