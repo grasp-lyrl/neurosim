@@ -440,21 +440,33 @@ std::unique_ptr<rosgraph_msgs::msg::Clock> decode_clock(const Inbound & in)
 cortex_wire::MetadataBuilder::Frames encode_control(
   const std_msgs::msg::Float64MultiArray & msg)
 {
-  // Cortex DictMessage: 1 field, a msgpack MAP. The simulator's
-  // receive_control expects {"cmd_motor_speeds": [...], ...}. We pack the
-  // motor speeds as an inline msgpack array (they're tiny — 4 floats), and a
-  // monotonic timestamp so the simulator's logging stays sensible.
+  // Cortex DictMessage {<command fields>, timestamp} for the simulator's receive_control. The
+  // layout's dim labels name the fields of the dynamics' control abstraction, a size-1 dim packed
+  // as a scalar (cmd_thrust 1 + cmd_q 4 for cmd_ctatt); with no layout the data is cmd_motor_speeds.
+  std::vector<std::pair<std::string, std::size_t>> fields;
+  for (const auto & dim : msg.layout.dim) {
+    fields.emplace_back(dim.label, dim.size);
+  }
+  if (fields.empty()) {
+    fields.emplace_back("cmd_motor_speeds", msg.data.size());
+  }
   cortex_wire::MetadataBuilder b(1);
 
   auto & p = b.packer();
-  const std::size_t map_size = 2;        // cmd_motor_speeds + timestamp
-  p.pack_map(static_cast<std::uint32_t>(map_size));
-
-  p.pack_str(static_cast<std::uint32_t>(std::string_view("cmd_motor_speeds").size()));
-  p.pack_str_body("cmd_motor_speeds", static_cast<std::uint32_t>(16));
-  p.pack_array(static_cast<std::uint32_t>(msg.data.size()));
-  for (const double v : msg.data) {
-    p.pack_double(v);
+  p.pack_map(static_cast<std::uint32_t>(fields.size() + 1));  // + timestamp
+  std::size_t offset = 0;
+  for (const auto & [label, size] : fields) {
+    p.pack_str(static_cast<std::uint32_t>(label.size()));
+    p.pack_str_body(label.data(), static_cast<std::uint32_t>(label.size()));
+    if (size == 1 && msg.layout.dim.size() > 0) {
+      p.pack_double(msg.data.at(offset));
+    } else {
+      p.pack_array(static_cast<std::uint32_t>(size));
+      for (std::size_t i = 0; i < size; ++i) {
+        p.pack_double(msg.data.at(offset + i));
+      }
+    }
+    offset += size;
   }
 
   const double now_s = static_cast<double>(

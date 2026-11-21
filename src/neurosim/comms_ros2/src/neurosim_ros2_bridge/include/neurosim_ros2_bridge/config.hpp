@@ -27,7 +27,7 @@ enum class Payload
   CameraInfo,   // DictMessage{width,height,distortion_model,d,k,r,p,timestamp} -> sensor_msgs/CameraInfo
   Range,        // DictMessage{range,field_of_view,min_range,max_range,timestamp} -> sensor_msgs/Range
   Clock,        // DictMessage{...,timestamp} (the state)   -> rosgraph_msgs/Clock
-  Control,      // ROS 2 std_msgs/Float64MultiArray         -> cortex DictMessage{cmd_motor_speeds,timestamp}
+  Control,      // ROS 2 std_msgs/Float64MultiArray         -> cortex DictMessage{cmd_motor_speeds or layout labels,timestamp}
 };
 
 // One entry in the YAML config. Direction is implied by which list the entry

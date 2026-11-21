@@ -99,7 +99,8 @@ std::unique_ptr<rosgraph_msgs::msg::Clock> decode_clock(const Inbound & in);
 
 // ---- ROS 2 -> Cortex --------------------------------------------------------
 
-// std_msgs/Float64MultiArray -> cortex DictMessage{cmd_motor_speeds, timestamp}.
+// std_msgs/Float64MultiArray -> cortex DictMessage{cmd_motor_speeds, timestamp}, or the fields
+// its layout labels name (cmd_thrust + cmd_q for RotorPy's cmd_ctatt).
 // Returns frames ready to hand to cortex_wire::Publisher::publish(). Currently
 // no OOB — control is small enough to inline as a msgpack array.
 cortex_wire::MetadataBuilder::Frames encode_control(

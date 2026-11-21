@@ -56,7 +56,7 @@ For a generic Cortex<->ROS 2 bridge with a pluggable adapter system, see
 | cortex → ROS 2 | `events/<uuid>` (MultiArrayMessage) | `/neurosim/camera/events/image` (`sensor_msgs/msg/Image`, `rgb8`, ON blue, OFF red) |
 | cortex → ROS 2 | `camera_info/<uuid>` (DictMessage) | `/neurosim/camera/<color\|depth\|events>/camera_info` (`sensor_msgs/msg/CameraInfo`, `plumb_bob`) |
 | cortex → ROS 2 | `range/<uuid>` (DictMessage) | `/neurosim/range/<uuid>` (`sensor_msgs/msg/Range`, `INFRARED`) |
-| ROS 2 → cortex | `/neurosim/control` (`std_msgs/Float64MultiArray`) | `control` (DictMessage) |
+| ROS 2 → cortex | `/neurosim/control` (`std_msgs/Float64MultiArray`) | `control` (DictMessage): `cmd_motor_speeds`, or the fields its layout's dim labels name (`cmd_thrust` 1 + `cmd_q` 4 for RotorPy's `cmd_ctatt`) |
 
 Color/depth become `sensor_msgs/Image` directly so rviz2's Image display
 renders them with no extra plumbing. State / IMU / Events use custom message
