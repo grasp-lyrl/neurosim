@@ -4,6 +4,7 @@ from .depth import (
     batch_cropper,
     get_resize_shapes,
     load_depth_weights,
+    predict_full_frame,
     warm_start,
 )
 from .f3 import F3, build_hash_encoder, load_f3_weights
@@ -19,6 +20,7 @@ __all__ = [
     "get_resize_shapes",
     "load_depth_weights",
     "load_f3_weights",
+    "predict_full_frame",
     "reset_state",
     "warm_start",
 ]

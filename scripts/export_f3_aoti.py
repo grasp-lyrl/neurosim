@@ -13,8 +13,11 @@ import torch
 import torch.nn as nn
 import yaml
 
-from applications.f3_depth_training.nets import F3, EventFFDepthAnythingV2
-from applications.f3_depth_training.train_depth_nonrec import predict_full_frame
+from applications.f3_depth_training.nets import (
+    F3,
+    EventFFDepthAnythingV2,
+    predict_full_frame,
+)
 
 
 class Field(nn.Module):
@@ -117,6 +120,9 @@ def main():
     # The autotuner benchmarks kernels on random values for every graph input, and the
     # scatter's indices only lie in range for a real tick, so it asserts device-side.
     torch._inductor.config.triton.autotune_at_compile_time = False
+    # Weights become constants, so autocast's fp32 -> bf16 weight casts are done once at
+    # compile time instead of on every call.
+    torch._inductor.config.freezing = True
     torch.set_float32_matmul_precision("high")
 
     device = torch.device(f"cuda:{args.gpu}")

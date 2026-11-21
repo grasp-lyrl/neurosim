@@ -236,3 +236,20 @@ class RecurrentEventFFDepthAnythingV2(EventFFDepthAnythingV2):
         field = field[0, :, cparams[0] : cparams[2], cparams[1] : cparams[3]]
         pred = self.decode(field.unsqueeze(0), get_resize_shapes(h, w, self.size, 14))
         return pred[0], field, state
+
+
+def predict_full_frame(model, ff_events, event_counts, height, width):
+    """Whole-frame prediction, aspect preserved — a batched ``model.infer_image``.
+
+    Training crops a random square, but every f3 eval path (``evaluate``,
+    ``dsec_benchmark``, its own validator) runs ``infer_image``, which resizes the
+    short edge to the DAv2 size and keeps aspect. ``infer_image`` handles one sample
+    at a time, so its steps are inlined here to keep validation batched.
+    """
+    field = model.field(ff_events, event_counts)  # (B, C, H, W)
+    fh, fw = get_resize_shapes(height, width, model.size, 14)
+    field = F.interpolate(field, (fh, fw), mode="bilinear", align_corners=False)
+    pred = model.dav2(field).unsqueeze(1)  # (B, 1, fh, fw)
+    return F.interpolate(
+        pred, (height, width), mode="bilinear", align_corners=True
+    ).squeeze(1)

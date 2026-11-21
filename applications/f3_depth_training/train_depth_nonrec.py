@@ -12,7 +12,6 @@ import datetime
 
 import cv2
 import torch
-import torch.nn.functional as F
 import wandb
 import yaml
 from matplotlib import colormaps
@@ -29,8 +28,8 @@ from .data import (
 from .nets import (
     EventFFDepthAnythingV2,
     batch_cropper,
-    get_resize_shapes,
     load_depth_weights,
+    predict_full_frame,
     warm_start,
 )
 from .utils.experiment import (
@@ -54,23 +53,6 @@ from .utils import (
     mean_scores,
     set_best_results,
 )
-
-
-def predict_full_frame(model, ff_events, event_counts, height, width):
-    """Whole-frame prediction, aspect preserved — a batched ``model.infer_image``.
-
-    Training crops a random square, but every f3 eval path (``evaluate``,
-    ``dsec_benchmark``, its own validator) runs ``infer_image``, which resizes the
-    short edge to the DAv2 size and keeps aspect. ``infer_image`` handles one sample
-    at a time, so its steps are inlined here to keep validation batched.
-    """
-    field = model.field(ff_events, event_counts)  # (B, C, H, W)
-    fh, fw = get_resize_shapes(height, width, model.size, 14)
-    field = F.interpolate(field, (fh, fw), mode="bilinear", align_corners=False)
-    pred = model.dav2(field).unsqueeze(1)  # (B, 1, fh, fw)
-    return F.interpolate(
-        pred, (height, width), mode="bilinear", align_corners=True
-    ).squeeze(1)
 
 
 def train_epoch(
