@@ -188,10 +188,7 @@ class SimulatorNode(Node):
     def _init_dynamics(self) -> None:
         """Initialize the dynamics model."""
         self.dynamics = create_dynamics(**self.settings["dynamics"])
-        self.control = {
-            # Initialize with hover command
-            "cmd_motor_speeds": self.dynamics.state["rotor_speeds"]
-        }
+        self.control = self.dynamics.default_control()
 
     def _init_additional_sensors(self) -> None:
         """Initialize additional sensors like IMU."""
@@ -368,10 +365,14 @@ class SimulatorNode(Node):
         }
 
     async def receive_control(self, msg: DictMessage, _header) -> None:
-        """Receive control commands from controller."""
-        data = msg.data
-        if data and "cmd_motor_speeds" in data:
-            self.control = {"cmd_motor_speeds": np.array(data["cmd_motor_speeds"])}
+        """Receive the command for the dynamics' control abstraction, e.g. rotor speeds."""
+        command = {
+            k: np.asarray(v)
+            for k, v in (msg.data or {}).items()
+            if k.startswith("cmd_")
+        }
+        if command:
+            self.control = command
             self._stats["received_controls"] += 1
 
     async def publish_state(self) -> None:

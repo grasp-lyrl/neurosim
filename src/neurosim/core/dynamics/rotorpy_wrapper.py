@@ -18,6 +18,19 @@ def get_vehicle_params(vehicle_name: str = "crazyflie") -> dict[str, Any]:
         from rotorpy.vehicles.hummingbird_params import quad_params
 
         return quad_params
+    elif vehicle_name == "px4_sihsim_quadx":
+        from rotorpy.vehicles.px4_sihsim_quadx_params import quad_params
+
+        # RotorPy ships no attitude gains for it, and its defaults (3000/360 on every axis) ask
+        # ~180x the yaw torque the vehicle has; these fit its authority, with yaw softer as in
+        # PX4 (roll/pitch: no saturation on 10 deg steps; yaw: 0.8 rad/s ramps). PX4's
+        # allocation (MultirotorEuler) gives up yaw, not thrust, when the rotors saturate.
+        return {
+            **quad_params,
+            "kp_att": np.array([150.0, 150.0, 30.0]),
+            "kd_att": np.array([25.0, 25.0, 12.0]),
+            "px4_allocation": True,
+        }
     else:
         raise ValueError(f"Unknown vehicle name: {vehicle_name}")
 
@@ -26,12 +39,14 @@ def get_multirotor_model(
     dynamics_type: DynamicsType,
     vehicle_params: dict[str, Any],
     control_abstraction: str = "cmd_motor_speeds",
+    enable_ground: bool = False,
 ) -> Multirotor:
     if dynamics_type == DynamicsType.ROTORPY_MULTIROTOR:
         quadsim = Multirotor(
             vehicle_params,
             control_abstraction=control_abstraction,
             aero=False,
+            enable_ground=enable_ground,
             integrator_kwargs={"method": "RK45"},
         )
     elif dynamics_type == DynamicsType.ROTORPY_MULTIROTOR_EULER:
@@ -41,6 +56,7 @@ def get_multirotor_model(
             vehicle_params,
             control_abstraction=control_abstraction,
             aero=False,
+            enable_ground=enable_ground,
         )
     else:
         raise ValueError(f"Unsupported multirotor model: {dynamics_type}")
@@ -55,20 +71,32 @@ class RotorpyDynamics(DynamicsProtocol):
         dynamics_type: DynamicsType = DynamicsType.ROTORPY_MULTIROTOR,
         control_abstraction: str = "cmd_motor_speeds",
         initial_state: dict[str, np.ndarray] = {},
+        enable_ground: bool = False,
     ):
         vehicle_params = get_vehicle_params(vehicle)
         self._multirotor = get_multirotor_model(
             dynamics_type,
             vehicle_params,
             control_abstraction=control_abstraction,
+            enable_ground=enable_ground,
         )
 
-        if initial_state:
-            # Update keys, keeping rest of the initial state intact
-            for k, v in initial_state.items():
-                self._multirotor.initial_state[k] = v
-        self._last_control = self._default_control()
+        # a new dict: RotorPy shares its default initial_state between every vehicle
+        self._multirotor.initial_state = {
+            **self._multirotor.initial_state,
+            **{k: np.asarray(v, dtype=np.float64) for k, v in initial_state.items()},
+        }
+        self._last_control = self.default_control()
         self._state = self._multirotor.initial_state
+
+    def default_control(self) -> dict[str, np.ndarray | float]:
+        """Hover, or motors idle when the vehicle starts on the ground."""
+        control = self._default_control()
+        if self._multirotor._enable_ground:
+            for key in ("cmd_thrust", "cmd_motor_speeds", "cmd_motor_thrusts"):
+                if key in control:
+                    control[key] = control[key] * 0.0
+        return control
 
     def _default_control(self) -> dict[str, np.ndarray | float]:
         abstraction = getattr(
