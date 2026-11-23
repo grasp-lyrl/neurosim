@@ -26,12 +26,17 @@ def get_multirotor_model(
     dynamics_type: DynamicsType,
     vehicle_params: dict[str, Any],
     control_abstraction: str = "cmd_motor_speeds",
+    enable_ground: bool = False,
+    ground_height: float = 0.0,
 ) -> Multirotor:
+    if ground_height != 0.0 and dynamics_type != DynamicsType.ROTORPY_MULTIROTOR_EULER:
+        raise ValueError("ground_height is supported by rotorpy_multirotor_euler only")
     if dynamics_type == DynamicsType.ROTORPY_MULTIROTOR:
         quadsim = Multirotor(
             vehicle_params,
             control_abstraction=control_abstraction,
             aero=False,
+            enable_ground=enable_ground,
             integrator_kwargs={"method": "RK45"},
         )
     elif dynamics_type == DynamicsType.ROTORPY_MULTIROTOR_EULER:
@@ -41,6 +46,8 @@ def get_multirotor_model(
             vehicle_params,
             control_abstraction=control_abstraction,
             aero=False,
+            enable_ground=enable_ground,
+            ground_height=ground_height,
         )
     else:
         raise ValueError(f"Unsupported multirotor model: {dynamics_type}")
@@ -55,18 +62,27 @@ class RotorpyDynamics(DynamicsProtocol):
         dynamics_type: DynamicsType = DynamicsType.ROTORPY_MULTIROTOR,
         control_abstraction: str = "cmd_motor_speeds",
         initial_state: dict[str, np.ndarray] = {},
+        enable_ground: bool = False,
+        ground_height: float = 0.0,
     ):
         vehicle_params = get_vehicle_params(vehicle)
         self._multirotor = get_multirotor_model(
             dynamics_type,
             vehicle_params,
             control_abstraction=control_abstraction,
+            enable_ground=enable_ground,
+            ground_height=ground_height,
         )
+
+        m = self._multirotor
+        hover = np.sqrt(m.mass * m.g / (m.num_rotors * m.k_eta))
+        m.initial_state["rotor_speeds"] = np.full(m.num_rotors, hover)
 
         if initial_state:
             # Update keys, keeping rest of the initial state intact
             for k, v in initial_state.items():
-                self._multirotor.initial_state[k] = v
+                # YAML gives lists; the dynamics do array arithmetic on the state
+                self._multirotor.initial_state[k] = np.asarray(v, dtype=np.float64)
         self._last_control = self._default_control()
         self._state = self._multirotor.initial_state
 

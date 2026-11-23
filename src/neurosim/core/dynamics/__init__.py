@@ -39,6 +39,8 @@ def create_dynamics(
             dynamics_type=dynamics_type,
             initial_state=kwargs.get("initial_state", {}),
             control_abstraction=kwargs.get("control_abstraction", "cmd_motor_speeds"),
+            enable_ground=kwargs.get("enable_ground", False),
+            ground_height=kwargs.get("ground_height", 0.0),
         )
     else:
         raise ValueError(f"Unsupported dynamics type: {dynamics_type}")

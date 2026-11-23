@@ -3,8 +3,24 @@ from rotorpy.vehicles.multirotor import Multirotor
 
 
 class MultirotorEuler(Multirotor):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, ground_height: float = 0.0, **kwargs):
+        """ground_height: z of the ground plane (enable_ground), which rotorpy puts at 0."""
         super().__init__(*args, **kwargs)
+        self.ground_height = float(ground_height)
+
+    def _on_ground(self, state):
+        """On the ground plane and not climbing off it.
+
+        rotorpy's check is z <= 1 mm alone, and its ground handler then clamps z back to 0
+        but keeps the upward velocity: a vehicle climbing slower than 1 mm per step (1 m/s
+        at 1 kHz) never leaves the ground. A climbing vehicle is airborne.
+        """
+        return state["x"][2] <= self.ground_height + 0.001 and state["v"][2] <= 0.0
+
+    def _handle_vehicle_on_ground(self, state):
+        state = super()._handle_vehicle_on_ground(state)
+        state["x"][2] = self.ground_height  # rotorpy clamps to z = 0
+        return state
 
     def step(self, state, control, t_step):
         """
