@@ -7,7 +7,6 @@ import triton
 import triton.language as tl
 
 from neurosim.core.coord_trans.calibration import camera_matrix, distortion_coefficients
-from neurosim.core.utils import color2intensity
 
 TAPS = 3
 
@@ -15,13 +14,28 @@ TAPS = 3
 class Pinhole:
     """Habitat's own camera: the render is the sensor image."""
 
-    def __init__(self, cfg: dict, readout: str):
+    def __init__(self, cfg: dict, device: str, readout: str):
         self.resolution, self.hfov = (cfg["height"], cfg["width"]), cfg["hfov"]
-        self.readout = readout
+        self.read = self.as_is
+        if readout == "luma":
+            self.levels, self.read = linear_levels(device), self.luma
 
     def __call__(self, obs: torch.Tensor) -> torch.Tensor:
-        """What the sensor reads out: luma, or Habitat's observation as it is."""
-        return color2intensity(obs[..., :3] / 255.0) if self.readout == "luma" else obs
+        return self.read(obs)
+
+    def luma(self, obs: torch.Tensor) -> torch.Tensor:
+        """Luminance in linear light."""
+        h, w = obs.shape[:2]
+        out = torch.empty(h, w, dtype=torch.float32, device=obs.device)
+        with torch.cuda.device(obs.device):
+            _luma[(triton.cdiv(h * w, 256),)](
+                obs.view(torch.int32), self.levels, out, h * w, BLOCK=256
+            )
+        return out
+
+    @staticmethod
+    def as_is(obs: torch.Tensor) -> torch.Tensor:
+        return obs
 
 
 class Radtan:
@@ -60,20 +74,37 @@ class Radtan:
         nearest = np.rint(pos[:, :, taps * taps // 2]).astype(np.int64)
         index = nearest[..., 1] * self.resolution[1] + nearest[..., 0]
         self.index = torch.from_numpy(index).to(device)
-        self.readout = readout
+        self.read = {"nearest": self.nearest, "luma": self.luma, "rgba": self.rgba}[
+            readout
+        ]
+        if readout == "luma":
+            self.levels = linear_levels(device)
 
     def __call__(self, obs: torch.Tensor) -> torch.Tensor:
         """What the sensor reads out: luma, RGBA, or the nearest render value."""
-        if self.readout == "nearest":
-            return obs.reshape(-1, *obs.shape[2:])[self.index]
-        luma = self.readout == "luma"
+        return self.read(obs)
+
+    def nearest(self, obs: torch.Tensor) -> torch.Tensor:
+        return obs.reshape(-1, *obs.shape[2:])[self.index]
+
+    def luma(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.resample(obs, self.levels, torch.float32, luma=True)
+
+    def rgba(self, obs: torch.Tensor) -> torch.Tensor:
+        h, w = self.pos.shape[:2]
+        # Without LUMA the kernel reads no levels, so the render stands in for them.
+        out = self.resample(obs, obs, torch.int32, luma=False)
+        return out.view(torch.uint8).view(h, w, 4)
+
+    def resample(
+        self, obs: torch.Tensor, levels: torch.Tensor, dtype: torch.dtype, luma: bool
+    ) -> torch.Tensor:
         h, w, taps = self.pos.shape[:3]
-        out = torch.empty(
-            h, w, dtype=torch.float32 if luma else torch.int32, device=obs.device
-        )
+        out = torch.empty(h, w, dtype=dtype, device=obs.device)
         with torch.cuda.device(obs.device):
             _resample[(triton.cdiv(h * w, 256),)](
                 obs.view(torch.int32),
+                levels,
                 self.pos,
                 out,
                 h * w,
@@ -83,7 +114,7 @@ class Radtan:
                 LUMA=luma,
                 BLOCK=256,
             )
-        return out if luma else out.view(torch.uint8).view(h, w, 4)
+        return out
 
 
 def create_lens(cfg: dict, device: str, readout: str) -> Pinhole | Radtan:
@@ -93,13 +124,63 @@ def create_lens(cfg: dict, device: str, readout: str) -> Pinhole | Radtan:
             "a principal_point needs a distortion: Habitat's pinhole is centred"
         )
     return (
-        Radtan(cfg, device, readout) if "distortion" in cfg else Pinhole(cfg, readout)
+        Radtan(cfg, device, readout)
+        if "distortion" in cfg
+        else Pinhole(cfg, device, readout)
     )
+
+
+def linear_levels(device: str) -> torch.Tensor:
+    """The 256 8-bit sRGB levels in linear light, from the kernels' own _linear."""
+    levels = torch.empty(256, dtype=torch.float32, device=device)
+    with torch.cuda.device(levels.device):
+        _linear_levels[(1,)](levels, BLOCK=256)
+    return levels
+
+
+@triton.jit
+def _channel(p, shift: tl.constexpr):
+    """One 8-bit channel of packed RGBA pixels."""
+    return ((p >> shift) & 0xFF).to(tl.float32)
+
+
+@triton.jit
+def _linear(channel):
+    """An 8-bit sRGB channel value in linear light, in [0, 1]."""
+    v = channel / 255.0
+    return tl.where(v <= 0.04045, v / 12.92, tl.exp(2.4 * tl.log((v + 0.055) / 1.055)))
+
+
+@triton.jit
+def _linear_levels(out, BLOCK: tl.constexpr):
+    i = tl.arange(0, BLOCK)
+    tl.store(out + i, _linear(i.to(tl.float32)))
+
+
+@triton.jit
+def _level(levels, p, shift: tl.constexpr):
+    """One channel of packed RGBA pixels in linear light."""
+    return tl.load(levels + ((p >> shift) & 0xFF))
+
+
+@triton.jit
+def _luminance(r, g, b):
+    """Rec. 709 luminance of linear-light RGB."""
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+@triton.jit
+def _luma(rgba, levels, out, n, BLOCK: tl.constexpr):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    p = tl.load(rgba + i, mask=i < n)
+    rgb = _level(levels, p, 0), _level(levels, p, 8), _level(levels, p, 16)
+    tl.store(out + i, _luminance(*rgb), mask=i < n)
 
 
 @triton.jit
 def _resample(
     rgba,
+    levels,
     pos,
     out,
     n,
@@ -127,12 +208,21 @@ def _resample(
             yc = tl.minimum(y0 + c // 2, hr - 1)
             wc = (fx if c % 2 else 1 - fx) * (fy if c // 2 else 1 - fy)
             p = tl.load(rgba + yc * wr + xc, mask=mask, other=0)
-            r += wc * (p & 0xFF).to(tl.float32)
-            g += wc * ((p >> 8) & 0xFF).to(tl.float32)
-            b += wc * ((p >> 16) & 0xFF).to(tl.float32)
-            a += wc * ((p >> 24) & 0xFF).to(tl.float32)
+            if LUMA:
+                # Blend in linear light, the light a sensor integrates.
+                pr, pg, pb = (
+                    _level(levels, p, 0),
+                    _level(levels, p, 8),
+                    _level(levels, p, 16),
+                )
+            else:
+                pr, pg, pb = _channel(p, 0), _channel(p, 8), _channel(p, 16)
+            r += wc * pr
+            g += wc * pg
+            b += wc * pb
+            a += wc * _channel(p, 24)
     if LUMA:
-        luma = (0.2989 * r + 0.5870 * g + 0.1140 * b) / (255.0 * TAPS)
+        luma = _luminance(r, g, b) / TAPS
         tl.store(out + i, luma, mask=mask)
     else:
         r = (r / TAPS + 0.5).to(tl.int32)

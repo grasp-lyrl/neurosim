@@ -58,9 +58,15 @@ def test_resample_kernel_matches_grid_sample():
     ref = ref[0].unflatten(-1, (w, taps)).mean(-1).movedim(0, -1)
     err = (lens(rgba).float() - ref).abs().max().item()
     assert err <= 0.51, f"RGBA is {err:.2f} off grid_sample, beyond rounding"
-    rec601 = torch.tensor([0.2989, 0.5870, 0.1140], device="cuda")
+    srgb = rgba[..., :3].float() / 255
+    linear = torch.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+    lin_ref = F.grid_sample(
+        linear.movedim(-1, 0)[None], grid, padding_mode="border", align_corners=False
+    )
+    lin_ref = lin_ref[0].unflatten(-1, (w, taps)).mean(-1).movedim(0, -1)
+    rec709 = torch.tensor([0.2126, 0.7152, 0.0722], device="cuda")
     luma = Radtan(cfg, "cuda", "luma")(rgba)
-    torch.testing.assert_close(luma, ref[..., :3] @ rec601 / 255, rtol=0, atol=1e-4)
+    torch.testing.assert_close(luma, lin_ref @ rec709, rtol=0, atol=1e-4)
 
 
 @pytest.mark.skipif(not SCENE.exists(), reason="apartment_1 scene not available")
@@ -84,3 +90,20 @@ def test_zero_distortion_lens_sees_the_native_depth_camera():
     backend.close()
     assert native.max() > 0, "the camera sees nothing, so the comparison is empty"
     torch.testing.assert_close(lensed, native, rtol=1e-4, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_pinhole_luma_is_luminance_in_linear_light():
+    lens = create_lens(PINHOLE, "cuda", "luma")
+    obs = torch.zeros((480, 640, 4), dtype=torch.uint8, device="cuda")
+    obs[..., :3] = torch.tensor([128, 128, 128], dtype=torch.uint8)
+    obs[:, 320:, :3] = torch.tensor([255, 255, 0], dtype=torch.uint8)
+
+    luma = lens(obs)
+
+    assert luma[0, 0].item() == pytest.approx(0.2158, abs=1e-3), (
+        "sRGB 128 gray is 21.6% of white"
+    )
+    assert luma[0, 400].item() == pytest.approx(0.2126 + 0.7152, abs=1e-4), (
+        "yellow is red plus green"
+    )
